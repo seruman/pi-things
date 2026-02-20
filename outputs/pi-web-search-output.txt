@@ -1,0 +1,30 @@
+Bun, the high-performance JavaScript runtime, utilizes Zig for several key reasons, primarily centered around achieving exceptional speed, low-level control, and efficient memory management. This choice distinguishes it from other runtimes like Node.js, which is built on C++, and Deno, written in Rust.
+
+The core motivations for Bun's developers to choose Zig include:
+
+*   **Performance and Low-Level Control** Zig offers low-level control over system resources and memory, which is crucial for a runtime aiming for high performance. This control allows Bun to optimize memory allocations, deallocations, and reuse, contributing to its strong performance claims across various subsystems and APIs.
+*   **Efficient Memory Management** Zig facilitates manual memory management, providing developers with precise control over how memory is handled. This capability is vital for performance-critical applications like Bun, where minimizing overhead and maximizing efficiency are paramount.
+*   **Seamless C/C++ Interoperability** A significant portion of Bun's codebase involves integration with JavaScriptCore (its JavaScript engine) and other C/C++ libraries. Zig is designed with excellent C interoperability, making it simpler to call native libraries without the extensive boilerplate often required in other languages like Rust. This "minimal friction" C Foreign Function Interface (FFI) is a considerable advantage for a project that heavily relies on existing C infrastructure.
+*   **Developer Experience for Systems Programming** While Rust also offers performance and safety, Bun's creators found Zig to provide better ergonomics for tasks involving "unsafe" code and direct memory manipulation, which are common in a project requiring deep integration with C/C++ and striving for ultimate speed. For experienced developers working on large codebases focused on performance, Zig's approach of making costs visible and offering direct control can lead to faster iteration and development.
+*   **Avoiding Garbage Collection Overhead** Languages like Go, which use garbage collection (GC), were not considered suitable because co-locating multiple garbage-collected runtimes (Go's GC and JavaScriptCore's GC) within the same process would introduce significant latency and overhead. Bun's goal of being demonstrably faster than Node.js would be undermined by such GC-related delays.
+*   **Concerns with C++ and Swift** C++ was avoided due to the high probability of memory-related bugs, while Swift's support on Windows was questionable, making both less ideal choices for Bun's cross-platform ambitions and stability requirements.
+
+While some analysis suggests that Bun's performance gains in CPU-intensive tasks might be primarily attributed to JavaScriptCore's advantages over V8 (used by Node.js and Deno), Zig undeniably contributes significantly to Bun's efficiency in system-level operations like networking. The combination of Zig's capabilities and JavaScriptCore allows Bun to achieve its ambitious performance goals and serve as a "supercharged JavaScript runtime."
+
+---
+
+**Sources:**
+1. dev.to
+   https://dev.to/emesislol/bun-the-supercharged-javascript-runtime-54g4
+
+2. medium.com
+   https://medium.com/@techhara/is-bun-so-fast-because-of-zig-141571d846e1
+
+3. reddit.com
+   https://www.reddit.com/r/Zig/comments/16ho53m/why_did_the_bunjs_team_use_zig_to_create_bun/
+
+4. github.com
+   https://github.com/oven-sh/bun/discussions/994
+
+5. medium.com
+   https://medium.com/@dzianisv/software-engineering-typescript-bun-for-development-but-wait-its-built-in-zig-8f76c26c8664

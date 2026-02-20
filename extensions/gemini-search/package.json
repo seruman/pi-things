@@ -1,0 +1,26 @@
+{
+  "name": "pi-gemini-search",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Minimal pi extension providing web search via Gemini subscription auth",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "smoke": "./scripts/smoke.sh"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "dependencies": {
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@sinclair/typebox": "^0.34.41",
+    "@types/node": "^24.4.0",
+    "typescript": "^5.9.2"
+  }
+}
