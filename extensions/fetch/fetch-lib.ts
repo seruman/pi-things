@@ -64,7 +64,17 @@ export function generateId(): string {
 }
 
 function normalizeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  if (!(error instanceof Error)) return String(error);
+
+  // fetch() wraps the real error in .cause (e.g. DNS, TLS, connection errors)
+  const cause = (error as any).cause;
+  if (cause instanceof Error) {
+    const code = (cause as any).code;
+    const detail = code ? `${cause.message} (${code})` : cause.message;
+    return `${error.message}: ${detail}`;
+  }
+
+  return error.message;
 }
 
 function fallbackTitle(url: string): string {
@@ -192,10 +202,11 @@ export function summarizeFetchResults(results: FetchRecord[], responseId: string
 export async function fetchOne(url: string, signal: AbortSignal | undefined, timeoutMs = 30_000): Promise<FetchRecord> {
   const target = ensureHttpUrl(url.trim());
 
-  const lpRaw = await runLightpandaFetch(target, timeoutMs, signal);
-  if (lpRaw && lpRaw.length <= MAX_RESPONSE_BYTES) {
-    return extractContent(target, lpRaw);
+  const lp = await runLightpandaFetch(target, timeoutMs, signal);
+  if (lp.content && lp.content.length <= MAX_RESPONSE_BYTES) {
+    return extractContent(target, lp.content);
   }
+  const lpError = lp.error;
 
   const timeoutSignal = AbortSignal.timeout(timeoutMs);
   const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
@@ -236,11 +247,13 @@ export async function fetchOne(url: string, signal: AbortSignal | undefined, tim
 
     return extractContent(target, raw, contentType);
   } catch (error) {
+    let msg = normalizeError(error);
+    if (lpError) msg += ` (lightpanda: ${lpError})`;
     return {
       url: target,
       title: fallbackTitle(target),
       content: "",
-      error: normalizeError(error),
+      error: msg,
     };
   }
 }
