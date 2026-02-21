@@ -3,12 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Pi extensions: gemini-search and fetch",
+  "description": "Pi extensions: unified search and fetch",
   "keywords": ["pi-package"],
   "pi": {
     "extensions": [
-      "./extensions/gemini-search/index.ts",
-      "./extensions/fetch/index.ts"
+      "./extensions/fetch/index.ts",
+      "./extensions/search/index.ts"
     ]
   },
   "dependencies": {

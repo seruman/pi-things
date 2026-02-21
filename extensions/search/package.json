@@ -1,24 +1,21 @@
 {
-  "name": "pi-gemini-search",
+  "name": "pi-search",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Minimal pi extension providing web search via Gemini subscription auth",
+  "description": "Unified search extension with provider fallback",
   "scripts": {
     "check": "tsc --noEmit",
-    "typecheck": "tsc --noEmit",
-    "smoke": "./scripts/smoke.sh"
+    "typecheck": "tsc --noEmit"
   },
   "pi": {
     "extensions": [
       "./index.ts"
     ]
   },
-  "dependencies": {
-    "zod": "^3.24.1"
-  },
   "devDependencies": {
     "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*",
     "@sinclair/typebox": "^0.34.41",
     "@types/node": "^24.4.0",
     "typescript": "^5.9.2"

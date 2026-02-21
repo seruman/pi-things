@@ -12,11 +12,19 @@ export type ProgressDetails = {
   summary?: string;
   statusCode?: number;
   error?: string;
+  provider?: string;
 };
 
-export const webSearchParams = Type.Object({
+export const searchParams = Type.Object({
   query: Type.String({ description: "The search query" }),
-  debug: Type.Optional(Type.Boolean({ description: "Include raw Gemini output + transformed text for debugging" })),
+  providers: Type.Optional(
+    Type.Array(
+      Type.Union([Type.Literal("openai"), Type.Literal("gemini")]),
+      { minItems: 1, description: "Provider fallback order (default: [\"gemini\", \"openai\"])" },
+    ),
+  ),
+  live: Type.Optional(Type.Boolean({ description: "Use live web access when provider supports it (default: true)" })),
+  debug: Type.Optional(Type.Boolean({ description: "Include debug details in output" })),
 });
 
 function asErrorMessage(error: unknown): string {
@@ -68,13 +76,14 @@ export function renderToolResult(
   if (options.isPartial) {
     const label = details.label || "search";
     const phase = details.phase || "working";
+    const provider = details.provider ? ` · ${details.provider}` : "";
     const bar = progressBar(details.progress, 10);
-    let suffix = label;
+    let suffix = `${label}${provider}`;
     if (phase === "retrying" && details.attempt && details.maxRetries) {
       const why = details.reason ? ` · ${details.reason}` : "";
-      suffix = `${label} retry ${details.attempt}/${details.maxRetries}${why}`;
+      suffix = `${label}${provider} retry ${details.attempt}/${details.maxRetries}${why}`;
     } else if (phase === "streaming") {
-      suffix = `${label} streaming`;
+      suffix = `${label}${provider} streaming`;
     }
     return new Text(theme.fg("accent", `[${bar}] ${suffix}`), 0, 0);
   }
