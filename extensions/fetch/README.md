@@ -1,7 +1,36 @@
 # fetch
 
-Local fetch extension.
+Local browser-backed fetch extension. Extracts readable content from URLs.
 
-Tools:
-- `fetch_content` — fetch one or multiple URLs and extract readable content locally (tries Lightpanda first, then HTTP `fetch` with `text/markdown`/`text/plain` preference, then HTML extraction)
-- `get_fetch_content` — retrieve stored full content by `responseId` + `url/urlIndex`
+## Tools
+
+### `fetch_content`
+
+Fetch one or more URLs and extract readable content.
+
+```
+fetch_content({
+  url?: string,            // single URL to fetch
+  urls?: string[],         // multiple URLs to fetch
+  timeoutMs?: number,      // request timeout in ms (1000–120000, default 30000)
+})
+```
+
+- Tries Lightpanda first, falls back to HTTP fetch (prefers `text/markdown` / `text/plain` via Accept), then HTML extraction with Readability
+- Stores full content in memory, returns truncated inline preview + `responseId`
+- For multi-URL fetches, returns a summary table with per-URL status
+
+### `get_fetch_content`
+
+Retrieve full stored content from a previous `fetch_content` call.
+
+```
+get_fetch_content({
+  responseId: string,      // responseId from fetch_content result
+  url?: string,            // get content for this specific URL
+  urlIndex?: number,       // or get content by index
+})
+```
+
+- In-memory store; entries may expire or get evicted
+- If expired, re-run `fetch_content`
