@@ -4,7 +4,15 @@
   "private": true,
   "type": "module",
   "description": "Pi extensions: unified web tools",
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package"
+  ],
+  "scripts": {
+    "lint": "biome lint .",
+    "format": "biome format --write .",
+    "check": "biome check .",
+    "check:write": "biome check --write ."
+  },
   "pi": {
     "extensions": [
       "./extensions/web-tools/index.ts"
@@ -22,6 +30,7 @@
     "@sinclair/typebox": "*"
   },
   "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
     "@mariozechner/pi-coding-agent": "*",
     "@mariozechner/pi-tui": "*",
     "@sinclair/typebox": "^0.34.41",
