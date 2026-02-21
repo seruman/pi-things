@@ -1,5 +1,5 @@
-import type { AgentToolResult, Theme, ToolRenderResultOptions } from "@mariozechner/pi-coding-agent";
-import { Text } from "@mariozechner/pi-tui";
+import { getMarkdownTheme, keyHint, type AgentToolResult, type Theme, type ToolRenderResultOptions } from "@mariozechner/pi-coding-agent";
+import { Markdown, Text, type Component } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 
 export type ProgressDetails = {
@@ -14,7 +14,6 @@ export type ProgressDetails = {
   error?: string;
   provider?: string;
   query?: string;
-  sourceCount?: number;
   durationMs?: number;
 };
 
@@ -73,7 +72,7 @@ export function renderToolResult(
   result: AgentToolResult<ProgressDetails>,
   options: ToolRenderResultOptions,
   theme: Theme,
-): Text {
+): Component {
   const details = result.details;
 
   if (options.isPartial) {
@@ -115,15 +114,25 @@ export function renderToolResult(
     const query = (details.query || "").trim();
     const clippedQuery = query.length > 120 ? `${query.slice(0, 117)}...` : query;
     const metaParts: string[] = [];
-    if (typeof details.sourceCount === "number") metaParts.push(`${details.sourceCount} sources`);
     if (typeof details.durationMs === "number") metaParts.push(`${(details.durationMs / 1000).toFixed(1)}s`);
     const provider = details.provider ? ` · ${details.provider}` : "";
 
     const lines = [`${theme.fg("success", theme.bold("✓ done"))}${theme.fg("muted", provider)}`];
     if (clippedQuery) lines.push(theme.fg("dim", clippedQuery));
     if (metaParts.length) lines.push(theme.fg("dim", metaParts.join(" · ")));
+    lines.push(theme.fg("muted", keyHint("expandTools", "to expand")));
     return new Text(lines.join("\n"), 0, 0);
   }
 
-  return new Text(text, 0, 0);
+  const provider = details.provider ? ` · ${details.provider}` : "";
+  const duration =
+    typeof details.durationMs === "number" ? `${(details.durationMs / 1000).toFixed(1)}s` : undefined;
+  const query = (details.query || "").trim();
+
+  const headerLines = [`**✓ done${provider}**`];
+  if (query) headerLines.push(`Query: ${query}`);
+  if (duration) headerLines.push(`Duration: ${duration}`);
+
+  const markdown = `${headerLines.join("\n\n")}\n\n---\n\n${text}`;
+  return new Markdown(markdown, 0, 0, getMarkdownTheme());
 }

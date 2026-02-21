@@ -59,8 +59,8 @@ async function runSearchWithFallback(
 
 function formatSources(sources: Array<{ url: string; title?: string }>): string {
   if (!sources.length) return "";
-  const lines = sources.map((s, i) => `${i + 1}. [${s.title || s.url}](${s.url})`);
-  return `\n\n## Sources\n${lines.join("\n")}`;
+  const lines = sources.map((s, i) => `${i + 1}. ${s.url}`);
+  return `\n\nSources\n\n${lines.join("\n")}`;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -148,7 +148,7 @@ export default function (pi: ExtensionAPI) {
             summary: summarizeSearchResult(result.text),
             provider: result.provider,
             query: params.query,
-            sourceCount: result.sources.length,
+
             durationMs: Date.now() - startedAt,
           },
         };

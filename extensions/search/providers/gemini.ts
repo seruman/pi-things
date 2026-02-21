@@ -16,6 +16,8 @@ const MODEL = "gemini-2.5-flash";
 const TIMEOUT_MS = 60_000;
 const MAX_RETRIES = 3;
 const RETRY_BASE_MS = 1_000;
+const REDIRECT_RESOLVE_TIMEOUT_MS = 8_000;
+const GROUNDING_REDIRECT_HOST = "vertexaisearch.cloud.google.com";
 
 const credentialsSchema = z.object({
   token: z.string().min(1),
@@ -74,6 +76,21 @@ function parseErrorMessage(bodyText: string): string {
     if (typeof msg === "string") return msg;
   }
   return bodyText;
+}
+
+async function resolveSourceUrl(url: string, signal?: AbortSignal): Promise<string> {
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname !== GROUNDING_REDIRECT_HOST) return url;
+    const response = await fetch(url, {
+      method: "HEAD",
+      redirect: "follow",
+      signal: createRequestSignal(signal, REDIRECT_RESOLVE_TIMEOUT_MS),
+    });
+    return response.url || url;
+  } catch {
+    return url;
+  }
 }
 
 export const geminiProvider: SearchProvider = {
@@ -162,11 +179,18 @@ export const geminiProvider: SearchProvider = {
             const candidate = payload.response?.candidates?.[0] ?? payload.candidates?.[0];
             if (!candidate) return;
 
-            const snapshot = (candidate.content?.parts ?? [])
+            const chunkText = (candidate.content?.parts ?? [])
               .flatMap((part) => (typeof part.text === "string" ? [part.text] : []))
               .join("");
-            if (snapshot) {
-              latestText = snapshot;
+            if (chunkText) {
+              if (!latestText) {
+                latestText = chunkText;
+              } else if (chunkText.startsWith(latestText)) {
+                latestText = chunkText;
+              } else {
+                latestText += chunkText;
+              }
+
               const now = Date.now();
               if (now - lastRender > 200) {
                 input.onEvent?.({ type: "partial", provider: "gemini", text: latestText });
@@ -186,11 +210,23 @@ export const geminiProvider: SearchProvider = {
         const text = latestText.trim();
         if (!text) throw new Error("Gemini returned no text content");
 
+        const resolvedSources = await Promise.all(
+          Array.from(sourceMap.entries()).map(async ([url, title]) => ({
+            url: await resolveSourceUrl(url, input.signal),
+            title,
+          })),
+        );
+
+        const dedupedSources = new Map<string, string | undefined>();
+        for (const source of resolvedSources) {
+          if (!dedupedSources.has(source.url)) dedupedSources.set(source.url, source.title);
+        }
+
         return {
           provider: "gemini",
           text,
           model,
-          sources: Array.from(sourceMap.entries()).map(([url, title]) => ({ url, title })),
+          sources: Array.from(dedupedSources.entries()).map(([url, title]) => ({ url, title })),
         };
       },
     });
