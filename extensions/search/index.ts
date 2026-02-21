@@ -70,10 +70,11 @@ export default function (pi: ExtensionAPI) {
     description: "Search the web using available providers (OpenAI/Gemini) with automatic fallback.",
     parameters: searchParams,
     async execute(_toolCallId, params, signal, onUpdate, ctx: ExtensionContext) {
+      const startedAt = Date.now();
       try {
         onUpdate?.({
           content: [{ type: "text", text: "Searching…" }],
-          details: { phase: "search", progress: 0, label: "search" },
+          details: { phase: "search", progress: 0, label: "search", query: params.query },
         });
 
         const { result, failures } = await runSearchWithFallback(ctx, {
@@ -91,6 +92,7 @@ export default function (pi: ExtensionAPI) {
                   progress: 0.7,
                   label: "search",
                   provider: event.provider,
+                  query: params.query,
                   attempt: event.attempt,
                   maxRetries: event.maxRetries,
                   reason: event.reason,
@@ -102,7 +104,7 @@ export default function (pi: ExtensionAPI) {
             if (event.type === "partial") {
               onUpdate?.({
                 content: [{ type: "text", text: event.text || "Searching…" }],
-                details: { phase: "streaming", progress: 0.92, label: "search", provider: event.provider },
+                details: { phase: "streaming", progress: 0.92, label: "search", provider: event.provider, query: params.query },
               });
               return;
             }
@@ -114,6 +116,7 @@ export default function (pi: ExtensionAPI) {
                 progress: event.phase === "finalizing" ? 0.97 : 0.4,
                 label: "search",
                 provider: event.provider,
+                query: params.query,
               },
             });
           },
@@ -144,6 +147,9 @@ export default function (pi: ExtensionAPI) {
             label: "search",
             summary: summarizeSearchResult(result.text),
             provider: result.provider,
+            query: params.query,
+            sourceCount: result.sources.length,
+            durationMs: Date.now() - startedAt,
           },
         };
       } catch (error) {
@@ -157,6 +163,8 @@ export default function (pi: ExtensionAPI) {
             label: "search",
             statusCode: normalized.statusCode,
             summary: "Search failed",
+            query: params.query,
+            durationMs: Date.now() - startedAt,
           },
         };
       }

@@ -13,6 +13,9 @@ export type ProgressDetails = {
   statusCode?: number;
   error?: string;
   provider?: string;
+  query?: string;
+  sourceCount?: number;
+  durationMs?: number;
 };
 
 export const searchParams = Type.Object({
@@ -74,18 +77,26 @@ export function renderToolResult(
   const details = result.details;
 
   if (options.isPartial) {
-    const label = details.label || "search";
     const phase = details.phase || "working";
-    const provider = details.provider ? ` · ${details.provider}` : "";
+    const providerText = details.provider
+      ? theme.italic(theme.fg("accent", details.provider))
+      : theme.fg("muted", "auto");
+    const query = (details.query || "").trim();
+    const clippedQuery = query.length > 140 ? `${query.slice(0, 137)}...` : query;
+
     const bar = progressBar(details.progress, 10);
-    let suffix = `${label}${provider}`;
+    let state = phase;
     if (phase === "retrying" && details.attempt && details.maxRetries) {
       const why = details.reason ? ` · ${details.reason}` : "";
-      suffix = `${label}${provider} retry ${details.attempt}/${details.maxRetries}${why}`;
+      state = `retry ${details.attempt}/${details.maxRetries}${why}`;
     } else if (phase === "streaming") {
-      suffix = `${label}${provider} streaming`;
+      state = "streaming";
     }
-    return new Text(theme.fg("accent", `[${bar}] ${suffix}`), 0, 0);
+
+    const lines = [providerText];
+    if (clippedQuery) lines.push(theme.fg("dim", clippedQuery));
+    lines.push(theme.fg("accent", `[${bar}] ${state}`));
+    return new Text(lines.join("\n"), 0, 0);
   }
 
   if (details.error) {
@@ -101,9 +112,17 @@ export function renderToolResult(
   const text = firstTextContent(result) || "search completed";
 
   if (!options.expanded) {
-    const summary = details.summary || firstMeaningfulLine(text);
-    const clipped = summary.length > 120 ? `${summary.slice(0, 117)}...` : summary;
-    return new Text(`${theme.fg("success", theme.bold("✓ done"))}\n${theme.fg("dim", clipped)}`, 0, 0);
+    const query = (details.query || "").trim();
+    const clippedQuery = query.length > 120 ? `${query.slice(0, 117)}...` : query;
+    const metaParts: string[] = [];
+    if (typeof details.sourceCount === "number") metaParts.push(`${details.sourceCount} sources`);
+    if (typeof details.durationMs === "number") metaParts.push(`${(details.durationMs / 1000).toFixed(1)}s`);
+    const provider = details.provider ? ` · ${details.provider}` : "";
+
+    const lines = [`${theme.fg("success", theme.bold("✓ done"))}${theme.fg("muted", provider)}`];
+    if (clippedQuery) lines.push(theme.fg("dim", clippedQuery));
+    if (metaParts.length) lines.push(theme.fg("dim", metaParts.join(" · ")));
+    return new Text(lines.join("\n"), 0, 0);
   }
 
   return new Text(text, 0, 0);
