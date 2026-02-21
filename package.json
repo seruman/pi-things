@@ -3,12 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Pi extensions: unified search and fetch",
+  "description": "Pi extensions: unified web tools",
   "keywords": ["pi-package"],
   "pi": {
     "extensions": [
-      "./extensions/fetch/index.ts",
-      "./extensions/search/index.ts"
+      "./extensions/web-tools/index.ts"
     ]
   },
   "dependencies": {

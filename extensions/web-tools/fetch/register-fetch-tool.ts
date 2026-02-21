@@ -1,13 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import {
-  fetchOneHttp,
-  fetchOneRendered,
-  fetchParams,
-  MAX_INLINE_CONTENT,
-  type FetchDetails,
-  type FetchFormat,
-  type FetchMode,
-} from "./fetch-lib";
+import { MAX_INLINE_CONTENT, fetchParams, type FetchDetails, type FetchFormat, type FetchMode } from "./fetch-lib";
 import { renderFetchCall, renderFetchResult } from "./fetch-ui";
 
 type FetchExecutor = (
@@ -17,7 +9,7 @@ type FetchExecutor = (
   timeoutMs: number,
 ) => Promise<{ url: string; title: string; content: string; error: string | null }>;
 
-function registerFetchTool(
+export function registerFetchTool(
   pi: ExtensionAPI,
   config: {
     name: string;
@@ -74,25 +66,5 @@ function registerFetchTool(
     renderResult(result, opts, theme) {
       return renderFetchResult(result, opts, theme);
     },
-  });
-}
-
-export default function (pi: ExtensionAPI) {
-  registerFetchTool(pi, {
-    name: "fetch_content",
-    label: "Fetch Content",
-    description:
-      "Fetch URL content with regular HTTP and extract readable output. Supports format=auto|markdown|text|html and timeoutMs.",
-    mode: "http",
-    executeFetch: fetchOneHttp,
-  });
-
-  registerFetchTool(pi, {
-    name: "fetch_rendered",
-    label: "Fetch Rendered",
-    description:
-      "Fetch URL content through browser rendering (Lightpanda) and extract readable output. Supports format=auto|markdown|text|html and timeoutMs.",
-    mode: "rendered",
-    executeFetch: fetchOneRendered,
   });
 }

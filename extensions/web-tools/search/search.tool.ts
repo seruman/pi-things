@@ -52,9 +52,7 @@ async function runSearchWithFallback(
     }
   }
 
-  throw new Error(
-    `All search providers failed:\n${failures.map((f) => `${f.provider}: ${f.error}`).join("\n")}`,
-  );
+  throw new Error(`All search providers failed:\n${failures.map((f) => `${f.provider}: ${f.error}`).join("\n")}`);
 }
 
 function formatSources(sources: Array<{ url: string; title?: string }>): string {
@@ -63,10 +61,10 @@ function formatSources(sources: Array<{ url: string; title?: string }>): string 
   return `\n\nSources\n\n${lines.join("\n")}`;
 }
 
-export default function (pi: ExtensionAPI) {
+export function registerSearchTool(pi: ExtensionAPI) {
   pi.registerTool<typeof searchParams, ProgressDetails>({
-    name: "search",
-    label: "Search",
+    name: "web_search",
+    label: "Web Search",
     description: "Search the web using available providers (OpenAI/Gemini) with automatic fallback.",
     parameters: searchParams,
     async execute(_toolCallId, params, signal, onUpdate, ctx: ExtensionContext) {
@@ -124,9 +122,7 @@ export default function (pi: ExtensionAPI) {
 
         let content = `${result.text}${formatSources(result.sources)}`;
         if (params.debug) {
-          const failureLines = failures.length
-            ? failures.map((f) => `- ${f.provider}: ${f.error}`).join("\n")
-            : "- none";
+          const failureLines = failures.length ? failures.map((f) => `- ${f.provider}: ${f.error}`).join("\n") : "- none";
           content += [
             "",
             "---",
@@ -148,7 +144,6 @@ export default function (pi: ExtensionAPI) {
             summary: summarizeSearchResult(result.text),
             provider: result.provider,
             query: params.query,
-
             durationMs: Date.now() - startedAt,
           },
         };
