@@ -4,6 +4,9 @@ import { parseHTML } from "linkedom";
 import TurndownService from "turndown";
 import { runLightpandaFetch } from "./lightpanda";
 
+export type FetchMode = "http" | "rendered";
+export type FetchFormat = "auto" | "markdown" | "text" | "html";
+
 export type FetchRecord = {
   url: string;
   title: string;
@@ -11,69 +14,40 @@ export type FetchRecord = {
   error: string | null;
 };
 
-export type StoredFetchResult = {
-  id: string;
-  createdAt: number;
-  urls: FetchRecord[];
-};
-
 export type FetchDetails = {
   phase?: string;
   progress?: number;
-  responseId?: string;
-  urlCount?: number;
-  successful?: number;
+  mode?: FetchMode;
   title?: string;
   totalChars?: number;
-  urls?: string[];
   truncated?: boolean;
   durationMs?: number;
   error?: string;
 };
 
-export type GetFetchDetails = {
-  error?: string;
-  responseId?: string;
-  url?: string;
-  title?: string;
-  contentLength?: number;
-};
-
 export const MAX_INLINE_CONTENT = 30_000;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
-const STORE_TTL_MS = 60 * 60 * 1000;
-const MAX_STORED_RESULTS = 200;
 
 const turndown = new TurndownService({ headingStyle: "atx", codeBlockStyle: "fenced" });
-const store = new Map<string, StoredFetchResult>();
 
 export const fetchParams = Type.Object({
-  url: Type.Optional(Type.String({ description: "Single URL to fetch" })),
-  urls: Type.Optional(Type.Array(Type.String(), { description: "Multiple URLs to fetch" })),
+  url: Type.String({ description: "URL to fetch" }),
+  format: Type.Optional(
+    Type.Union([Type.Literal("auto"), Type.Literal("markdown"), Type.Literal("text"), Type.Literal("html")], {
+      description: "Output format (default: auto)",
+    }),
+  ),
   timeoutMs: Type.Optional(Type.Integer({ minimum: 1000, maximum: 120000, description: "Request timeout in ms" })),
 });
 
-export const getFetchParams = Type.Object({
-  responseId: Type.String({ description: "responseId from fetch_content" }),
-  url: Type.Optional(Type.String({ description: "Get content for this URL" })),
-  urlIndex: Type.Optional(Type.Number({ description: "Get content for URL at index" })),
-});
-
-export function generateId(): string {
-  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-}
-
 function normalizeError(error: unknown): string {
   if (!(error instanceof Error)) return String(error);
-
-  // fetch() wraps the real error in .cause (e.g. DNS, TLS, connection errors)
-  const cause = (error as any).cause;
+  const cause = (error as { cause?: unknown }).cause;
   if (cause instanceof Error) {
-    const code = (cause as any).code;
+    const code = (cause as { code?: string }).code;
     const detail = code ? `${cause.message} (${code})` : cause.message;
     return `${error.message}: ${detail}`;
   }
-
   return error.message;
 }
 
@@ -95,7 +69,17 @@ function ensureHttpUrl(input: string): string {
   return parsed.toString();
 }
 
-function titleFromMarkdown(markdown: string, url: string): string {
+function looksLikeHtml(text: string): boolean {
+  const head = text.slice(0, 1200).toLowerCase();
+  return head.includes("<!doctype html") || head.includes("<html") || head.includes("<body") || head.includes("<head");
+}
+
+function looksLikeMarkdown(text: string): boolean {
+  const head = text.slice(0, 1200);
+  return /^\s*#\s+\S+/m.test(head) || /^\s*[-*]\s+\S+/m.test(head) || /^\s*```/m.test(head) || /^\s*---\n/m.test(head);
+}
+
+function extractTitleFromMarkdown(markdown: string, url: string): string {
   const lines = markdown.split("\n");
   for (const line of lines) {
     const t = line.trim();
@@ -111,103 +95,71 @@ function titleFromMarkdown(markdown: string, url: string): string {
   return fallbackTitle(url);
 }
 
-function looksLikeHtml(text: string): boolean {
-  const head = text.slice(0, 1000).toLowerCase();
-  return head.includes("<!doctype html") || head.includes("<html") || head.includes("<body") || head.includes("<head");
-}
+function getHtmlViews(rawHtml: string, url: string): { title: string; markdown: string; text: string } {
+  const { document } = parseHTML(rawHtml);
 
-function looksLikeMarkdown(text: string): boolean {
-  const head = text.slice(0, 1000);
-  return /^\s*#\s+\S+/m.test(head) || /^\s*[-*]\s+\S+/m.test(head) || /^\s*```/m.test(head) || /^\s*---\n/m.test(head);
-}
-
-function extractContent(target: string, raw: string, contentType?: string): FetchRecord {
-  const normalizedType = (contentType || "").toLowerCase();
-
-  if (normalizedType.includes("text/markdown") || (!normalizedType && looksLikeMarkdown(raw) && !looksLikeHtml(raw))) {
+  const readability = new Readability(document);
+  const article = readability.parse();
+  if (article?.content) {
+    const markdown = turndown.turndown(article.content).trim();
+    const text = parseHTML(article.content).document.body?.textContent?.replace(/\s+/g, " ").trim() || "";
     return {
-      url: target,
-      title: titleFromMarkdown(raw, target),
-      content: raw,
-      error: null,
+      title: article.title?.trim() || document.title?.trim() || fallbackTitle(url),
+      markdown: markdown || rawHtml,
+      text: text || markdown || rawHtml,
     };
   }
 
-  if (normalizedType.startsWith("text/plain")) {
-    return {
-      url: target,
-      title: fallbackTitle(target),
-      content: raw,
-      error: null,
-    };
-  }
-
-  if (normalizedType.includes("text/html") || normalizedType.includes("application/xhtml+xml") || normalizedType === "" || looksLikeHtml(raw)) {
-    const { document } = parseHTML(raw);
-    const reader = new Readability(document);
-    const article = reader.parse();
-
-    if (article?.content) {
-      const markdown = turndown.turndown(article.content).trim();
-      return {
-        url: target,
-        title: article.title?.trim() || fallbackTitle(target),
-        content: markdown || raw,
-        error: null,
-      };
-    }
-  }
-
+  const markdown = turndown.turndown(rawHtml).trim();
+  const text = document.body?.textContent?.replace(/\s+/g, " ").trim() || "";
   return {
-    url: target,
-    title: fallbackTitle(target),
-    content: raw,
-    error: null,
+    title: document.title?.trim() || fallbackTitle(url),
+    markdown: markdown || rawHtml,
+    text: text || markdown || rawHtml,
   };
 }
 
-export function pruneStore(now = Date.now()): void {
-  for (const [id, entry] of store) {
-    if (now - entry.createdAt > STORE_TTL_MS) {
-      store.delete(id);
-    }
+function formatAcceptHeader(format: FetchFormat): string {
+  if (format === "markdown") return "text/markdown;q=1.0, text/x-markdown;q=0.9, text/plain;q=0.8, text/html;q=0.7, */*;q=0.1";
+  if (format === "text") return "text/plain;q=1.0, text/markdown;q=0.9, text/html;q=0.8, */*;q=0.1";
+  if (format === "html") return "text/html;q=1.0, application/xhtml+xml;q=0.9, text/plain;q=0.8, text/markdown;q=0.7, */*;q=0.1";
+  return "text/markdown;q=1.0, text/plain;q=0.9, text/html;q=0.8, application/xhtml+xml;q=0.7, */*;q=0.1";
+}
+
+function buildRecord(url: string, raw: string, contentType: string | undefined, format: FetchFormat): FetchRecord {
+  const normalizedType = (contentType || "").split(";")[0].trim().toLowerCase();
+  const isHtml = normalizedType.includes("text/html") || normalizedType.includes("application/xhtml+xml") || (!normalizedType && looksLikeHtml(raw));
+  const isMarkdown = normalizedType.includes("text/markdown") || (!normalizedType && looksLikeMarkdown(raw) && !isHtml);
+
+  if (format === "html") {
+    const title = isHtml ? getHtmlViews(raw, url).title : fallbackTitle(url);
+    return { url, title, content: raw, error: null };
   }
 
-  while (store.size > MAX_STORED_RESULTS) {
-    const oldestKey = store.keys().next().value;
-    if (typeof oldestKey !== "string") break;
-    store.delete(oldestKey);
+  if (isHtml) {
+    const html = getHtmlViews(raw, url);
+    if (format === "text") return { url, title: html.title, content: html.text, error: null };
+    return { url, title: html.title, content: html.markdown, error: null };
   }
-}
 
-export function putStoredFetch(result: StoredFetchResult): void {
-  store.set(result.id, result);
-}
+  if (format === "text") return { url, title: fallbackTitle(url), content: raw, error: null };
 
-export function getStoredFetch(responseId: string): StoredFetchResult | undefined {
-  return store.get(responseId);
-}
-
-export function summarizeFetchResults(results: FetchRecord[], responseId: string): string {
-  let summary = "## Fetched URLs\n\n";
-  for (const r of results) {
-    summary += r.error
-      ? `- ${r.url}: Error - ${r.error}\n`
-      : `- ${r.title || r.url} (${r.content.length} chars)\n`;
+  if (format === "markdown") {
+    if (isMarkdown) return { url, title: extractTitleFromMarkdown(raw, url), content: raw, error: null };
+    return { url, title: fallbackTitle(url), content: raw, error: null };
   }
-  summary += `\n---\nUse get_fetch_content({ responseId: \"${responseId}\", urlIndex: 0 }) to retrieve full content.`;
-  return summary;
+
+  if (isMarkdown) return { url, title: extractTitleFromMarkdown(raw, url), content: raw, error: null };
+  return { url, title: fallbackTitle(url), content: raw, error: null };
 }
 
-export async function fetchOne(url: string, signal: AbortSignal | undefined, timeoutMs = 30_000): Promise<FetchRecord> {
+export async function fetchOneHttp(
+  url: string,
+  format: FetchFormat,
+  signal: AbortSignal | undefined,
+  timeoutMs = 30_000,
+): Promise<FetchRecord> {
   const target = ensureHttpUrl(url.trim());
-
-  const lp = await runLightpandaFetch(target, timeoutMs, signal);
-  if (lp.content && lp.content.length <= MAX_RESPONSE_BYTES) {
-    return extractContent(target, lp.content);
-  }
-  const lpError = lp.error;
-
   const timeoutSignal = AbortSignal.timeout(timeoutMs);
   const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 
@@ -216,7 +168,7 @@ export async function fetchOne(url: string, signal: AbortSignal | undefined, tim
       signal: requestSignal,
       headers: {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "text/markdown, text/plain;q=0.95, text/html;q=0.9, application/xhtml+xml;q=0.85, application/json;q=0.8, */*;q=0.5",
+        "Accept": formatAcceptHeader(format),
       },
     });
 
@@ -226,34 +178,38 @@ export async function fetchOne(url: string, signal: AbortSignal | undefined, tim
 
     const contentLength = Number(response.headers.get("content-length") || "0");
     if (Number.isFinite(contentLength) && contentLength > MAX_RESPONSE_BYTES) {
-      return {
-        url: target,
-        title: fallbackTitle(target),
-        content: "",
-        error: `Response too large (${Math.round(contentLength / 1024 / 1024)}MB)`,
-      };
+      return { url: target, title: fallbackTitle(target), content: "", error: `Response too large (${Math.round(contentLength / 1024 / 1024)}MB)` };
     }
 
-    const contentType = (response.headers.get("content-type") || "").toLowerCase();
     const raw = await response.text();
-    if (raw.length > MAX_RESPONSE_BYTES) {
-      return {
-        url: target,
-        title: fallbackTitle(target),
-        content: "",
-        error: `Response too large (${Math.round(raw.length / 1024 / 1024)}MB)`,
-      };
+    const sizeBytes = Buffer.byteLength(raw, "utf8");
+    if (sizeBytes > MAX_RESPONSE_BYTES) {
+      return { url: target, title: fallbackTitle(target), content: "", error: `Response too large (${Math.round(sizeBytes / 1024 / 1024)}MB)` };
     }
 
-    return extractContent(target, raw, contentType);
+    return buildRecord(target, raw, response.headers.get("content-type") || undefined, format);
   } catch (error) {
-    let msg = normalizeError(error);
-    if (lpError) msg += ` (lightpanda: ${lpError})`;
-    return {
-      url: target,
-      title: fallbackTitle(target),
-      content: "",
-      error: msg,
-    };
+    return { url: target, title: fallbackTitle(target), content: "", error: normalizeError(error) };
   }
+}
+
+export async function fetchOneRendered(
+  url: string,
+  format: FetchFormat,
+  signal: AbortSignal | undefined,
+  timeoutMs = 30_000,
+): Promise<FetchRecord> {
+  const target = ensureHttpUrl(url.trim());
+  const lp = await runLightpandaFetch(target, timeoutMs, signal);
+
+  if (!lp.content) {
+    return { url: target, title: fallbackTitle(target), content: "", error: lp.error || "rendered fetch returned no content" };
+  }
+
+  const sizeBytes = Buffer.byteLength(lp.content, "utf8");
+  if (sizeBytes > MAX_RESPONSE_BYTES) {
+    return { url: target, title: fallbackTitle(target), content: "", error: `Response too large (${Math.round(sizeBytes / 1024 / 1024)}MB)` };
+  }
+
+  return buildRecord(target, lp.content, looksLikeHtml(lp.content) ? "text/html" : "text/plain", format);
 }

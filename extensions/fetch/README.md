@@ -1,36 +1,40 @@
 # fetch
 
-Local browser-backed fetch extension. Extracts readable content from URLs.
+Fetch web content with two explicit modes: regular HTTP and rendered/browser fetch.
 
 ## Tools
 
 ### `fetch_content`
 
-Fetch one or more URLs and extract readable content.
+Fetch a URL via regular HTTP and extract readable content.
 
-```
+```ts
 fetch_content({
-  url?: string,            // single URL to fetch
-  urls?: string[],         // multiple URLs to fetch
-  timeoutMs?: number,      // request timeout in ms (1000–120000, default 30000)
+  url: string,
+  format?: "auto" | "markdown" | "text" | "html", // default: "auto"
+  timeoutMs?: number,                             // 1000–120000, default: 30000
 })
 ```
 
-- Tries Lightpanda first, falls back to HTTP fetch (prefers `text/markdown` / `text/plain` via Accept), then HTML extraction with Readability
-- Stores full content in memory, returns truncated inline preview + `responseId`
-- For multi-URL fetches, returns a summary table with per-URL status
+Behavior:
+- Uses standard HTTP fetch
+- Negotiates content type with `Accept` headers
+- Extracts readable output from HTML (Readability + Turndown)
+- No caching/state between calls
 
-### `get_fetch_content`
+### `fetch_rendered`
 
-Retrieve full stored content from a previous `fetch_content` call.
+Fetch a URL through browser rendering (Lightpanda) and extract readable content.
 
-```
-get_fetch_content({
-  responseId: string,      // responseId from fetch_content result
-  url?: string,            // get content for this specific URL
-  urlIndex?: number,       // or get content by index
+```ts
+fetch_rendered({
+  url: string,
+  format?: "auto" | "markdown" | "text" | "html", // default: "auto"
+  timeoutMs?: number,                             // 1000–120000, default: 30000
 })
 ```
 
-- In-memory store; entries may expire or get evicted
-- If expired, re-run `fetch_content`
+Behavior:
+- Uses rendered/browser fetch path for JS-heavy pages
+- Applies the same output formatting options as `fetch_content`
+- No caching/state between calls
