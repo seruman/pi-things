@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent"
 import { geminiProvider } from "./providers/gemini"
 import { openaiProvider } from "./providers/openai"
-import { normalizeError, type ProgressDetails, renderToolResult, searchParams, summarizeSearchResult } from "./tool-ui"
+import { type ProgressDetails, normalizeError, renderToolResult, searchParams, summarizeSearchResult } from "./tool-ui"
 import type { SearchAttemptFailure, SearchProvider, SearchProviderId, SearchResult, SearchRunInput } from "./types"
 
 const providers: Record<SearchProviderId, SearchProvider> = {

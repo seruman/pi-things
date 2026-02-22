@@ -1,9 +1,9 @@
 import {
 	type AgentToolResult,
-	getMarkdownTheme,
-	keyHint,
 	type Theme,
 	type ToolRenderResultOptions,
+	getMarkdownTheme,
+	keyHint,
 } from "@mariozechner/pi-coding-agent"
 import { type Component, Markdown, Text } from "@mariozechner/pi-tui"
 import { Type } from "@sinclair/typebox"

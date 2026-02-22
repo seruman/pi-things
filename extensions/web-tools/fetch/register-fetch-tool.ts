@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent"
-import { type FetchDetails, type FetchFormat, type FetchMode, fetchParams, MAX_INLINE_CONTENT } from "./fetch-lib"
+import { type FetchDetails, type FetchFormat, type FetchMode, MAX_INLINE_CONTENT, fetchParams } from "./fetch-lib"
 import { renderFetchCall, renderFetchResult } from "./fetch-ui"
 
 type FetchExecutor = (

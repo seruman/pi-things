@@ -4,9 +4,7 @@
   "private": true,
   "type": "module",
   "description": "Pi extensions: unified web tools",
-  "keywords": [
-    "pi-package"
-  ],
+  "keywords": ["pi-package"],
   "scripts": {
     "lint": "biome lint .",
     "format": "biome format --write .",
@@ -14,9 +12,7 @@
     "check:write": "biome check --write ."
   },
   "pi": {
-    "extensions": [
-      "./extensions/web-tools/index.ts"
-    ]
+    "extensions": ["./extensions/web-tools/index.ts"]
   },
   "dependencies": {
     "@mozilla/readability": "^0.6.0",
