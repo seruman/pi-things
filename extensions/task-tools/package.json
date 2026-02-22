@@ -1,0 +1,10 @@
+{
+  "name": "pi-task-tools",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Persistent task tracking extension with SQLite storage",
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}
