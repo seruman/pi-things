@@ -10,7 +10,7 @@ Search the web with provider fallback.
 
 **Requirements**
 
-- At least one authenticated search provider in Pi:
+- At least one authenticated Pi provider configured for this tool:
   - `google-gemini-cli` (Gemini)
   - `openai-codex` (OpenAI Codex)
 - If both are configured, fallback order is `gemini` → `openai` (unless overridden via `providers`).
