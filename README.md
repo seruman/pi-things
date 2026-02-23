@@ -5,6 +5,7 @@ Me just prompting the shit out of LLMs to create things I want in pi.
 ## Things
 
 - [web-tools](./extensions/web-tools/README.md)
+- [task-tools](./extensions/task-tools/README.md)
 
 ## Install
 

@@ -1,0 +1,13 @@
+{
+  "name": "pi-task-tools",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Persistent task tracking extension with markdown + YAML storage",
+  "dependencies": {
+    "yaml": "^2.8.1"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}
