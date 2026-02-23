@@ -25,25 +25,28 @@ function loadTasks(ctx: ExtensionContext): { tasks: Task[]; issues: Array<{ file
 }
 
 function widgetLine(tasks: Task[], theme: Theme, sessionId?: string): string {
-	if (!tasks.length) return theme.fg("dim", "Tasks: none")
+	const openTasks = tasks.filter((t) => t.status !== "completed")
+	if (!openTasks.length) return theme.fg("dim", "Tasks: none active")
 
-	const total = tasks.length
 	const myInProgress = sessionId
-		? tasks.filter((t) => t.status === "in_progress" && t.owner === sessionId)
-		: tasks.filter((t) => t.status === "in_progress")
-	const otherInProgress = sessionId ? tasks.filter((t) => t.status === "in_progress" && t.owner !== sessionId) : []
-	const pending = tasks.filter((t) => t.status === "pending").length
-	const completed = tasks.filter((t) => t.status === "completed").length
-	const assigned = sessionId ? tasks.filter((t) => t.owner === sessionId) : []
+		? openTasks.filter((t) => t.status === "in_progress" && t.owner === sessionId)
+		: openTasks.filter((t) => t.status === "in_progress")
+	const otherInProgress = sessionId ? openTasks.filter((t) => t.status === "in_progress" && t.owner !== sessionId) : []
+	const pending = openTasks.filter((t) => t.status === "pending").length
+	const assigned = sessionId ? openTasks.filter((t) => t.owner === sessionId) : []
 
-	const parts: string[] = [theme.fg("muted", `Tasks: ${total}`)]
+	const parts: string[] = [theme.fg("muted", `Tasks: ${openTasks.length} active`)]
 	if (myInProgress.length) {
-		const names = myInProgress.map((t) => `#${t.id} ${t.subject}`).join(", ")
+		const names = myInProgress
+			.map((t) => {
+				const label = t.activeForm || `#${t.id} ${t.subject}`
+				return label
+			})
+			.join(", ")
 		parts.push(theme.fg("warning", `▶ ${names}`))
 	}
 	if (otherInProgress.length) parts.push(theme.fg("dim", `${otherInProgress.length} active elsewhere`))
 	if (pending) parts.push(theme.fg("dim", `${pending} pending`))
-	if (completed) parts.push(theme.fg("success", `${completed} done`))
 	if (assigned.length)
 		parts.push(
 			`${theme.fg("dim", "assigned ")}${assigned.map((t) => theme.fg("accent", `#${t.id}`)).join(theme.fg("dim", ", "))}`,
@@ -61,6 +64,24 @@ function statusIcon(status: string, theme: Theme): string {
 		default:
 			return theme.fg("dim", "○")
 	}
+}
+
+function sortTasksForDisplay(tasks: Task[]): Task[] {
+	const rank = (status: Task["status"]) => {
+		switch (status) {
+			case "in_progress":
+				return 0
+			case "pending":
+				return 1
+			case "completed":
+				return 2
+		}
+	}
+	return [...tasks].sort((a, b) => {
+		const r = rank(a.status) - rank(b.status)
+		if (r !== 0) return r
+		return a.id - b.id
+	})
 }
 
 class TaskListComponent implements Component {
@@ -186,13 +207,14 @@ class TaskListComponent implements Component {
 				const id = th.fg("accent", `#${t.id}`)
 				const subjectColor = t.status === "completed" ? "dim" : t.status === "in_progress" ? "warning" : "muted"
 				const subject = th.fg(subjectColor, t.subject)
+				const activeForm = t.status === "in_progress" && t.activeForm ? ` ${th.fg("warning", `(${t.activeForm})`)}` : ""
 				const blocked = t.blockedBy.length
 					? ` ${th.fg("error", "(blocked by ")}${t.blockedBy.map((b) => th.fg("accent", `#${b}`)).join(th.fg("error", ", "))}${th.fg("error", ")")}`
 					: ""
 				const owner = th.fg("dim", ownerAssignedSuffix(t.owner, this.sessionId))
 				const pointer = idx === this.selected ? th.fg("accent", "> ") : "  "
 
-				lines.push(truncateToWidth(`  ${pointer}${icon} ${id} ${subject}${owner}${blocked}`, width))
+				lines.push(truncateToWidth(`  ${pointer}${icon} ${id} ${subject}${activeForm}${owner}${blocked}`, width))
 			}
 		}
 
@@ -224,6 +246,8 @@ class TaskListComponent implements Component {
 		} else {
 			lines.push(truncateToWidth(`  ${th.bold("Subject:")} ${task.subject || "-"}`, width))
 			lines.push(truncateToWidth(`  ${th.bold("Status:")} ${task.status}`, width))
+			if (task.activeForm)
+				lines.push(truncateToWidth(`  ${th.bold("Activity:")} ${th.fg("warning", task.activeForm)}`, width))
 			const ownerText = ownerDisplay(task.owner, this.sessionId, { none: "-", includeCurrentSessionId: true })
 			lines.push(truncateToWidth(`  ${th.bold("Owner:")} ${ownerText}`, width))
 			lines.push(
@@ -310,17 +334,30 @@ export default function (pi: ExtensionAPI) {
 		description: "Show all tasks",
 		handler: async (_args, ctx) => {
 			const { tasks, issues } = loadTasks(ctx)
+			const sortedTasks = sortTasksForDisplay(tasks)
 			if (!ctx.hasUI) {
-				if (!tasks.length) {
+				if (!sortedTasks.length) {
 					console.log("No tasks")
 				} else {
-					for (const task of tasks) {
-						const blocked = task.blockedBy.length
-							? ` [blocked by ${task.blockedBy.map((id) => `#${id}`).join(", ")}]`
-							: ""
-						const sessionId = ctx.sessionManager.getSessionId?.()
-						const owner = ownerAssignedSuffix(task.owner, sessionId)
-						console.log(`#${task.id} [${task.status}] ${task.subject}${owner}${blocked}`)
+					const inProgress = sortedTasks.filter((t) => t.status === "in_progress").length
+					const completed = sortedTasks.filter((t) => t.status === "completed").length
+					const pending = sortedTasks.filter((t) => t.status === "pending").length
+					console.log(`${sortedTasks.length} tasks (${completed} done, ${inProgress} in progress, ${pending} open)`)
+
+					const sessionId = ctx.sessionManager.getSessionId?.()
+					for (const task of sortedTasks) {
+						const owner = task.owner ? ` (@${ownerDisplay(task.owner, sessionId)})` : ""
+						if (task.status === "completed") {
+							console.log(`✔ ${task.subject}${owner}`)
+						} else if (task.status === "in_progress") {
+							console.log(`◼ ${task.subject}${owner}`)
+							if (task.activeForm) console.log(`  ${task.activeForm}…`)
+						} else {
+							const blocked = task.blockedBy.length
+								? ` › blocked by ${task.blockedBy.map((id) => `#${id}`).join(", ")}`
+								: ""
+							console.log(`◻ ${task.subject}${owner}${blocked}`)
+						}
 					}
 				}
 				if (issues.length) {
@@ -344,7 +381,7 @@ export default function (pi: ExtensionAPI) {
 					`clarify task #${task.id} "${task.subject}". Refine scope, acceptance criteria, dependencies, and concrete next actions.`
 
 				const component = new TaskListComponent(
-					tasks,
+					sortedTasks,
 					theme,
 					() => done(),
 					(task) => {

@@ -1,0 +1,10 @@
+{
+  "name": "pi-subagent-tools",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Parallel subagent orchestration for pi",
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}

@@ -96,8 +96,9 @@ export function renderTaskResult(
 			const lines = [
 				`${statusIcon(t.status, theme)} ${theme.fg("accent", theme.bold(`Task #${t.id}`))} ${statusColor(t.status, theme, t.subject)}`,
 				`  ${theme.fg("dim", "Status:")} ${statusColor(t.status, theme, t.status)}`,
-				`  ${theme.fg("dim", "Description:")} ${theme.fg("muted", t.description)}`,
 			]
+			if (t.activeForm) lines.push(`  ${theme.fg("dim", "Activity:")} ${theme.fg("warning", t.activeForm)}`)
+			lines.push(`  ${theme.fg("dim", "Description:")} ${theme.fg("muted", t.description)}`)
 			if (t.owner)
 				lines.push(
 					`  ${theme.fg("dim", "Owner:")} ${theme.fg("muted", ownerDisplay(t.owner, d.currentSessionId, { includeCurrentSessionId: true }))}`,
@@ -138,31 +139,35 @@ export function renderTaskResult(
 				)
 			}
 
-			const lines: string[] = [`Tasks: ${summary}`, ""]
+			const lines: string[] = []
+			const title = `${c.total} tasks (${c.completed} done, ${c.inProgress} in progress, ${c.pending} open)`
+			lines.push(theme.fg("muted", title))
+			lines.push("")
+
+			for (const t of [...d.tasks].sort((a, b) => {
+				const rank = (s: string) => (s === "in_progress" ? 0 : s === "pending" ? 1 : 2)
+				const r = rank(a.status) - rank(b.status)
+				if (r !== 0) return r
+				return a.id - b.id
+			})) {
+				const owner = t.owner ? ` ${theme.fg("dim", `(@${ownerDisplay(t.owner, d.currentSessionId)})`)}` : ""
+				const blocked = t.blockedBy.length
+					? `${theme.fg("dim", " › blocked by ")}${t.blockedBy.map((id) => theme.fg("accent", `#${id}`)).join(theme.fg("dim", ", "))}`
+					: ""
+
+				if (t.status === "completed") {
+					lines.push(`${theme.fg("success", "✔")} ${theme.fg("muted", t.subject)}${owner}`)
+				} else if (t.status === "in_progress") {
+					lines.push(`${theme.fg("warning", "◼")} ${theme.fg("warning", t.subject)}${owner}`)
+					if (t.activeForm) lines.push(`  ${theme.fg("warning", t.activeForm)}…`)
+				} else {
+					lines.push(`${theme.fg("dim", "◻")} ${theme.fg("muted", t.subject)}${owner}${blocked}`)
+				}
+			}
+
 			if (d.issues?.length) {
-				lines.push(theme.fg("warning", `Skipped ${d.issues.length} broken task file(s):`))
-				for (const issue of d.issues.slice(0, 5)) lines.push(`  - ${issue.file}: ${issue.error}`)
-				if (d.issues.length > 5) lines.push(`  - ...and ${d.issues.length - 5} more`)
 				lines.push("")
-			}
-
-			const inProgress = d.tasks.filter((t) => t.status === "in_progress")
-			const pending = d.tasks.filter((t) => t.status === "pending")
-			const completed = d.tasks.filter((t) => t.status === "completed")
-
-			if (inProgress.length) {
-				lines.push(theme.fg("warning", theme.bold("In Progress")))
-				for (const t of inProgress) lines.push(`  ${taskLine(t, theme, d.currentSessionId)}`)
-				lines.push("")
-			}
-			if (pending.length) {
-				lines.push(theme.fg("muted", theme.bold("Pending")))
-				for (const t of pending) lines.push(`  ${taskLine(t, theme, d.currentSessionId)}`)
-				lines.push("")
-			}
-			if (completed.length) {
-				lines.push(theme.fg("success", theme.bold("Completed")))
-				for (const t of completed) lines.push(`  ${taskLine(t, theme, d.currentSessionId)}`)
+				lines.push(theme.fg("warning", `Skipped ${d.issues.length} broken task file(s)`))
 			}
 
 			return new Text(lines.join("\n"), 0, 0)
