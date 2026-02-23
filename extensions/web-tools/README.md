@@ -8,6 +8,18 @@ Unified web extension for search and fetch tooling.
 
 Search the web with provider fallback.
 
+**Requirements**
+
+- At least one authenticated search provider in Pi:
+  - `google-gemini-cli` (Gemini)
+  - `openai-codex` (OpenAI Codex)
+- If both are configured, fallback order is `gemini` → `openai` (unless overridden via `providers`).
+
+**Provider/model mapping**
+
+- `gemini` provider (`google-gemini-cli`): `gemini-2.5-flash`
+- `openai` provider (`openai-codex`): `gpt-5.3-codex`
+
 ```ts
 web_search({
   query: string,
@@ -21,6 +33,10 @@ web_search({
 
 Fetch URL content via regular HTTP.
 
+**Requirements**
+
+- No additional setup.
+
 ```ts
 web_fetch({
   url: string,
@@ -32,6 +48,10 @@ web_fetch({
 ### `web_fetch_rendered`
 
 Fetch URL content via rendered/browser path (Lightpanda).
+
+**Requirements**
+
+- [`lightpanda`](https://github.com/lightpanda-io/browser) installed and available in your `PATH`.
 
 ```ts
 web_fetch_rendered({
