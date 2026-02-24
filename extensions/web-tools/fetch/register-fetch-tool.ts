@@ -61,7 +61,7 @@ export function registerFetchTool(
 			}
 		},
 		renderCall(args, theme) {
-			return renderFetchCall(args, theme)
+			return renderFetchCall(args, theme, config.name)
 		},
 		renderResult(result, opts, theme) {
 			return renderFetchResult(result, opts, theme)

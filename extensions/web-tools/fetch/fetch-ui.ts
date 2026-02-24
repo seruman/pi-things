@@ -34,13 +34,13 @@ export function renderFetchResult(
 	return new Text(`${status}\n${theme.fg("dim", preview)}`, 0, 0)
 }
 
-export function renderFetchCall(args: Record<string, unknown>, theme: Theme): Text {
+export function renderFetchCall(args: Record<string, unknown>, theme: Theme, toolName = "web_fetch"): Text {
 	const url = typeof args.url === "string" ? args.url : ""
 	const format = typeof args.format === "string" ? args.format : "auto"
-	if (!url) return new Text(theme.fg("toolTitle", theme.bold("fetch ")) + theme.fg("error", "(no URL)"), 0, 0)
+	if (!url) return new Text(theme.fg("toolTitle", theme.bold(`${toolName} `)) + theme.fg("error", "(no URL)"), 0, 0)
 	const display = url.length > 80 ? `${url.slice(0, 77)}...` : url
 	return new Text(
-		theme.fg("toolTitle", theme.bold("fetch ")) + theme.fg("accent", display) + theme.fg("muted", ` (${format})`),
+		theme.fg("toolTitle", theme.bold(`${toolName} `)) + theme.fg("accent", display) + theme.fg("muted", ` (${format})`),
 		0,
 		0,
 	)
