@@ -6,6 +6,7 @@ Me just prompting the shit out of LLMs to create things I want in pi.
 
 - [web-tools](./extensions/web-tools/README.md)
 - [task-tools](./extensions/task-tools/README.md)
+- [subagent-tools](./extensions/subagent-tools/README.md)
 
 ## Install
 
