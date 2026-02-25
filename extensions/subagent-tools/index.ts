@@ -235,7 +235,9 @@ function progress(mode: Details["mode"], results: TaskResult[]) {
 	const done = results.filter((item) => item.exitCode !== -1).length;
 	const running = results.length - done;
 	const failed = results.filter((item) => item.exitCode > 0).length;
-	const head = `${mode} ${results.length} agents  ${done} done · ${running} running · ${failed} failed`;
+	const usage = formatUsage(totalUsage(results));
+	const usageText = usage ? ` · ${running > 0 ? `live ${usage}` : usage}` : "";
+	const head = `${mode} ${results.length} agents  ${done} done · ${running} running · ${failed} failed${usageText}`;
 	const tick = Date.now();
 	const rows = results.map((item, index) => {
 		const isLast = index === results.length - 1;
@@ -1033,7 +1035,8 @@ export default function (pi: ExtensionAPI) {
 				const doneCount = data.results.filter((entry) => entry.exitCode === 0).length;
 				const failedCount = data.results.filter((entry) => entry.exitCode > 0).length;
 				const runningCount = data.results.length - doneCount - failedCount;
-				const summary = theme.fg("dim", `total ${doneCount} done · ${runningCount} running · ${failedCount} failed${done && total ? ` · ${total}` : ""}`);
+				const liveTotal = total ? ` · ${done ? total : `live ${total}`}` : "";
+				const summary = theme.fg("dim", `total ${doneCount} done · ${runningCount} running · ${failedCount} failed${liveTotal}`);
 				return new Text([summary, ...rows].join("\n"), 0, 0);
 			}
 
@@ -1066,8 +1069,8 @@ export default function (pi: ExtensionAPI) {
 				if (entry.outputPath) box.addChild(new Text(theme.fg("dim", `${continuePrefix}↳ artifact: ${entry.outputPath}`), 0, 0));
 				box.addChild(new Spacer(1));
 			}
-			if (done && total) {
-				box.addChild(new Text(theme.fg("toolTitle", theme.bold("Total")), 0, 0));
+			if (total) {
+				box.addChild(new Text(theme.fg("toolTitle", theme.bold(done ? "Total" : "Live total")), 0, 0));
 				box.addChild(new Text(theme.fg("dim", total), 0, 0));
 			}
 			return box;
