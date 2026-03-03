@@ -13,7 +13,12 @@
     "check:write": "biome check --write ."
   },
   "pi": {
-    "extensions": ["./extensions/web-tools/index.ts", "./extensions/task-tools/index.ts", "./extensions/subagent-tools/index.ts"],
+    "extensions": [
+      "./extensions/web-tools/index.ts",
+      "./extensions/task-tools/index.ts",
+      "./extensions/subagent-tools/index.ts",
+      "./extensions/transcript-export/index.ts"
+    ],
     "prompts": ["./extensions/subagent-tools/prompts"]
   },
   "dependencies": {
