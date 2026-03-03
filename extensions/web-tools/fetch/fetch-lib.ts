@@ -2,6 +2,7 @@ import { Readability } from "@mozilla/readability"
 import { Type } from "@sinclair/typebox"
 import { parseHTML } from "linkedom"
 import TurndownService from "turndown"
+import { gfm } from "turndown-plugin-gfm"
 import { runLightpandaFetch } from "./lightpanda"
 
 export type FetchMode = "http" | "rendered"
@@ -31,6 +32,7 @@ export const MAX_INLINE_CONTENT = 30_000
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 
 const turndown = new TurndownService({ headingStyle: "atx", codeBlockStyle: "fenced" })
+turndown.use(gfm)
 turndown.addRule("removeEmptyLinks", {
 	filter: (node) => node.nodeName === "A" && !node.textContent?.trim(),
 	replacement: () => "",
