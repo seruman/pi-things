@@ -10,12 +10,19 @@ Primary web search using Brave Search API.
 
 **Requirements**
 
-- `BRAVE_API_KEY` environment variable set.
+- Set either `BRAVE_SEARCH_API_KEY` (preferred) or `BRAVE_API_KEY`.
+
+**Notes**
+
+- Use exactly one of `query` or `queries`.
+- `web_search` does not auto-fallback; call `web_search_fallback` if Brave is unavailable.
+- In batch mode, output is grouped per query.
 
 ```ts
 web_search({
-  query: string,
-  count?: number,                 // 1..20 (default 5)
+  query?: string,
+  queries?: string[],             // batch mode (max 8)
+  count?: number,                 // results per query: 1..20 (default 5; batch default 3)
   offset?: number,                // 0..9
   country?: string,               // default: "US"
   freshness?: string,             // pd|pw|pm|py|YYYY-MM-DDtoYYYY-MM-DD
@@ -24,6 +31,7 @@ web_search({
   safesearch?: "off" | "moderate" | "strict",
   extraSnippets?: boolean,
   goggles?: string[],
+  concurrency?: number,           // batch query concurrency (default 3)
   debug?: boolean,
 })
 ```

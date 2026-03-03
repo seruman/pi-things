@@ -5,6 +5,15 @@ import { braveSearchParams, normalizeError, renderToolResult, type ProgressDetai
 
 type RetryableError = Error & { retryable?: boolean }
 
+type QueryResult = {
+	query: string
+	results: BraveWebResult[]
+	moreResultsAvailable: boolean
+	error?: string
+}
+
+const MAX_TOTAL_OUTPUT_CHARS = 120_000
+
 const braveWebResultSchema = z
 	.object({
 		title: z.string().optional(),
@@ -25,7 +34,6 @@ const braveResponseSchema = z
 type BraveWebResult = z.infer<typeof braveWebResultSchema>
 type BraveResponse = z.infer<typeof braveResponseSchema>
 
-
 function clip(text: string, maxChars: number): string {
 	if (text.length <= maxChars) return text
 	return `${text.slice(0, Math.max(0, maxChars - 3)).trimEnd()}...`
@@ -35,9 +43,17 @@ function clean(text: string): string {
 	return text.replace(/\s+/g, " ").trim()
 }
 
-function formatResultBlocks(results: BraveWebResult[], includeExtraSnippets: boolean): string {
-	const lines: string[] = []
+function normalizeQueries(input: { query?: string; queries?: string[] }): string[] {
+	const single = typeof input.query === "string" ? input.query.trim() : ""
+	const many = Array.isArray(input.queries) ? input.queries.map((q) => q.trim()).filter(Boolean) : []
 
+	if (single && many.length) throw new Error("Provide either query or queries, not both")
+	if (!single && !many.length) throw new Error("Provide query or queries")
+	return single ? [single] : many
+}
+
+function formatSingleResultBlocks(results: BraveWebResult[], includeExtraSnippets: boolean): string {
+	const lines: string[] = []
 	for (const [index, item] of results.entries()) {
 		const title = clean(item.title || item.url || "Untitled")
 		const url = clean(item.url || "")
@@ -60,7 +76,39 @@ function formatResultBlocks(results: BraveWebResult[], includeExtraSnippets: boo
 
 		lines.push("")
 	}
+	return lines.join("\n").trimEnd()
+}
 
+function formatBatchResultBlocks(results: QueryResult[], includeExtraSnippets: boolean, debug: boolean): string {
+	const lines: string[] = []
+	for (const [index, section] of results.entries()) {
+		lines.push(`=== Query ${index + 1} ===`)
+		lines.push(`Query: ${section.query}`)
+		if (section.error) {
+			lines.push(`Error: ${section.error}`)
+			lines.push("")
+			continue
+		}
+
+		if (!section.results.length) {
+			lines.push("No results found.")
+			if (debug) {
+				lines.push("Debug:")
+				lines.push("- provider used: brave")
+				lines.push(`- more_results_available: ${section.moreResultsAvailable ? "true" : "false"}`)
+			}
+			lines.push("")
+			continue
+		}
+
+		lines.push(formatSingleResultBlocks(section.results, includeExtraSnippets))
+		if (debug) {
+			lines.push("Debug:")
+			lines.push("- provider used: brave")
+			lines.push(`- more_results_available: ${section.moreResultsAvailable ? "true" : "false"}`)
+		}
+		lines.push("")
+	}
 	return lines.join("\n").trimEnd()
 }
 
@@ -94,8 +142,8 @@ async function runBraveRequest(input: {
 	goggles?: string[]
 	signal?: AbortSignal
 }): Promise<BraveResponse> {
-	const apiKey = process.env.BRAVE_API_KEY?.trim()
-	if (!apiKey) throw new Error("BRAVE_API_KEY is not set")
+	const apiKey = process.env.BRAVE_SEARCH_API_KEY?.trim() || process.env.BRAVE_API_KEY?.trim()
+	if (!apiKey) throw new Error("Brave API key is not set (set BRAVE_SEARCH_API_KEY)")
 
 	const params = new URLSearchParams({
 		q: input.query,
@@ -140,110 +188,161 @@ async function runBraveRequest(input: {
 	return parsed.data
 }
 
+async function runBatch(options: {
+	queries: string[]
+	count: number
+	offset: number
+	country: string
+	freshness?: string
+	searchLang?: string
+	uiLang?: string
+	safesearch?: "off" | "moderate" | "strict"
+	extraSnippets?: boolean
+	goggles?: string[]
+	concurrency: number
+	signal?: AbortSignal
+	onUpdate?: (completed: number, total: number, activeQuery?: string) => void
+}): Promise<QueryResult[]> {
+	const total = options.queries.length
+	const output: Array<QueryResult | undefined> = new Array(total)
+	let next = 0
+	let completed = 0
+
+	const worker = async () => {
+		while (true) {
+			if (options.signal?.aborted) throw new DOMException("aborted", "AbortError")
+			const current = next
+			next += 1
+			if (current >= total) return
+
+			const query = options.queries[current]
+			try {
+				const response = await withExponentialRetries({
+					maxRetries: 2,
+					baseDelayMs: 1000,
+					signal: options.signal,
+					shouldRetry: (err) => (err as RetryableError).retryable === true || isRetryableNetworkError(err),
+					run: async () =>
+						runBraveRequest({
+							query,
+							count: options.count,
+							offset: options.offset,
+							country: options.country,
+							freshness: options.freshness,
+							searchLang: options.searchLang,
+							uiLang: options.uiLang,
+							safesearch: options.safesearch,
+							extraSnippets: options.extraSnippets,
+							goggles: options.goggles,
+							signal: options.signal,
+						}),
+				})
+
+				const results = (response.web?.results || [])
+					.filter((item) => item.url)
+					.slice(0, Math.max(1, Math.min(20, options.count)))
+
+				output[current] = {
+					query,
+					results,
+					moreResultsAvailable: response.query?.more_results_available === true,
+				}
+			} catch (error) {
+				if ((error instanceof Error && error.name === "AbortError") || options.signal?.aborted) throw error
+				const normalized = normalizeError(error)
+				output[current] = {
+					query,
+					results: [],
+					moreResultsAvailable: false,
+					error: normalized.message,
+				}
+			}
+
+			completed += 1
+			options.onUpdate?.(completed, total, query)
+		}
+	}
+
+	const workers = Math.min(Math.max(1, options.concurrency), total)
+	await Promise.all(Array.from({ length: workers }, () => worker()))
+	return output.filter((item): item is QueryResult => Boolean(item))
+}
+
 export function registerBraveSearchTool(pi: ExtensionAPI) {
 	pi.registerTool<typeof braveSearchParams, ProgressDetails>({
 		name: "web_search",
 		label: "Web Search",
-		description: "Search the web using Brave Search API (primary provider). If unavailable/auth fails, use web_search_fallback.",
+		description:
+			"Search the web using Brave Search API (primary provider). Supports single query or batched queries. If unavailable/auth fails, use web_search_fallback.",
 		parameters: braveSearchParams,
 		async execute(_toolCallId, params, signal, onUpdate) {
+			if (signal?.aborted) throw new DOMException("aborted", "AbortError")
 			const startedAt = Date.now()
 
+			let queries: string[]
 			try {
-				onUpdate?.({
-					content: [{ type: "text", text: "Searching Brave…" }],
-					details: { phase: "search", progress: 0.1, label: "search", provider: "brave", query: params.query },
-				})
-
-				const response = await withExponentialRetries({
-					maxRetries: 2,
-					baseDelayMs: 1000,
-					signal,
-					onRetry: (attempt, maxRetries, reason) => {
-						onUpdate?.({
-							content: [{ type: "text", text: `Retrying Brave… (${attempt}/${maxRetries})` }],
-							details: {
-								phase: "retrying",
-								progress: 0.45,
-								label: "search",
-								provider: "brave",
-								query: params.query,
-								attempt,
-								maxRetries,
-								reason,
-							},
-						})
-					},
-					shouldRetry: (err) => (err as RetryableError).retryable === true || isRetryableNetworkError(err),
-					run: async () => {
-						onUpdate?.({
-							content: [{ type: "text", text: "Requesting Brave API…" }],
-							details: {
-								phase: "request",
-								progress: 0.3,
-								label: "search",
-								provider: "brave",
-								query: params.query,
-							},
-						})
-
-						return runBraveRequest({
-							query: params.query,
-							count: params.count ?? 5,
-							offset: params.offset ?? 0,
-							country: params.country ?? "US",
-							freshness: params.freshness,
-							searchLang: params.searchLang,
-							uiLang: params.uiLang,
-							safesearch: params.safesearch,
-							extraSnippets: params.extraSnippets,
-							goggles: params.goggles,
-							signal,
-						})
-					},
-				})
-
-				const webResults = (response.web?.results || [])
-					.filter((item) => item.url)
-					.slice(0, Math.max(1, Math.min(20, params.count ?? 5)))
-
-				if (!webResults.length) {
-					return {
-						content: [{ type: "text", text: "No results found." }],
-						details: {
-							phase: "done",
-							progress: 1,
-							label: "search",
-							summary: "No results",
-							provider: "brave",
-							query: params.query,
-							durationMs: Date.now() - startedAt,
-						},
-					}
-				}
-
-				let content = formatResultBlocks(webResults, params.extraSnippets === true)
-
-				if (params.debug) {
-					const more = response.query?.more_results_available === true ? "true" : "false"
-					content += ["", "---", "## Debug", "- provider used: brave", `- more_results_available: ${more}`].join(
-						"\n",
-					)
-				}
-
-				return {
-					content: [{ type: "text", text: content }],
-					details: {
-						phase: "done",
-						progress: 1,
-						label: "search",
-						summary: summarizeSearchResult(content),
-						provider: "brave",
-						query: params.query,
-						durationMs: Date.now() - startedAt,
-					},
-				}
+				queries = normalizeQueries(params)
 			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error)
+				return {
+					content: [{ type: "text", text: `Error: ${message}` }],
+					isError: true,
+					details: { error: message, phase: "error", label: "search", provider: "brave" },
+				}
+			}
+
+			const querySummary =
+				queries.length === 1 ? queries[0] : `${queries[0]} +${Math.max(0, queries.length - 1)} more`
+			const detailQueries = queries.length > 1 ? queries : undefined
+			const isBatch = queries.length > 1
+			const perQueryCount = params.count ?? (isBatch ? 3 : 5)
+			const concurrency = params.concurrency ?? 3
+
+			onUpdate?.({
+				content: [{ type: "text", text: `Searching Brave (${queries.length} quer${queries.length === 1 ? "y" : "ies"})…` }],
+				details: {
+					phase: "search",
+					progress: 0.1,
+					label: "search",
+					provider: "brave",
+					query: querySummary,
+					queries: detailQueries,
+				},
+			})
+
+			let queryResults: QueryResult[]
+			try {
+				queryResults = await runBatch({
+					queries,
+					count: perQueryCount,
+					offset: params.offset ?? 0,
+					country: params.country ?? "US",
+					freshness: params.freshness,
+					searchLang: params.searchLang,
+					uiLang: params.uiLang,
+					safesearch: params.safesearch,
+					extraSnippets: params.extraSnippets,
+					goggles: params.goggles,
+					concurrency,
+					signal,
+					onUpdate: (completed, total, activeQuery) => {
+						onUpdate?.({
+							content: [{ type: "text", text: `Searched ${completed}/${total}${activeQuery ? ` · ${activeQuery}` : ""}` }],
+							details: {
+								phase: "search",
+								progress: 0.1 + (completed / Math.max(1, total)) * 0.85,
+								label: "search",
+								provider: "brave",
+								query: querySummary,
+								queries: detailQueries,
+							},
+						})
+					},
+				})
+			} catch (error) {
+				if ((error instanceof Error && error.name === "AbortError") || signal?.aborted) {
+					throw new DOMException("aborted", "AbortError")
+				}
 				const normalized = normalizeError(error)
 				return {
 					content: [{ type: "text", text: `search failed\n\nError: ${normalized.message}` }],
@@ -255,10 +354,35 @@ export function registerBraveSearchTool(pi: ExtensionAPI) {
 						statusCode: normalized.statusCode,
 						summary: "Brave search failed",
 						provider: "brave",
-						query: params.query,
+						query: querySummary,
+						queries: detailQueries,
 						durationMs: Date.now() - startedAt,
 					},
 				}
+			}
+
+			const failed = queryResults.filter((q) => q.error).length
+			const successful = queryResults.length - failed
+			const content = formatBatchResultBlocks(queryResults, params.extraSnippets === true, params.debug === true)
+			const aggregateTruncated = content.length > MAX_TOTAL_OUTPUT_CHARS
+			const output = aggregateTruncated
+				? `${content.slice(0, MAX_TOTAL_OUTPUT_CHARS)}\n\n[Output truncated: aggregate limit reached]`
+				: content
+
+			return {
+				content: [{ type: "text", text: output }],
+				isError: successful === 0,
+				details: {
+					phase: "done",
+					progress: 1,
+					label: "search",
+					summary: summarizeSearchResult(output),
+					provider: "brave",
+					query: querySummary,
+					queries: detailQueries,
+					error: successful === 0 && failed > 0 ? `${failed}/${queryResults.length} queries failed` : undefined,
+					durationMs: Date.now() - startedAt,
+				},
 			}
 		},
 		renderResult(result, options, theme) {
