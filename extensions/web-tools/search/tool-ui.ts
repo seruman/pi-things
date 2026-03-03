@@ -23,7 +23,7 @@ export type ProgressDetails = {
 	durationMs?: number
 }
 
-export const searchParams = Type.Object({
+export const searchFallbackParams = Type.Object({
 	query: Type.String({ description: "The search query" }),
 	providers: Type.Optional(
 		Type.Array(Type.Union([Type.Literal("gemini"), Type.Literal("openai"), Type.Literal("exa")]), {
@@ -32,6 +32,26 @@ export const searchParams = Type.Object({
 		}),
 	),
 	live: Type.Optional(Type.Boolean({ description: "Use live web access when provider supports it (default: true)" })),
+	debug: Type.Optional(Type.Boolean({ description: "Include debug details in output" })),
+})
+
+export const braveSearchParams = Type.Object({
+	query: Type.String({ description: "The search query" }),
+	count: Type.Optional(Type.Integer({ minimum: 1, maximum: 20, description: "Number of results (default: 5, max: 20)" })),
+	offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 9, description: "Result page offset (0-9)" })),
+	country: Type.Optional(Type.String({ description: "Two-letter country code (default: US)" })),
+	freshness: Type.Optional(
+		Type.String({ description: "Time filter: pd|pw|pm|py or date range YYYY-MM-DDtoYYYY-MM-DD" }),
+	),
+	searchLang: Type.Optional(Type.String({ description: "Search language (ISO 639-1, e.g. en, de, tr)" })),
+	uiLang: Type.Optional(Type.String({ description: "UI language for metadata (e.g. en-US, de-DE)" })),
+	safesearch: Type.Optional(
+		Type.Union([Type.Literal("off"), Type.Literal("moderate"), Type.Literal("strict")], {
+			description: "Safe search level (default: moderate)",
+		}),
+	),
+	extraSnippets: Type.Optional(Type.Boolean({ description: "Include extra snippets from results" })),
+	goggles: Type.Optional(Type.Array(Type.String(), { minItems: 1, description: "Brave Goggles URLs/definitions" })),
 	debug: Type.Optional(Type.Boolean({ description: "Include debug details in output" })),
 })
 

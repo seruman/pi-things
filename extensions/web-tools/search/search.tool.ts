@@ -2,7 +2,13 @@ import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-age
 import { exaProvider } from "./providers/exa"
 import { geminiProvider } from "./providers/gemini"
 import { openaiProvider } from "./providers/openai"
-import { type ProgressDetails, normalizeError, renderToolResult, searchParams, summarizeSearchResult } from "./tool-ui"
+import {
+	type ProgressDetails,
+	normalizeError,
+	renderToolResult,
+	searchFallbackParams,
+	summarizeSearchResult,
+} from "./tool-ui"
 import type { SearchAttemptFailure, SearchProvider, SearchProviderId, SearchResult, SearchRunInput } from "./types"
 
 const providers: Record<SearchProviderId, SearchProvider> = {
@@ -53,21 +59,24 @@ async function runSearchWithFallback(
 
 function formatSources(sources: Array<{ url: string; title?: string }>): string {
 	if (!sources.length) return ""
-	const lines = sources.map((s, i) => `${i + 1}. ${s.url}`)
+	const lines = sources.map((s, i) => {
+		const title = (s.title || "").trim()
+		return title ? `${i + 1}. [${title}](${s.url})` : `${i + 1}. ${s.url}`
+	})
 	return `\n\nSources\n\n${lines.join("\n")}`
 }
 
-export function registerSearchTool(pi: ExtensionAPI) {
-	pi.registerTool<typeof searchParams, ProgressDetails>({
-		name: "web_search",
-		label: "Web Search",
-		description: "Search the web using available providers (Exa/OpenAI/Gemini) with automatic fallback.",
-		parameters: searchParams,
+export function registerSearchFallbackTool(pi: ExtensionAPI) {
+	pi.registerTool<typeof searchFallbackParams, ProgressDetails>({
+		name: "web_search_fallback",
+		label: "Web Search (Fallback)",
+		description: "Fallback web search with provider failover (Gemini/OpenAI/Exa).",
+		parameters: searchFallbackParams,
 		async execute(_toolCallId, params, signal, onUpdate, ctx: ExtensionContext) {
 			const startedAt = Date.now()
 			try {
 				onUpdate?.({
-					content: [{ type: "text", text: "Searching…" }],
+					content: [{ type: "text", text: "Searching (fallback)…" }],
 					details: { phase: "search", progress: 0, label: "search", query: params.query },
 				})
 
@@ -124,9 +133,7 @@ export function registerSearchTool(pi: ExtensionAPI) {
 
 				let content = `${result.text}${formatSources(result.sources)}`
 				if (params.debug) {
-					const failureLines = failures.length
-						? failures.map((f) => `- ${f.provider}: ${f.error}`).join("\n")
-						: "- none"
+					const failureLines = failures.length ? failures.map((f) => `- ${f.provider}: ${f.error}`).join("\n") : "- none"
 					content += [
 						"",
 						"---",
@@ -161,7 +168,7 @@ export function registerSearchTool(pi: ExtensionAPI) {
 						phase: "error",
 						label: "search",
 						statusCode: normalized.statusCode,
-						summary: "Search failed",
+						summary: "Fallback search failed",
 						query: params.query,
 						durationMs: Date.now() - startedAt,
 					},

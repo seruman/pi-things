@@ -7,7 +7,7 @@ export function registerFetchRenderedTool(pi: ExtensionAPI) {
 		name: "web_fetch_rendered",
 		label: "Web Fetch Rendered",
 		description:
-			"Fetch URL content through browser rendering (Lightpanda) and extract readable output. Supports format=auto|markdown|text|html and timeoutMs.",
+			"Fetch URL content through browser rendering (Lightpanda) and extract readable output. Supports single url or batch urls, format=auto|markdown|text|html, timeoutMs, perUrlMaxChars, concurrency. Prefer urls[] when fetching multiple links.",
 		mode: "rendered",
 		executeFetch: fetchOneRendered,
 	})

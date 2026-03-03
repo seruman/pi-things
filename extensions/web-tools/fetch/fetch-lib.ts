@@ -23,21 +23,43 @@ export type FetchDetails = {
 	truncated?: boolean
 	durationMs?: number
 	error?: string
+	urlCount?: number
+	fetchedCount?: number
 }
 
 export const MAX_INLINE_CONTENT = 30_000
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 
 const turndown = new TurndownService({ headingStyle: "atx", codeBlockStyle: "fenced" })
+turndown.addRule("removeEmptyLinks", {
+	filter: (node) => node.nodeName === "A" && !node.textContent?.trim(),
+	replacement: () => "",
+})
+
+export function normalizeMarkdown(text: string): string {
+	return text
+		.replace(/\u00a0/g, " ")
+		.replace(/\[\\?\[\s*\\?\]\]\([^)]*\)/g, "")
+		.replace(/ +/g, " ")
+		.replace(/\s+,/g, ",")
+		.replace(/\s+\./g, ".")
+		.replace(/\n{3,}/g, "\n\n")
+		.trim()
+}
 
 export const fetchParams = Type.Object({
-	url: Type.String({ description: "URL to fetch" }),
+	url: Type.Optional(Type.String({ description: "URL to fetch" })),
+	urls: Type.Optional(Type.Array(Type.String(), { minItems: 1, maxItems: 10, description: "URLs to fetch in batch" })),
 	format: Type.Optional(
 		Type.Union([Type.Literal("auto"), Type.Literal("markdown"), Type.Literal("text"), Type.Literal("html")], {
 			description: "Output format (default: auto)",
 		}),
 	),
 	timeoutMs: Type.Optional(Type.Integer({ minimum: 1000, maximum: 120000, description: "Request timeout in ms" })),
+	perUrlMaxChars: Type.Optional(
+		Type.Integer({ minimum: 200, maximum: MAX_INLINE_CONTENT, description: "Max chars per URL (default: 3000)" }),
+	),
+	concurrency: Type.Optional(Type.Integer({ minimum: 1, maximum: 10, description: "Batch fetch concurrency (default: 3)" })),
 })
 
 function normalizeError(error: unknown): string {
@@ -101,7 +123,7 @@ function getHtmlViews(rawHtml: string, url: string): { title: string; markdown: 
 	const readability = new Readability(document)
 	const article = readability.parse()
 	if (article?.content) {
-		const markdown = turndown.turndown(article.content).trim()
+		const markdown = normalizeMarkdown(turndown.turndown(article.content))
 		const text = parseHTML(article.content).document.body?.textContent?.replace(/\s+/g, " ").trim() || ""
 		return {
 			title: article.title?.trim() || document.title?.trim() || fallbackTitle(url),
@@ -110,7 +132,7 @@ function getHtmlViews(rawHtml: string, url: string): { title: string; markdown: 
 		}
 	}
 
-	const markdown = turndown.turndown(rawHtml).trim()
+	const markdown = normalizeMarkdown(turndown.turndown(rawHtml))
 	const text = document.body?.textContent?.replace(/\s+/g, " ").trim() || ""
 	return {
 		title: document.title?.trim() || fallbackTitle(url),
@@ -150,11 +172,17 @@ function buildRecord(url: string, raw: string, contentType: string | undefined, 
 	if (format === "text") return { url, title: fallbackTitle(url), content: raw, error: null }
 
 	if (format === "markdown") {
-		if (isMarkdown) return { url, title: extractTitleFromMarkdown(raw, url), content: raw, error: null }
-		return { url, title: fallbackTitle(url), content: raw, error: null }
+		if (isMarkdown) {
+			const normalized = normalizeMarkdown(raw)
+			return { url, title: extractTitleFromMarkdown(normalized, url), content: normalized, error: null }
+		}
+		return { url, title: fallbackTitle(url), content: normalizeMarkdown(raw), error: null }
 	}
 
-	if (isMarkdown) return { url, title: extractTitleFromMarkdown(raw, url), content: raw, error: null }
+	if (isMarkdown) {
+		const normalized = normalizeMarkdown(raw)
+		return { url, title: extractTitleFromMarkdown(normalized, url), content: normalized, error: null }
+	}
 	return { url, title: fallbackTitle(url), content: raw, error: null }
 }
 
