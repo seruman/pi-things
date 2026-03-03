@@ -10,20 +10,22 @@ Search the web with provider fallback.
 
 **Requirements**
 
-- At least one authenticated Pi provider configured for this tool:
+- Exa MCP endpoint is available without additional auth.
+- Optional authenticated Pi providers:
   - `google-gemini-cli` (Gemini)
   - `openai-codex` (OpenAI Codex)
-- If both are configured, fallback order is `gemini` → `openai` (unless overridden via `providers`).
+- Default fallback order is `gemini` → `openai` → `exa` (unless overridden via `providers`).
 
 **Provider/model mapping**
 
+- `exa` provider: `exa-mcp-web_search_exa`
 - `gemini` provider (`google-gemini-cli`): `gemini-2.5-flash`
 - `openai` provider (`openai-codex`): `gpt-5.3-codex`
 
 ```ts
 web_search({
   query: string,
-  providers?: ("gemini" | "openai")[],
+  providers?: ("gemini" | "openai" | "exa")[],
   live?: boolean,
   debug?: boolean,
 })
