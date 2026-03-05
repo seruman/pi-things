@@ -41,6 +41,7 @@ Chain mode supports `{previous}` placeholder substitution from the prior step ou
 - default single agent: `worker` via `--subagents-default-agent`
 - default `agentScope`: `"user"`
 - default `confirmProjectAgents`: `true`
+- project-agent approval can be remembered for the current pi session (per project)
 - max parallel tasks: `8`
 - max concurrent workers: `4`
 
@@ -83,5 +84,6 @@ Precedence: `project > user > bundled`, same-name agent overrides lower priority
 ## Notes
 
 - Subagent calls are blocking, progress is streamed via tool updates/UI.
+- With `agentScope: "project" | "both"` and `confirmProjectAgents: true`, interactive runs show a trust selector: `Allow once`, `Always allow this session`, or `Cancel`.
 - Long outputs are truncated in-context and spilled to `.pi/subagent-output/*`.
 - Spawned subprocesses run with `--no-extensions --no-skills --no-prompt-templates`, then inject only the internal `submit_result` extension.

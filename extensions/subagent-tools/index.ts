@@ -139,6 +139,10 @@ function elapsed(run: RunInfo) {
 	return `${sec}s`;
 }
 
+function sessionKey(ctx: { cwd: string; sessionManager: { getSessionFile(): string | undefined } }) {
+	return ctx.sessionManager.getSessionFile() ?? `ephemeral:${ctx.cwd}`;
+}
+
 const guidance = [
 	"Subagent usage policy:",
 	"- Use the subagent tool for repo-wide exploration or independent work units.",
@@ -688,6 +692,7 @@ function isDetails(value: unknown): value is Details {
 
 export default function (pi: ExtensionAPI) {
 	const guidanceSent = new Set<string>();
+	const trustedProjectAgents = new Set<string>();
 
 	pi.registerFlag("subagents-guidance", {
 		description: "Inject one-time guidance message to steer the model toward efficient subagent usage",
@@ -704,7 +709,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("before_agent_start", async (_event, ctx) => {
 		const enabled = Boolean(pi.getFlag("--subagents-guidance"));
 		if (!enabled) return;
-		const key = ctx.sessionManager.getSessionFile() ?? `ephemeral:${ctx.cwd}`;
+		const key = sessionKey(ctx);
 		if (guidanceSent.has(key)) return;
 		guidanceSent.add(key);
 		return {
@@ -810,9 +815,13 @@ export default function (pi: ExtensionAPI) {
 
 			if ((agentScope === "project" || agentScope === "both") && confirmProjectAgents && ctx.hasUI) {
 				const requested = new Set<string>();
-				if (params.agent) requested.add(params.agent);
+				if (params.task && !params.tasks?.length && !params.chain?.length) {
+					const picked = params.agent ?? defaultAgent(agents, preferred);
+					if (picked) requested.add(picked);
+				}
 				for (const item of params.tasks ?? []) {
-					if (item.agent) requested.add(item.agent);
+					const picked = item.agent ?? defaultAgent(agents, preferred);
+					if (picked) requested.add(picked);
 				}
 				for (const item of params.chain ?? []) requested.add(item.agent);
 
@@ -821,16 +830,20 @@ export default function (pi: ExtensionAPI) {
 					.filter((agent): agent is AgentConfig => agent?.source === "project");
 
 				if (projectAgents.length > 0) {
-					const ok = await ctx.ui.confirm(
-						"Run project-local subagents?",
-						`Agents: ${projectAgents.map((agent) => agent.name).join(", ")}\nSource: ${found.projectAgentsDir ?? "unknown"}`,
-					);
-					if (!ok) {
-						return {
-							content: [{ type: "text", text: "Canceled by user." }],
-							details: details("single", []),
-							isError: true,
-						};
+					const detailsText = `Agents: ${projectAgents.map((agent) => agent.name).join(", ")}\nSource: ${found.projectAgentsDir ?? "unknown"}`;
+					const trustKey = `${sessionKey(ctx)}::${found.projectAgentsDir ?? "unknown"}`;
+					if (!trustedProjectAgents.has(trustKey)) {
+						const choice = await ctx.ui.select(`Run project-local subagents?\n${detailsText}`, ["Allow once", "Always allow this session", "Cancel"]);
+						if (!choice || choice === "Cancel") {
+							return {
+								content: [{ type: "text", text: "Canceled by user." }],
+								details: details("single", []),
+								isError: true,
+							};
+						}
+						if (choice === "Always allow this session") {
+							trustedProjectAgents.add(trustKey);
+						}
 					}
 				}
 			}
