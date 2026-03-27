@@ -123,6 +123,7 @@ export function registerTaskTool(pi: ExtensionAPI) {
 		name: "task",
 		label: "Task",
 		description: "Manage tasks: list/get/create/update/claim/release/purge",
+		promptSnippet: "Manage persistent tasks and dependencies",
 		parameters: params,
 		async execute(_toolCallId, p, _signal, _onUpdate, ctx: ExtensionContext) {
 			const fallbackAction: TaskAction = isTaskAction(p.action) ? p.action : "list"
