@@ -9,6 +9,9 @@ type QueryResult = {
 	query: string
 	results: BraveWebResult[]
 	moreResultsAvailable: boolean
+	alteredQuery?: string
+	operatorsApplied?: boolean
+	mutatedByGoggles?: boolean
 	error?: string
 }
 
@@ -21,13 +24,50 @@ const braveWebResultSchema = z
 		description: z.string().optional(),
 		age: z.string().optional(),
 		extra_snippets: z.array(z.string()).optional(),
+		language: z.string().optional(),
+		page_age: z.string().optional(),
+		profile: z
+			.object({
+				name: z.string().optional(),
+				long_name: z.string().optional(),
+			})
+			.passthrough()
+			.optional(),
+		article: z.unknown().optional(),
+		faq: z.unknown().optional(),
+		video: z.unknown().optional(),
+		software: z.unknown().optional(),
+		product: z.unknown().optional(),
+		review: z.unknown().optional(),
+		recipe: z.unknown().optional(),
+		book: z.unknown().optional(),
 	})
 	.passthrough()
 
 const braveResponseSchema = z
 	.object({
-		query: z.object({ more_results_available: z.boolean().optional() }).passthrough().optional(),
-		web: z.object({ results: z.array(braveWebResultSchema).optional() }).passthrough().optional(),
+		query: z
+			.object({
+				original: z.string().optional(),
+				altered: z.string().optional(),
+				cleaned: z.string().optional(),
+				more_results_available: z.boolean().optional(),
+				search_operators: z
+					.object({
+						applied: z.boolean().optional(),
+					})
+					.passthrough()
+					.optional(),
+			})
+			.passthrough()
+			.optional(),
+		web: z
+			.object({
+				results: z.array(braveWebResultSchema).optional(),
+				mutated_by_goggles: z.boolean().optional(),
+			})
+			.passthrough()
+			.optional(),
 	})
 	.passthrough()
 
@@ -52,19 +92,48 @@ function normalizeQueries(input: { query?: string; queries?: string[] }): string
 	return single ? [single] : many
 }
 
-function formatSingleResultBlocks(results: BraveWebResult[], includeExtraSnippets: boolean): string {
+function pickSourceName(item: BraveWebResult): string {
+	return clean(item.profile?.long_name || item.profile?.name || "")
+}
+
+function collectTypeHints(item: BraveWebResult): string[] {
+	const hints: string[] = []
+	if (item.article != null) hints.push("article")
+	if (item.faq != null) hints.push("faq")
+	if (item.video != null) hints.push("video")
+	if (item.software != null) hints.push("software")
+	if (item.product != null) hints.push("product")
+	if (item.review != null) hints.push("review")
+	if (item.recipe != null) hints.push("recipe")
+	if (item.book != null) hints.push("book")
+	return hints
+}
+
+function formatSingleResultBlocks(
+	results: BraveWebResult[],
+	includeExtraSnippets: boolean,
+	options: { showLanguage: boolean },
+): string {
 	const lines: string[] = []
 	for (const [index, item] of results.entries()) {
 		const title = clean(item.title || item.url || "Untitled")
 		const url = clean(item.url || "")
+		const source = pickSourceName(item)
+		const language = clean(item.language || "")
 		const snippet = clip(clean(item.description || ""), 500)
 		const age = clean(item.age || "")
+		const published = clean(item.page_age || "")
+		const typeHints = collectTypeHints(item)
 
 		lines.push(`--- Result ${index + 1} ---`)
 		lines.push(`Title: ${title}`)
 		lines.push(`URL: ${url}`)
+		if (source) lines.push(`Source: ${source}`)
+		if (options.showLanguage && language) lines.push(`Language: ${language}`)
 		if (age) lines.push(`Age: ${age}`)
+		if (published) lines.push(`Published: ${published}`)
 		lines.push(`Snippet: ${snippet}`)
+		if (typeHints.length) lines.push(`Type Hints: ${typeHints.join(", ")}`)
 
 		if (includeExtraSnippets && item.extra_snippets?.length) {
 			const extras = item.extra_snippets.map((s) => clean(s)).filter(Boolean).slice(0, 5)
@@ -79,11 +148,22 @@ function formatSingleResultBlocks(results: BraveWebResult[], includeExtraSnippet
 	return lines.join("\n").trimEnd()
 }
 
-function formatBatchResultBlocks(results: QueryResult[], includeExtraSnippets: boolean, debug: boolean): string {
+function formatBatchResultBlocks(
+	results: QueryResult[],
+	includeExtraSnippets: boolean,
+	debug: boolean,
+	options: { showLanguage: boolean },
+): string {
 	const lines: string[] = []
 	for (const [index, section] of results.entries()) {
 		lines.push(`=== Query ${index + 1} ===`)
 		lines.push(`Query: ${section.query}`)
+		if (section.alteredQuery && clean(section.alteredQuery) && clean(section.alteredQuery) !== clean(section.query)) {
+			lines.push(`Altered Query: ${clean(section.alteredQuery)}`)
+		}
+		lines.push(`More Results Available: ${section.moreResultsAvailable ? "true" : "false"}`)
+		if (section.mutatedByGoggles) lines.push("Re-ranked by Goggles: yes")
+		if (section.operatorsApplied === true) lines.push("Operators Applied: yes")
 		if (section.error) {
 			lines.push(`Error: ${section.error}`)
 			lines.push("")
@@ -95,17 +175,17 @@ function formatBatchResultBlocks(results: QueryResult[], includeExtraSnippets: b
 			if (debug) {
 				lines.push("Debug:")
 				lines.push("- provider used: brave")
-				lines.push(`- more_results_available: ${section.moreResultsAvailable ? "true" : "false"}`)
+				if (section.operatorsApplied !== undefined) lines.push(`- operators_applied: ${section.operatorsApplied ? "true" : "false"}`)
 			}
 			lines.push("")
 			continue
 		}
 
-		lines.push(formatSingleResultBlocks(section.results, includeExtraSnippets))
+		lines.push(formatSingleResultBlocks(section.results, includeExtraSnippets, options))
 		if (debug) {
 			lines.push("Debug:")
 			lines.push("- provider used: brave")
-			lines.push(`- more_results_available: ${section.moreResultsAvailable ? "true" : "false"}`)
+			if (section.operatorsApplied !== undefined) lines.push(`- operators_applied: ${section.operatorsApplied ? "true" : "false"}`)
 		}
 		lines.push("")
 	}
@@ -246,6 +326,9 @@ async function runBatch(options: {
 					query,
 					results,
 					moreResultsAvailable: response.query?.more_results_available === true,
+					alteredQuery: response.query?.altered,
+					operatorsApplied: response.query?.search_operators?.applied,
+					mutatedByGoggles: response.web?.mutated_by_goggles === true,
 				}
 			} catch (error) {
 				if ((error instanceof Error && error.name === "AbortError") || options.signal?.aborted) throw error
@@ -364,7 +447,9 @@ export function registerBraveSearchTool(pi: ExtensionAPI) {
 
 			const failed = queryResults.filter((q) => q.error).length
 			const successful = queryResults.length - failed
-			const content = formatBatchResultBlocks(queryResults, params.extraSnippets === true, params.debug === true)
+			const content = formatBatchResultBlocks(queryResults, params.extraSnippets === true, params.debug === true, {
+				showLanguage: Boolean(params.searchLang),
+			})
 			const aggregateTruncated = content.length > MAX_TOTAL_OUTPUT_CHARS
 			const output = aggregateTruncated
 				? `${content.slice(0, MAX_TOTAL_OUTPUT_CHARS)}\n\n[Output truncated: aggregate limit reached]`

@@ -8,6 +8,7 @@
     "typecheck": "tsc --noEmit"
   },
   "pi": {
-    "extensions": ["./index.ts"]
+    "extensions": ["./index.ts"],
+    "skills": ["./skills"]
   }
 }
