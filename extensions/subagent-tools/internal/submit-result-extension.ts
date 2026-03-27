@@ -43,7 +43,6 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"Finalize delegated subagent work with structured output. Call exactly once when done.",
 		parameters: Params,
-		strict: true,
 		async execute(_toolCallId, params) {
 			const status: SubmitStatus = params.status === "aborted" ? "aborted" : "success";
 			const details: SubmitResultDetails = {

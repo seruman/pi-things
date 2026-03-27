@@ -270,12 +270,6 @@ function childSubmitResultExtensionPath() {
 	return path.join(path.dirname(file), "internal", "submit-result-extension.ts");
 }
 
-function ensureSubmitResultTool(tools: string[] | undefined) {
-	if (!tools || tools.length === 0) return tools;
-	if (tools.includes(SUBMIT_RESULT_TOOL)) return tools;
-	return [...tools, SUBMIT_RESULT_TOOL];
-}
-
 function parseSubmitResultPayload(input: Record<string, unknown>): SubmitResultPayload | null {
 	const status = input.status === "aborted" ? "aborted" : input.status === "success" ? "success" : null;
 	if (!status) return null;
@@ -399,7 +393,7 @@ async function runTask(
 			childExtension,
 		];
 
-		const toolList = ensureSubmitResultTool(agent.tools);
+		const toolList = agent.tools;
 		if (toolList && toolList.length > 0) args.push("--tools", toolList.join(","));
 		const enforcedPrompt = [agent.systemPrompt.trim(), COST_GUARDRAILS, SUBMIT_RESULT_ENFORCEMENT].filter(Boolean).join("\n\n");
 		if (enforcedPrompt) {
@@ -780,6 +774,7 @@ export default function (pi: ExtensionAPI) {
 			"This tool is blocking: it streams progress and returns final results.",
 			"Do NOT call this tool repeatedly to poll status.",
 		].join(" "),
+		promptSnippet: "Delegate tasks to isolated subagents",
 		parameters: Params,
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {

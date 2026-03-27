@@ -49,6 +49,11 @@ Chain mode supports `{previous}` placeholder substitution from the prior step ou
 
 Each spawned subagent receives an internal `submit_result` tool, injected by the parent extension.
 
+This tool is private to the child subprocess:
+- it is provided via the injected internal extension
+- it is not added to the child process `--tools` list
+- it is not intended to be exposed to the parent agent as a normal selectable tool
+
 Subagents are instructed to close work with exactly one `submit_result` call:
 - `status: "success"` with `data`
 - `status: "aborted"` with `error`
@@ -87,3 +92,4 @@ Precedence: `project > user > bundled`, same-name agent overrides lower priority
 - With `agentScope: "project" | "both"` and `confirmProjectAgents: true`, interactive runs show a trust selector: `Allow once`, `Always allow this session`, or `Cancel`.
 - Long outputs are truncated in-context and spilled to `.pi/subagent-output/*`.
 - Spawned subprocesses run with `--no-extensions --no-skills --no-prompt-templates`, then inject only the internal `submit_result` extension.
+- Normal child tool access still comes from the selected agent's configured tool list; `submit_result` is separate from that list.
