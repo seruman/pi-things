@@ -71,6 +71,7 @@ export function registerSearchFallbackTool(pi: ExtensionAPI) {
 		name: "web_search_fallback",
 		label: "Web Search (Fallback)",
 		description: "Fallback web search with provider failover (Gemini/OpenAI/Exa).",
+		promptSnippet: "Search the web with provider failover",
 		parameters: searchFallbackParams,
 		async execute(_toolCallId, params, signal, onUpdate, ctx: ExtensionContext) {
 			const startedAt = Date.now()

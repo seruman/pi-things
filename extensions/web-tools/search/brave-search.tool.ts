@@ -274,6 +274,7 @@ export function registerBraveSearchTool(pi: ExtensionAPI) {
 		label: "Web Search",
 		description:
 			"Search the web using Brave Search API (primary provider). Supports single query or batched queries. If unavailable/auth fails, use web_search_fallback.",
+		promptSnippet: "Search the web using Brave Search API",
 		parameters: braveSearchParams,
 		async execute(_toolCallId, params, signal, onUpdate) {
 			if (signal?.aborted) throw new DOMException("aborted", "AbortError")

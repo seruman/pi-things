@@ -9,6 +9,7 @@ import {
 	parseJson,
 	withExponentialRetries,
 } from "./shared"
+import { getModelAuth, normalizeModelAuth, setHeaderIfMissing } from "./auth"
 
 const PROVIDER = "google-gemini-cli"
 const BASE_URL = "https://cloudcode-pa.googleapis.com"
@@ -101,17 +102,21 @@ async function resolveSourceUrl(url: string, signal?: AbortSignal): Promise<stri
 export const geminiProvider: SearchProvider = {
 	id: "gemini",
 	async isAvailable(ctx: ExtensionContext): Promise<boolean> {
-		const raw = await ctx.modelRegistry.getApiKeyForProvider(PROVIDER)
-		if (!raw) return false
-		return credentialsJsonSchema.safeParse(raw).success
+		const authResult = await getModelAuth(ctx, PROVIDER, MODEL)
+		if (!authResult.ok) return false
+		const auth = normalizeModelAuth(authResult)
+		if (!auth.apiKey) return false
+		return credentialsJsonSchema.safeParse(auth.apiKey).success
 	},
 	async run(ctx: ExtensionContext, input) {
 		const query = input.query.trim()
 		if (!query) throw new Error("query cannot be empty")
 
-		const raw = await ctx.modelRegistry.getApiKeyForProvider(PROVIDER)
-		if (!raw) throw new Error("google-gemini-cli not authenticated")
-		const creds = credentialsJsonSchema.safeParse(raw)
+		const authResult = await getModelAuth(ctx, PROVIDER, MODEL)
+		if (!authResult.ok) throw new Error(authResult.error)
+		const auth = normalizeModelAuth(authResult)
+		if (!auth.apiKey) throw new Error("google-gemini-cli not authenticated")
+		const creds = credentialsJsonSchema.safeParse(auth.apiKey)
 		if (!creds.success) throw new Error("google-gemini-cli credentials invalid")
 
 		const found = ctx.modelRegistry.find(PROVIDER, MODEL)
@@ -139,18 +144,21 @@ export const geminiProvider: SearchProvider = {
 			requestId: `search-${Date.now()}`,
 		}
 
-		const headers = {
-			Authorization: `Bearer ${creds.data.token}`,
-			"Content-Type": "application/json",
-			"User-Agent": "google-cloud-sdk vscode_cloudshelleditor/0.1",
-			"X-Goog-Api-Client": "gl-node/22.17.0",
-			"Client-Metadata": JSON.stringify({
+		const headers = { ...auth.headers }
+		setHeaderIfMissing(headers, "Authorization", `Bearer ${creds.data.token}`)
+		setHeaderIfMissing(headers, "Content-Type", "application/json")
+		setHeaderIfMissing(headers, "User-Agent", "google-cloud-sdk vscode_cloudshelleditor/0.1")
+		setHeaderIfMissing(headers, "X-Goog-Api-Client", "gl-node/22.17.0")
+		setHeaderIfMissing(
+			headers,
+			"Client-Metadata",
+			JSON.stringify({
 				ideType: "IDE_UNSPECIFIED",
 				platform: "PLATFORM_UNSPECIFIED",
 				pluginType: "GEMINI",
 			}),
-			Accept: "text/event-stream",
-		}
+		)
+		setHeaderIfMissing(headers, "Accept", "text/event-stream")
 
 		return withExponentialRetries({
 			maxRetries: MAX_RETRIES,

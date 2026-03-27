@@ -9,6 +9,7 @@ import {
 	parseJson,
 	withExponentialRetries,
 } from "./shared"
+import { getModelAuth, hasUsableAuth, normalizeModelAuth, setHeaderIfMissing } from "./auth"
 
 const OPENAI_CODEX_PROVIDER = "openai-codex"
 const DEFAULT_BASE_URL = "https://chatgpt.com/backend-api"
@@ -76,21 +77,25 @@ type RetryableError = Error & { retryable?: boolean }
 export const openaiProvider: SearchProvider = {
 	id: "openai",
 	async isAvailable(ctx: ExtensionContext): Promise<boolean> {
-		return credentialSchema.safeParse(ctx.modelRegistry.authStorage.get(OPENAI_CODEX_PROVIDER)).success
+		const authResult = await getModelAuth(ctx, OPENAI_CODEX_PROVIDER, MODEL)
+		if (!authResult.ok) return false
+		return hasUsableAuth(normalizeModelAuth(authResult))
 	},
 	async run(ctx, input) {
 		const parsedCredential = credentialSchema.safeParse(ctx.modelRegistry.authStorage.get(OPENAI_CODEX_PROVIDER))
-		if (!parsedCredential.success) throw new Error("openai-codex not authenticated")
 
-		const token = await ctx.modelRegistry.getApiKeyForProvider(OPENAI_CODEX_PROVIDER)
-		if (!token?.trim()) throw new Error("openai-codex token unavailable")
+		const authResult = await getModelAuth(ctx, OPENAI_CODEX_PROVIDER, MODEL)
+		if (!authResult.ok) throw new Error(authResult.error)
+		const auth = normalizeModelAuth(authResult)
+		const token = auth.apiKey?.trim()
+		if (!hasUsableAuth(auth)) throw new Error("openai-codex token unavailable")
 
 		const found = ctx.modelRegistry.find(OPENAI_CODEX_PROVIDER, MODEL)
 		const baseUrl = (found && typeof found.baseUrl === "string" ? found.baseUrl : DEFAULT_BASE_URL).replace(/\/+$/, "")
 		const url = `${baseUrl}/codex/responses`
 
 		const body = {
-			model: MODEL,
+			model: found?.id || MODEL,
 			instructions: "You are a helpful search assistant. Provide concise, factual answers in markdown.",
 			input: [
 				{
@@ -104,13 +109,14 @@ export const openaiProvider: SearchProvider = {
 			store: false,
 		}
 
-		const headers: Record<string, string> = {
-			Authorization: `Bearer ${token.trim()}`,
-			"Content-Type": "application/json",
-			Accept: "text/event-stream",
-			originator: "codex_cli_rs",
+		const headers: Record<string, string> = { ...auth.headers }
+		if (token) setHeaderIfMissing(headers, "Authorization", `Bearer ${token}`)
+		setHeaderIfMissing(headers, "Content-Type", "application/json")
+		setHeaderIfMissing(headers, "Accept", "text/event-stream")
+		setHeaderIfMissing(headers, "originator", "codex_cli_rs")
+		if (parsedCredential.success && parsedCredential.data.accountId) {
+			setHeaderIfMissing(headers, "chatgpt-account-id", parsedCredential.data.accountId)
 		}
-		if (parsedCredential.data.accountId) headers["chatgpt-account-id"] = parsedCredential.data.accountId
 
 		return withExponentialRetries({
 			maxRetries: MAX_RETRIES,

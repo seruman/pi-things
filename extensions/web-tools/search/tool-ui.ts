@@ -147,7 +147,7 @@ export function renderToolResult(
 		const lines = [`${theme.fg("success", theme.bold("✓ done"))}${theme.fg("muted", provider)}`]
 		if (clippedQuery) lines.push(theme.fg("dim", clippedQuery))
 		if (metaParts.length) lines.push(theme.fg("dim", metaParts.join(" · ")))
-		lines.push(theme.fg("muted", keyHint("expandTools", "to expand")))
+		lines.push(theme.fg("muted", keyHint("app.tools.expand", "to expand")))
 		return new Text(lines.join("\n"), 0, 0)
 	}
 
