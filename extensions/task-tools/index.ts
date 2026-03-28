@@ -274,10 +274,10 @@ export default function (pi: ExtensionAPI) {
 		}
 		const sessionId = ctx.sessionManager.getSessionId?.()
 		ctx.ui.setWidget(WIDGET_ID, (_tui, theme) => ({
-			render: () => {
+			render: (width: number) => {
 				const { tasks } = loadTasks(ctx)
-				if (!tasks.length) return [theme.fg("dim", "Tasks: none")]
-				return [widgetLine(tasks, theme, sessionId)]
+				if (!tasks.length) return [truncateToWidth(theme.fg("dim", "Tasks: none"), width)]
+				return [truncateToWidth(widgetLine(tasks, theme, sessionId), width)]
 			},
 			invalidate() {},
 		}))
