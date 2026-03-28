@@ -5,9 +5,7 @@
   "type": "module",
   "description": "Pi extensions: unified web tools",
   "license": "MIT",
-  "keywords": [
-    "pi-package"
-  ],
+  "keywords": ["pi-package"],
   "scripts": {
     "lint": "biome lint .",
     "format": "biome format --write .",
@@ -18,14 +16,11 @@
     "extensions": [
       "./extensions/web-tools/index.ts",
       "./extensions/task-tools/index.ts",
-      "./extensions/subagent-tools/index.ts"
+      "./extensions/subagent-tools/index.ts",
+      "./extensions/split-fork.ts"
     ],
-    "skills": [
-      "./extensions/web-tools/skills"
-    ],
-    "prompts": [
-      "./extensions/subagent-tools/prompts"
-    ]
+    "skills": ["./extensions/web-tools/skills"],
+    "prompts": ["./extensions/subagent-tools/prompts"]
   },
   "dependencies": {
     "@mozilla/readability": "^0.6.0",
