@@ -1,8 +1,7 @@
 import { Readability } from "@mozilla/readability"
 import { Type } from "@sinclair/typebox"
 import { parseHTML } from "linkedom"
-import TurndownService from "turndown"
-import { gfm } from "turndown-plugin-gfm"
+import { Markit } from "markit-ai"
 import { runLightpandaFetch } from "./lightpanda"
 
 export type FetchMode = "http" | "rendered"
@@ -31,12 +30,7 @@ export type FetchDetails = {
 export const MAX_INLINE_CONTENT = 30_000
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 
-const turndown = new TurndownService({ headingStyle: "atx", codeBlockStyle: "fenced" })
-turndown.use(gfm)
-turndown.addRule("removeEmptyLinks", {
-	filter: (node) => node.nodeName === "A" && !node.textContent?.trim(),
-	replacement: () => "",
-})
+const markit = new Markit()
 
 export function normalizeMarkdown(text: string): string {
 	return text
@@ -119,13 +113,18 @@ function extractTitleFromMarkdown(markdown: string, url: string): string {
 	return fallbackTitle(url)
 }
 
-function getHtmlViews(rawHtml: string, url: string): { title: string; markdown: string; text: string } {
+async function convertHtmlToMarkdown(html: string): Promise<string> {
+	const { markdown } = await markit.convert(Buffer.from(html), { extension: ".html" })
+	return markdown.trim() || html
+}
+
+async function getHtmlViews(rawHtml: string, url: string): Promise<{ title: string; markdown: string; text: string }> {
 	const { document } = parseHTML(rawHtml)
 
 	const readability = new Readability(document)
 	const article = readability.parse()
 	if (article?.content) {
-		const markdown = normalizeMarkdown(turndown.turndown(article.content))
+		const markdown = await convertHtmlToMarkdown(article.content)
 		const text = parseHTML(article.content).document.body?.textContent?.replace(/\s+/g, " ").trim() || ""
 		return {
 			title: article.title?.trim() || document.title?.trim() || fallbackTitle(url),
@@ -134,7 +133,7 @@ function getHtmlViews(rawHtml: string, url: string): { title: string; markdown: 
 		}
 	}
 
-	const markdown = normalizeMarkdown(turndown.turndown(rawHtml))
+	const markdown = await convertHtmlToMarkdown(rawHtml)
 	const text = document.body?.textContent?.replace(/\s+/g, " ").trim() || ""
 	return {
 		title: document.title?.trim() || fallbackTitle(url),
@@ -152,7 +151,7 @@ function formatAcceptHeader(format: FetchFormat): string {
 	return "text/markdown;q=1.0, text/plain;q=0.9, text/html;q=0.8, application/xhtml+xml;q=0.7, */*;q=0.1"
 }
 
-function buildRecord(url: string, raw: string, contentType: string | undefined, format: FetchFormat): FetchRecord {
+async function buildRecord(url: string, raw: string, contentType: string | undefined, format: FetchFormat): Promise<FetchRecord> {
 	const normalizedType = (contentType || "").split(";")[0].trim().toLowerCase()
 	const isHtml =
 		normalizedType.includes("text/html") ||
@@ -161,12 +160,12 @@ function buildRecord(url: string, raw: string, contentType: string | undefined, 
 	const isMarkdown = normalizedType.includes("text/markdown") || (!normalizedType && looksLikeMarkdown(raw) && !isHtml)
 
 	if (format === "html") {
-		const title = isHtml ? getHtmlViews(raw, url).title : fallbackTitle(url)
+		const title = isHtml ? (await getHtmlViews(raw, url)).title : fallbackTitle(url)
 		return { url, title, content: raw, error: null }
 	}
 
 	if (isHtml) {
-		const html = getHtmlViews(raw, url)
+		const html = await getHtmlViews(raw, url)
 		if (format === "text") return { url, title: html.title, content: html.text, error: null }
 		return { url, title: html.title, content: html.markdown, error: null }
 	}
@@ -238,7 +237,7 @@ export async function fetchOneHttp(
 			}
 		}
 
-		return buildRecord(target, raw, response.headers.get("content-type") || undefined, format)
+		return await buildRecord(target, raw, response.headers.get("content-type") || undefined, format)
 	} catch (error) {
 		return { url: target, title: fallbackTitle(target), content: "", error: normalizeError(error) }
 	}
@@ -272,5 +271,5 @@ export async function fetchOneRendered(
 		}
 	}
 
-	return buildRecord(target, lp.content, looksLikeHtml(lp.content) ? "text/html" : "text/plain", format)
+	return await buildRecord(target, lp.content, looksLikeHtml(lp.content) ? "text/html" : "text/plain", format)
 }
