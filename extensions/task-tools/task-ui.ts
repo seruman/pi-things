@@ -1,4 +1,4 @@
-import { type AgentToolResult, type AppKeybinding, type Theme, type ToolRenderResultOptions, keyHint } from "@mariozechner/pi-coding-agent"
+import { type AgentToolResult, type Theme, type ToolRenderResultOptions, keyHint } from "@mariozechner/pi-coding-agent"
 import { type Component, Text } from "@mariozechner/pi-tui"
 import { ownerAssignedSuffix, ownerDisplay } from "./owner-format"
 import type { Task, TaskToolDetails, TaskToolInput } from "./types"
@@ -31,8 +31,6 @@ function blockedBadge(blockedBy: number[], theme: Theme): string {
 		.map((id) => theme.fg("accent", `#${id}`))
 		.join(theme.fg("error", ", "))}${theme.fg("error", ")")}`
 }
-
-const expandToolsKey: AppKeybinding = "app.tools.expand"
 
 function taskLine(task: Task, theme: Theme, currentSessionId?: string): string {
 	return `${statusIcon(task.status, theme)} ${theme.fg("accent", `#${task.id}`)} ${statusColor(task.status, theme, task.subject)}${theme.fg("dim", ownerAssignedSuffix(task.owner, currentSessionId))}${blockedBadge(task.blockedBy, theme)}`
@@ -134,7 +132,7 @@ export function renderTaskResult(
 					: ""
 				const warn = d.issues?.length ? ` ${theme.fg("warning", `· ${d.issues.length} broken`)}` : ""
 				return new Text(
-					`Tasks: ${summary}${assignedText}${warn} ${theme.fg("dim", `(${keyHint(expandToolsKey, "to expand")})`)}`,
+					`Tasks: ${summary}${assignedText}${warn} ${theme.fg("dim", `(${keyHint("app.tools.expand", "to expand")})`)}`,
 					0,
 					0,
 				)

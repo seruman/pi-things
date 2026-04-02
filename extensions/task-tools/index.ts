@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionContext, Theme } from "@mariozechner/pi-coding-agent"
+import type { ExtensionAPI, ExtensionContext, KeybindingsManager, Theme } from "@mariozechner/pi-coding-agent"
 import { type Component, Text, matchesKey, truncateToWidth } from "@mariozechner/pi-tui"
 import { filterBlockedBy, getCompletedTaskIds, getDbIfExists, getListId, listTasksWithIssues } from "./db"
 import { ownerAssignedSuffix, ownerDisplay } from "./owner-format"
@@ -66,6 +66,7 @@ function statusIcon(status: string, theme: Theme): string {
 class TaskListComponent implements Component {
 	private tasks: Task[]
 	private theme: Theme
+	private keybindings: KeybindingsManager
 	private onClose: () => void
 	private onWork: (task: Task) => void
 	private onClarify: (task: Task) => void
@@ -78,6 +79,7 @@ class TaskListComponent implements Component {
 	constructor(
 		tasks: Task[],
 		theme: Theme,
+		keybindings: KeybindingsManager,
 		onClose: () => void,
 		onWork: (task: Task) => void,
 		onClarify: (task: Task) => void,
@@ -85,6 +87,7 @@ class TaskListComponent implements Component {
 	) {
 		this.tasks = tasks
 		this.theme = theme
+		this.keybindings = keybindings
 		this.onClose = onClose
 		this.onWork = onWork
 		this.onClarify = onClarify
@@ -96,13 +99,18 @@ class TaskListComponent implements Component {
 	}
 
 	handleInput(data: string): void {
-		if (matchesKey(data, "ctrl+c") || matchesKey(data, "q")) {
-			this.onClose()
+		if (this.keybindings.matches(data, "tui.select.cancel") || matchesKey(data, "q")) {
+			if (this.mode === "details") {
+				this.mode = "list"
+				this.invalidate()
+			} else {
+				this.onClose()
+			}
 			return
 		}
 
 		if (this.mode === "details") {
-			if (matchesKey(data, "escape") || matchesKey(data, "b") || matchesKey(data, "left") || matchesKey(data, "h")) {
+			if (matchesKey(data, "b") || matchesKey(data, "left") || matchesKey(data, "h")) {
 				this.mode = "list"
 				this.invalidate()
 				return
@@ -120,19 +128,14 @@ class TaskListComponent implements Component {
 			return
 		}
 
-		if (matchesKey(data, "escape")) {
-			this.onClose()
-			return
-		}
-
-		if (matchesKey(data, "up") || matchesKey(data, "k")) {
+		if (this.keybindings.matches(data, "tui.select.up") || matchesKey(data, "k")) {
 			if (this.selected > 0) {
 				this.selected--
 				this.invalidate()
 			}
 			return
 		}
-		if (matchesKey(data, "down") || matchesKey(data, "j")) {
+		if (this.keybindings.matches(data, "tui.select.down") || matchesKey(data, "j")) {
 			if (this.selected < this.tasks.length - 1) {
 				this.selected++
 				this.invalidate()
@@ -140,7 +143,7 @@ class TaskListComponent implements Component {
 			return
 		}
 
-		if ((matchesKey(data, "enter") || matchesKey(data, "o")) && this.tasks.length) {
+		if ((this.keybindings.matches(data, "tui.select.confirm") || matchesKey(data, "o")) && this.tasks.length) {
 			this.mode = "details"
 			this.invalidate()
 			return
@@ -337,7 +340,7 @@ export default function (pi: ExtensionAPI) {
 			const sessionId = ctx.sessionManager.getSessionId?.()
 			let nextPrompt: string | null = null
 			let requestRender: (() => void) | undefined
-			await ctx.ui.custom<void>((tui, theme, _kb, done) => {
+			await ctx.ui.custom<void>((tui, theme, keybindings, done) => {
 				requestRender = () => tui.requestRender()
 				const toWorkPrompt = (task: Task) => `work on task #${task.id} "${task.subject}"`
 				const toClarifyPrompt = (task: Task) =>
@@ -346,6 +349,7 @@ export default function (pi: ExtensionAPI) {
 				const component = new TaskListComponent(
 					tasks,
 					theme,
+					keybindings,
 					() => done(),
 					(task) => {
 						nextPrompt = toWorkPrompt(task)
