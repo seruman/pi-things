@@ -37,9 +37,10 @@ function taskLine(task: Task, theme: Theme, currentSessionId?: string): string {
 }
 
 export function renderTaskCall(args: TaskToolInput, theme: Theme): Component {
-	let text = theme.fg("toolTitle", theme.bold("task ")) + theme.fg("muted", args.action)
-	if (args.taskId) text += ` ${theme.fg("accent", `#${args.taskId}`)}`
-	if (args.subject) text += ` ${theme.fg("dim", `"${args.subject}"`)}`
+	const action = typeof args?.action === "string" ? args.action : "…"
+	let text = theme.fg("toolTitle", theme.bold("task ")) + theme.fg("muted", action)
+	if (args?.taskId) text += ` ${theme.fg("accent", `#${args.taskId}`)}`
+	if (args?.subject) text += ` ${theme.fg("dim", `"${args.subject}"`)}`
 	return new Text(text, 0, 0)
 }
 
@@ -49,6 +50,9 @@ export function renderTaskResult(
 	theme: Theme,
 ): Component {
 	const d = result.details
+	if (!d || typeof d !== "object") {
+		return new Text(theme.fg("muted", "Task result unavailable"), 0, 0)
+	}
 	if ("error" in d) return new Text(theme.fg("error", `Error (${d.action}): ${d.error}`), 0, 0)
 
 	switch (d.action) {
@@ -167,5 +171,7 @@ export function renderTaskResult(
 
 			return new Text(lines.join("\n"), 0, 0)
 		}
+		default:
+			return new Text(theme.fg("muted", "Task result unavailable"), 0, 0)
 	}
 }
