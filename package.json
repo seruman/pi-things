@@ -29,11 +29,8 @@
     ]
   },
   "dependencies": {
-    "@mozilla/readability": "^0.6.0",
+    "defuddle": "^0.15.0",
     "linkedom": "^0.18.12",
-    "markit-ai": "^0.3.0",
-    "turndown": "^7.2.2",
-    "turndown-plugin-gfm": "^1.0.2",
     "yaml": "^2.8.1",
     "zod": "^3.24.1"
   },
@@ -48,7 +45,6 @@
     "@mariozechner/pi-tui": "^0.66.0",
     "@sinclair/typebox": "^0.34.41",
     "@types/node": "^24.4.0",
-    "@types/turndown": "^5.0.5",
     "typescript": "^5.9.2"
   }
 }

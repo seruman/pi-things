@@ -1,7 +1,6 @@
-import { Readability } from "@mozilla/readability"
 import { Type } from "@sinclair/typebox"
+import { Defuddle } from "defuddle/node"
 import { parseHTML } from "linkedom"
-import { Markit } from "markit-ai"
 import { runLightpandaFetch } from "./lightpanda"
 
 export type FetchMode = "http" | "rendered"
@@ -29,8 +28,6 @@ export type FetchDetails = {
 
 export const MAX_INLINE_CONTENT = 30_000
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024
-
-const markit = new Markit()
 
 export function normalizeMarkdown(text: string): string {
 	return text
@@ -113,32 +110,28 @@ function extractTitleFromMarkdown(markdown: string, url: string): string {
 	return fallbackTitle(url)
 }
 
-async function convertHtmlToMarkdown(html: string): Promise<string> {
-	const { markdown } = await markit.convert(Buffer.from(html), { extension: ".html" })
-	return markdown.trim() || html
-}
-
 async function getHtmlViews(rawHtml: string, url: string): Promise<{ title: string; markdown: string; text: string }> {
 	const { document } = parseHTML(rawHtml)
 
-	const readability = new Readability(document)
-	const article = readability.parse()
-	if (article?.content) {
-		const markdown = await convertHtmlToMarkdown(article.content)
-		const text = parseHTML(article.content).document.body?.textContent?.replace(/\s+/g, " ").trim() || ""
+	const result = await Defuddle(document, url, { separateMarkdown: true })
+	const markdown = result.contentMarkdown?.trim() || ""
+	const title = result.title?.trim() || document.title?.trim() || fallbackTitle(url)
+
+	if (markdown) {
+		const wrappedHtml = `<html><body>${result.content || rawHtml}</body></html>`
+		const text = parseHTML(wrappedHtml).document.body?.textContent?.replace(/\s+/g, " ").trim() || ""
 		return {
-			title: article.title?.trim() || document.title?.trim() || fallbackTitle(url),
-			markdown: markdown || rawHtml,
-			text: text || markdown || rawHtml,
+			title,
+			markdown,
+			text: text || markdown,
 		}
 	}
 
-	const markdown = await convertHtmlToMarkdown(rawHtml)
 	const text = document.body?.textContent?.replace(/\s+/g, " ").trim() || ""
 	return {
-		title: document.title?.trim() || fallbackTitle(url),
-		markdown: markdown || rawHtml,
-		text: text || markdown || rawHtml,
+		title,
+		markdown: rawHtml,
+		text: text || rawHtml,
 	}
 }
 
