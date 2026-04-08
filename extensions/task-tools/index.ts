@@ -291,7 +291,6 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	pi.on("session_start", async (_event, ctx) => updateWidget(ctx))
-	pi.on("session_switch", async (_event, ctx) => updateWidget(ctx))
 
 	pi.on("tool_execution_end", async (event, ctx) => {
 		if (event.toolName.startsWith("task_")) updateWidget(ctx)
