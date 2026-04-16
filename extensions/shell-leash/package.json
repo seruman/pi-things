@@ -1,0 +1,14 @@
+{
+  "name": "pi-shell-leash",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Shell command leash for pi sessions",
+  "scripts": {
+    "test": "bun test ./*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}
