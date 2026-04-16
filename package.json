@@ -5,9 +5,7 @@
   "type": "module",
   "description": "Pi extensions: unified web tools",
   "license": "MIT",
-  "keywords": [
-    "pi-package"
-  ],
+  "keywords": ["pi-package"],
   "scripts": {
     "lint": "biome lint .",
     "format": "biome format --write .",
@@ -21,12 +19,8 @@
       "./extensions/subagent-tools/index.ts",
       "./extensions/split-fork.ts"
     ],
-    "skills": [
-      "./extensions/web-tools/skills"
-    ],
-    "prompts": [
-      "./extensions/subagent-tools/prompts"
-    ]
+    "skills": ["./extensions/web-tools/skills"],
+    "prompts": ["./extensions/subagent-tools/prompts"]
   },
   "dependencies": {
     "defuddle": "^0.15.0",
@@ -41,8 +35,8 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
-    "@mariozechner/pi-coding-agent": "^0.66.0",
-    "@mariozechner/pi-tui": "^0.66.0",
+    "@mariozechner/pi-coding-agent": "^0.67.3",
+    "@mariozechner/pi-tui": "^0.67.3",
     "@sinclair/typebox": "^0.34.41",
     "@types/node": "^24.4.0",
     "typescript": "^5.9.2"
