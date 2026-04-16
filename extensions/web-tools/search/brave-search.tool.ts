@@ -1,7 +1,13 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent"
 import { z } from "zod"
 import { isRetryableNetworkError, isRetryableStatus, parseJson, withExponentialRetries } from "./providers/shared"
-import { braveSearchParams, normalizeError, renderToolResult, type ProgressDetails, summarizeSearchResult } from "./tool-ui"
+import {
+	type ProgressDetails,
+	braveSearchParams,
+	normalizeError,
+	renderToolResult,
+	summarizeSearchResult,
+} from "./tool-ui"
 
 type RetryableError = Error & { retryable?: boolean }
 
@@ -136,7 +142,10 @@ function formatSingleResultBlocks(
 		if (typeHints.length) lines.push(`Type Hints: ${typeHints.join(", ")}`)
 
 		if (includeExtraSnippets && item.extra_snippets?.length) {
-			const extras = item.extra_snippets.map((s) => clean(s)).filter(Boolean).slice(0, 5)
+			const extras = item.extra_snippets
+				.map((s) => clean(s))
+				.filter(Boolean)
+				.slice(0, 5)
 			if (extras.length) {
 				lines.push("Extra Snippets:")
 				for (const extra of extras) lines.push(`- ${clip(extra, 220)}`)
@@ -175,7 +184,8 @@ function formatBatchResultBlocks(
 			if (debug) {
 				lines.push("Debug:")
 				lines.push("- provider used: brave")
-				if (section.operatorsApplied !== undefined) lines.push(`- operators_applied: ${section.operatorsApplied ? "true" : "false"}`)
+				if (section.operatorsApplied !== undefined)
+					lines.push(`- operators_applied: ${section.operatorsApplied ? "true" : "false"}`)
 			}
 			lines.push("")
 			continue
@@ -185,7 +195,8 @@ function formatBatchResultBlocks(
 		if (debug) {
 			lines.push("Debug:")
 			lines.push("- provider used: brave")
-			if (section.operatorsApplied !== undefined) lines.push(`- operators_applied: ${section.operatorsApplied ? "true" : "false"}`)
+			if (section.operatorsApplied !== undefined)
+				lines.push(`- operators_applied: ${section.operatorsApplied ? "true" : "false"}`)
 		}
 		lines.push("")
 	}
@@ -262,7 +273,9 @@ async function runBraveRequest(input: {
 	const raw = (await response.json()) as unknown
 	const parsed = braveResponseSchema.safeParse(raw)
 	if (!parsed.success) {
-		throw new Error(`Brave API returned unexpected response shape: ${parsed.error.issues[0]?.message || "invalid response"}`)
+		throw new Error(
+			`Brave API returned unexpected response shape: ${parsed.error.issues[0]?.message || "invalid response"}`,
+		)
 	}
 
 	return parsed.data
@@ -375,15 +388,16 @@ export function registerBraveSearchTool(pi: ExtensionAPI) {
 				}
 			}
 
-			const querySummary =
-				queries.length === 1 ? queries[0] : `${queries[0]} +${Math.max(0, queries.length - 1)} more`
+			const querySummary = queries.length === 1 ? queries[0] : `${queries[0]} +${Math.max(0, queries.length - 1)} more`
 			const detailQueries = queries.length > 1 ? queries : undefined
 			const isBatch = queries.length > 1
 			const perQueryCount = params.count ?? (isBatch ? 3 : 5)
 			const concurrency = params.concurrency ?? 3
 
 			onUpdate?.({
-				content: [{ type: "text", text: `Searching Brave (${queries.length} quer${queries.length === 1 ? "y" : "ies"})…` }],
+				content: [
+					{ type: "text", text: `Searching Brave (${queries.length} quer${queries.length === 1 ? "y" : "ies"})…` },
+				],
 				details: {
 					phase: "search",
 					progress: 0.1,
@@ -411,7 +425,9 @@ export function registerBraveSearchTool(pi: ExtensionAPI) {
 					signal,
 					onUpdate: (completed, total, activeQuery) => {
 						onUpdate?.({
-							content: [{ type: "text", text: `Searched ${completed}/${total}${activeQuery ? ` · ${activeQuery}` : ""}` }],
+							content: [
+								{ type: "text", text: `Searched ${completed}/${total}${activeQuery ? ` · ${activeQuery}` : ""}` },
+							],
 							details: {
 								phase: "search",
 								progress: 0.1 + (completed / Math.max(1, total)) * 0.85,

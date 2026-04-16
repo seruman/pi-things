@@ -1,6 +1,7 @@
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent"
 import { z } from "zod"
 import type { SearchProvider } from "../types"
+import { getModelAuth, hasUsableAuth, normalizeModelAuth, setHeaderIfMissing } from "./auth"
 import {
 	consumeSseJson,
 	createRequestSignal,
@@ -9,7 +10,6 @@ import {
 	parseJson,
 	withExponentialRetries,
 } from "./shared"
-import { getModelAuth, hasUsableAuth, normalizeModelAuth, setHeaderIfMissing } from "./auth"
 
 const OPENAI_CODEX_PROVIDER = "openai-codex"
 const DEFAULT_BASE_URL = "https://chatgpt.com/backend-api"

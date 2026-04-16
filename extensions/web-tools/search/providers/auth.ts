@@ -7,11 +7,7 @@ export type ResolvedModelAuth = {
 	headers: Record<string, string>
 }
 
-export async function getModelAuth(
-	ctx: ExtensionContext,
-	provider: string,
-	modelId: string,
-): Promise<ModelAuthResult> {
+export async function getModelAuth(ctx: ExtensionContext, provider: string, modelId: string): Promise<ModelAuthResult> {
 	const model = ctx.modelRegistry.find(provider, modelId)
 	if (!model) return { ok: false, error: `model not found: ${provider}/${modelId}` }
 	return ctx.modelRegistry.getApiKeyAndHeaders(model)

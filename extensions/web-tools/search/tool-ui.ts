@@ -38,8 +38,16 @@ export const searchFallbackParams = Type.Object({
 
 export const braveSearchParams = Type.Object({
 	query: Type.Optional(Type.String({ description: "Single search query" })),
-	queries: Type.Optional(Type.Array(Type.String(), { minItems: 1, maxItems: 8, description: "Batch search queries (max 8)" })),
-	count: Type.Optional(Type.Integer({ minimum: 1, maximum: 20, description: "Number of results per query (default: 5; batch default: 3)" })),
+	queries: Type.Optional(
+		Type.Array(Type.String(), { minItems: 1, maxItems: 8, description: "Batch search queries (max 8)" }),
+	),
+	count: Type.Optional(
+		Type.Integer({
+			minimum: 1,
+			maximum: 20,
+			description: "Number of results per query (default: 5; batch default: 3)",
+		}),
+	),
 	offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 9, description: "Result page offset (0-9)" })),
 	country: Type.Optional(Type.String({ description: "Two-letter country code (default: US)" })),
 	freshness: Type.Optional(
@@ -54,7 +62,9 @@ export const braveSearchParams = Type.Object({
 	),
 	extraSnippets: Type.Optional(Type.Boolean({ description: "Include extra snippets from results" })),
 	goggles: Type.Optional(Type.Array(Type.String(), { minItems: 1, description: "Brave Goggles URLs/definitions" })),
-	concurrency: Type.Optional(Type.Integer({ minimum: 1, maximum: 6, description: "Batch query concurrency (default: 3)" })),
+	concurrency: Type.Optional(
+		Type.Integer({ minimum: 1, maximum: 6, description: "Batch query concurrency (default: 3)" }),
+	),
 	debug: Type.Optional(Type.Boolean({ description: "Include debug details in output" })),
 })
 

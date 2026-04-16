@@ -134,7 +134,9 @@ export function registerSearchFallbackTool(pi: ExtensionAPI) {
 
 				let content = `${result.text}${formatSources(result.sources)}`
 				if (params.debug) {
-					const failureLines = failures.length ? failures.map((f) => `- ${f.provider}: ${f.error}`).join("\n") : "- none"
+					const failureLines = failures.length
+						? failures.map((f) => `- ${f.provider}: ${f.error}`).join("\n")
+						: "- none"
 					content += [
 						"",
 						"---",

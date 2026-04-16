@@ -52,7 +52,9 @@ export const fetchParams = Type.Object({
 	perUrlMaxChars: Type.Optional(
 		Type.Integer({ minimum: 200, maximum: MAX_INLINE_CONTENT, description: "Max chars per URL (default: 3000)" }),
 	),
-	concurrency: Type.Optional(Type.Integer({ minimum: 1, maximum: 10, description: "Batch fetch concurrency (default: 3)" })),
+	concurrency: Type.Optional(
+		Type.Integer({ minimum: 1, maximum: 10, description: "Batch fetch concurrency (default: 3)" }),
+	),
 })
 
 function normalizeError(error: unknown): string {
@@ -144,7 +146,12 @@ function formatAcceptHeader(format: FetchFormat): string {
 	return "text/markdown;q=1.0, text/plain;q=0.9, text/html;q=0.8, application/xhtml+xml;q=0.7, */*;q=0.1"
 }
 
-async function buildRecord(url: string, raw: string, contentType: string | undefined, format: FetchFormat): Promise<FetchRecord> {
+async function buildRecord(
+	url: string,
+	raw: string,
+	contentType: string | undefined,
+	format: FetchFormat,
+): Promise<FetchRecord> {
 	const normalizedType = (contentType || "").split(";")[0].trim().toLowerCase()
 	const isHtml =
 		normalizedType.includes("text/html") ||

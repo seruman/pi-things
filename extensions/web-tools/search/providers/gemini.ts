@@ -1,6 +1,7 @@
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent"
 import { z } from "zod"
 import type { SearchProvider } from "../types"
+import { getModelAuth, normalizeModelAuth, setHeaderIfMissing } from "./auth"
 import {
 	consumeSseJson,
 	createRequestSignal,
@@ -9,7 +10,6 @@ import {
 	parseJson,
 	withExponentialRetries,
 } from "./shared"
-import { getModelAuth, normalizeModelAuth, setHeaderIfMissing } from "./auth"
 
 const PROVIDER = "google-gemini-cli"
 const BASE_URL = "https://cloudcode-pa.googleapis.com"

@@ -118,7 +118,10 @@ export function registerFetchTool(
 		name: config.name,
 		label: config.label,
 		description: config.description,
-		promptSnippet: config.label === "Fetch (Rendered)" ? "Fetch URL content through browser rendering" : "Fetch URL content with regular HTTP",
+		promptSnippet:
+			config.label === "Fetch (Rendered)"
+				? "Fetch URL content through browser rendering"
+				: "Fetch URL content with regular HTTP",
 		parameters: fetchParams,
 		async execute(_toolCallId, params, signal, onUpdate, _ctx: ExtensionContext) {
 			if (signal?.aborted) throw createAbortError()
