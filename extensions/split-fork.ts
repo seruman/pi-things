@@ -46,6 +46,11 @@ function shellQuote(value: string): string {
 }
 
 function getPiInvocationParts(): string[] {
+	const override = process.env.PI_SPLIT_FORK_COMMAND?.trim()
+	if (override) {
+		return [override]
+	}
+
 	const currentScript = process.argv[1]
 	if (currentScript && existsSync(currentScript)) {
 		return [process.execPath, currentScript]
