@@ -6,7 +6,7 @@ import {
 	keyHint,
 } from "@mariozechner/pi-coding-agent"
 import { type Component, Markdown, Text } from "@mariozechner/pi-tui"
-import { Type } from "@sinclair/typebox"
+import { Type } from "typebox"
 
 export type ProgressDetails = {
 	phase?: string

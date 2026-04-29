@@ -1,4 +1,4 @@
-import { Type } from "@sinclair/typebox"
+import { Type } from "typebox"
 import { Defuddle } from "defuddle/node"
 import { parseHTML } from "linkedom"
 import { runLightpandaFetch } from "./lightpanda"

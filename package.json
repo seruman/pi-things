@@ -35,14 +35,14 @@
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "*",
     "@mariozechner/pi-tui": "*",
-    "@sinclair/typebox": "*"
+    "typebox": "*"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
-    "@mariozechner/pi-coding-agent": "^0.67.3",
-    "@mariozechner/pi-tui": "^0.67.3",
-    "@sinclair/typebox": "^0.34.41",
+    "@mariozechner/pi-coding-agent": "^0.70.6",
+    "@mariozechner/pi-tui": "^0.70.6",
     "@types/node": "^24.4.0",
+    "typebox": "^1.0.55",
     "typescript": "^5.9.2"
   }
 }

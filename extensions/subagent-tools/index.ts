@@ -7,7 +7,7 @@ import type { AgentToolResult } from "@mariozechner/pi-agent-core"
 import { StringEnum } from "@mariozechner/pi-ai"
 import { type ExtensionAPI, getMarkdownTheme } from "@mariozechner/pi-coding-agent"
 import { Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui"
-import { Type } from "@sinclair/typebox"
+import { Type } from "typebox"
 import { type AgentConfig, type AgentScope, discoverAgents } from "./agents.js"
 
 const MAX_PARALLEL_TASKS = 8
@@ -707,7 +707,7 @@ export default function (pi: ExtensionAPI) {
 	})
 
 	pi.on("before_agent_start", async (_event, ctx) => {
-		const enabled = Boolean(pi.getFlag("--subagents-guidance"))
+		const enabled = Boolean(pi.getFlag("subagents-guidance"))
 		if (!enabled) return
 		const key = sessionKey(ctx)
 		if (guidanceSent.has(key)) return
@@ -801,7 +801,7 @@ export default function (pi: ExtensionAPI) {
 			const found = discoverAgents(ctx.cwd, agentScope)
 			const agents = found.agents
 			const confirmProjectAgents = params.confirmProjectAgents ?? true
-			const preferred = String(pi.getFlag("--subagents-default-agent") || "")
+			const preferred = String(pi.getFlag("subagents-default-agent") || "")
 
 			const details = (kind: Details["mode"], results: TaskResult[]): Details => ({
 				mode: kind,
@@ -1049,7 +1049,7 @@ export default function (pi: ExtensionAPI) {
 					0,
 				)
 			}
-			const agent = String(args.agent ?? `auto:${String(pi.getFlag("--subagents-default-agent") || "worker")}`)
+			const agent = String(args.agent ?? `auto:${String(pi.getFlag("subagents-default-agent") || "worker")}`)
 			return new Text(
 				theme.fg("toolTitle", theme.bold("subagent ")) + theme.fg("accent", agent) + theme.fg("muted", ` [${scope}]`),
 				0,
