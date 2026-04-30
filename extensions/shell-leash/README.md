@@ -16,6 +16,7 @@ Not a sandbox, not a security boundary, just enough to stop me swearing to the s
 | `git.reset` | `git reset` (soft, mixed) |
 | `git.reset.hard` | `git reset --hard` |
 | `git.clean` | `git clean` |
+| `git.config.global` | `git config --global ...` |
 | `git.push` | `git push` (regular) |
 | `git.push.force` | `git push --force`, `git push --force-with-lease` |
 | `gh.pr.create` | `gh pr create` |

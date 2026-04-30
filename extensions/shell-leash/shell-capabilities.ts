@@ -110,6 +110,9 @@ export const DEFAULT_CAPABILITIES: Capability[] = [
 		commandRule("git.reset.hard", ["git", "reset"], (argv) => argv.includes("--hard")),
 	]),
 	capability("git.clean", "Run git clean", [commandRule("git.clean", ["git", "clean"])]),
+	capability("git.config.global", "Run git config --global", [
+		commandRule("git.config.global", ["git", "config"], (argv) => argv.includes("--global")),
+	]),
 	capability("git.push", "Run git push", [
 		commandRule(
 			"git.push.default",
