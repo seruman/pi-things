@@ -145,7 +145,8 @@ function sessionKey(ctx: { cwd: string; sessionManager: { getSessionFile(): stri
 
 const guidance = [
 	"Subagent usage policy:",
-	"- Use the subagent tool for repo-wide exploration or independent work units.",
+	"- Use the subagent tool only for large repo-wide exploration, expensive independent work units, or when the user explicitly asks for parallel subagents.",
+	"- Do not use subagents for small local checks, obvious file reads, or inspecting the current extension's own configuration.",
 	"- For independent units, prefer one parallel call with tasks[].",
 	"- When the user asks for N parallel subagents, make exactly one subagent tool call with tasks.length = N.",
 	"- Do not poll for subagent status; this tool already waits and streams progress.",

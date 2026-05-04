@@ -68,7 +68,7 @@ The extension injects two guidance layers:
 1. **Session-level model guidance**
    - one-time hidden guidance message per session
    - controlled by `--subagents-guidance`, default `true`
-   - steers model behavior toward one blocking call, parallel batching, and no polling
+   - steers model behavior toward large repo-wide exploration, expensive independent work units, one blocking call, parallel batching, and no polling
 
 2. **Child subagent system guidance**
    - per-subprocess appended guidance, includes efficiency constraints and submit_result closure contract
