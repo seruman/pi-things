@@ -27,9 +27,9 @@ export type ProgressDetails = {
 export const searchFallbackParams = Type.Object({
 	query: Type.String({ description: "The search query" }),
 	providers: Type.Optional(
-		Type.Array(Type.Union([Type.Literal("gemini"), Type.Literal("openai"), Type.Literal("exa")]), {
+		Type.Array(Type.Union([Type.Literal("openai"), Type.Literal("exa")]), {
 			minItems: 1,
-			description: 'Provider fallback order (default: ["gemini", "openai", "exa"])',
+			description: 'Provider fallback order (default: ["openai", "exa"])',
 		}),
 	),
 	live: Type.Optional(Type.Boolean({ description: "Use live web access when provider supports it (default: true)" })),

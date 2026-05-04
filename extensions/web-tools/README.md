@@ -43,21 +43,19 @@ Fallback search with provider fallback order.
 **Requirements**
 
 - Exa MCP endpoint is available without additional auth.
-- Optional authenticated Pi providers:
-  - `google-gemini-cli` (Gemini)
+- Optional authenticated Pi provider:
   - `openai-codex` (OpenAI Codex)
-- Default fallback order is `gemini` → `openai` → `exa` (unless overridden via `providers`).
+- Default fallback order is `openai` → `exa` (unless overridden via `providers`).
 
 **Provider/model mapping**
 
 - `exa` provider: `exa-mcp-web_search_exa`
-- `gemini` provider (`google-gemini-cli`): `gemini-2.5-flash`
 - `openai` provider (`openai-codex`): `gpt-5.3-codex`
 
 ```ts
 web_search_fallback({
   query: string,
-  providers?: ("gemini" | "openai" | "exa")[],
+  providers?: ("openai" | "exa")[],
   live?: boolean,
   debug?: boolean,
 })

@@ -1,6 +1,6 @@
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent"
 
-export type SearchProviderId = "openai" | "gemini" | "exa"
+export type SearchProviderId = "openai" | "exa"
 
 export type SearchSource = {
 	url: string

@@ -1,6 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent"
 import { exaProvider } from "./providers/exa"
-import { geminiProvider } from "./providers/gemini"
 import { openaiProvider } from "./providers/openai"
 import {
 	type ProgressDetails,
@@ -14,7 +13,6 @@ import type { SearchAttemptFailure, SearchProvider, SearchProviderId, SearchResu
 const providers: Record<SearchProviderId, SearchProvider> = {
 	exa: exaProvider,
 	openai: openaiProvider,
-	gemini: geminiProvider,
 }
 
 async function runSearchWithFallback(
@@ -23,7 +21,7 @@ async function runSearchWithFallback(
 ): Promise<{ result: SearchResult; failures: SearchAttemptFailure[] }> {
 	const failures: SearchAttemptFailure[] = []
 
-	const defaults: SearchProviderId[] = ["gemini", "openai", "exa"]
+	const defaults: SearchProviderId[] = ["openai", "exa"]
 	const ordered: SearchProviderId[] = []
 	for (const id of input.providers?.length ? input.providers : defaults) {
 		if (!ordered.includes(id)) ordered.push(id)
@@ -70,7 +68,7 @@ export function registerSearchFallbackTool(pi: ExtensionAPI) {
 	pi.registerTool<typeof searchFallbackParams, ProgressDetails>({
 		name: "web_search_fallback",
 		label: "Web Search (Fallback)",
-		description: "Fallback web search with provider failover (Gemini/OpenAI/Exa).",
+		description: "Fallback web search with provider failover (OpenAI/Exa).",
 		promptSnippet: "Search the web with provider failover",
 		parameters: searchFallbackParams,
 		async execute(_toolCallId, params, signal, onUpdate, ctx: ExtensionContext) {
