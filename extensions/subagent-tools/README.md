@@ -39,6 +39,7 @@ Chain mode supports `{previous}` placeholder substitution from the prior step ou
 ## Defaults
 
 - default single agent: `worker` via `--subagents-default-agent`
+- child pi invocation follows the current process when possible, or can be overridden with `PI_SUBAGENT_COMMAND` (legacy `PI_SUBAGENT_BIN` still works for binary-only overrides)
 - default `agentScope`: `"user"`
 - default `confirmProjectAgents`: `true`
 - project-agent approval can be remembered for the current pi session (per project)

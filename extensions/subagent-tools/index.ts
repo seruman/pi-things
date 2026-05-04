@@ -291,6 +291,65 @@ function formatSubmitResult(payload: SubmitResultPayload) {
 	}
 }
 
+function parseCommandLine(value: string): string[] {
+	const parts: string[] = []
+	let current = ""
+	let quote: "'" | '"' | undefined
+	let escaped = false
+
+	for (const char of value) {
+		if (escaped) {
+			current += char
+			escaped = false
+			continue
+		}
+		if (char === "\\" && quote !== "'") {
+			escaped = true
+			continue
+		}
+		if ((char === "'" || char === '"') && (!quote || quote === char)) {
+			quote = quote ? undefined : char
+			continue
+		}
+		if (/\s/.test(char) && !quote) {
+			if (current) {
+				parts.push(current)
+				current = ""
+			}
+			continue
+		}
+		current += char
+	}
+
+	if (escaped) current += "\\"
+	if (current) parts.push(current)
+	return parts
+}
+
+function getPiInvocationParts(): [string, ...string[]] {
+	const override = process.env.PI_SUBAGENT_COMMAND?.trim()
+	if (override) {
+		const [command, ...args] = parseCommandLine(override)
+		if (command) return [command, ...args]
+	}
+
+	const legacyBinOverride = process.env.PI_SUBAGENT_BIN?.trim()
+	if (legacyBinOverride) return [legacyBinOverride]
+
+	const currentScript = process.argv[1]
+	if (currentScript && fs.existsSync(currentScript)) {
+		return [process.execPath, currentScript]
+	}
+
+	const execName = path.basename(process.execPath).toLowerCase()
+	const isGenericRuntime = /^(node|bun)(\.exe)?$/.test(execName)
+	if (!isGenericRuntime) {
+		return [process.execPath]
+	}
+
+	return ["pi"]
+}
+
 function agentDir() {
 	if (process.env.PI_CODING_AGENT_DIR) return process.env.PI_CODING_AGENT_DIR
 	return path.join(os.homedir(), ".pi", "agent")
@@ -379,7 +438,8 @@ async function runTask(
 	}
 
 	try {
-		const piBin = process.env.PI_SUBAGENT_BIN || "pi"
+		const piInvocation = getPiInvocationParts()
+		const [piCommand, ...piCommandArgs] = piInvocation
 		const childExtension = childSubmitResultExtensionPath()
 		const args: string[] = [
 			"--mode",
@@ -407,11 +467,12 @@ async function runTask(
 		args.push(`Task: ${input.task}`)
 
 		const cwd = input.cwd ?? baseCwd
-		const runId = createRun({ agent: input.agent, task: input.task, cwd, args: [piBin, ...args] })
+		const spawnArgs = [...piCommandArgs, ...args]
+		const runId = createRun({ agent: input.agent, task: input.task, cwd, args: [piCommand, ...spawnArgs] })
 
 		tmpAgentDir = cloneAgentDir()
 		result.exitCode = await new Promise<number>((resolve) => {
-			const proc = spawn(piBin, args, {
+			const proc = spawn(piCommand, spawnArgs, {
 				cwd,
 				shell: false,
 				stdio: ["ignore", "pipe", "pipe"],
