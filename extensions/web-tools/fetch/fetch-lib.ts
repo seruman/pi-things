@@ -1,6 +1,6 @@
-import { Type } from "typebox"
 import { Defuddle } from "defuddle/node"
 import { parseHTML } from "linkedom"
+import { Type } from "typebox"
 import { runLightpandaFetch } from "./lightpanda"
 
 export type FetchMode = "http" | "rendered"
