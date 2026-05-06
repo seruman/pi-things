@@ -219,12 +219,6 @@ function totalUsage(results: TaskResult[]) {
 
 const SPIN = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const
 
-function status(item: TaskResult) {
-	if (item.exitCode === -1) return "running"
-	if (item.exitCode === 0) return "done"
-	return "failed"
-}
-
 function marker(item: TaskResult, tick = Date.now()) {
 	if (item.exitCode === -1) return SPIN[Math.floor(tick / 100) % SPIN.length]
 	if (item.exitCode === 0) return "✓"
