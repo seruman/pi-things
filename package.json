@@ -12,7 +12,9 @@
     "check": "biome check .",
     "check:write": "biome check --write .",
     "test:shell-leash": "bun test extensions/shell-leash/*.test.ts",
-    "typecheck:shell-leash": "tsc -p extensions/shell-leash/tsconfig.json"
+    "test:secret-guard": "bun test extensions/secret-guard/*.test.ts",
+    "typecheck:shell-leash": "tsc -p extensions/shell-leash/tsconfig.json",
+    "typecheck:secret-guard": "bunx tsc -p extensions/secret-guard/tsconfig.json"
   },
   "pi": {
     "extensions": [
@@ -20,13 +22,15 @@
       "./extensions/task-tools/index.ts",
       "./extensions/subagent-tools/index.ts",
       "./extensions/split-fork.ts",
-      "./extensions/shell-leash/index.ts"
+      "./extensions/shell-leash/index.ts",
+      "./extensions/secret-guard/index.ts"
     ],
     "skills": ["./extensions/web-tools/skills"],
     "prompts": ["./extensions/subagent-tools/prompts"]
   },
   "dependencies": {
     "defuddle": "^0.15.0",
+    "ignore": "^7.0.5",
     "just-bash": "^2.14.2",
     "linkedom": "^0.18.12",
     "yaml": "^2.8.1",
