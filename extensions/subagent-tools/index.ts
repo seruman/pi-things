@@ -385,14 +385,15 @@ async function runTask(
 ): Promise<TaskResult> {
 	const agent = agents.find((item) => item.name === input.agent)
 	if (!agent) {
+		const message = `Unknown agent: ${input.agent}`
 		return {
 			agent: input.agent,
 			agentSource: "unknown",
 			task: input.task,
 			exitCode: 1,
-			stderr: `Unknown agent: ${input.agent}`,
-			final: "",
-			events: [],
+			stderr: message,
+			final: message,
+			events: [message],
 			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0, contextTokens: 0 },
 			step: input.step,
 		}
