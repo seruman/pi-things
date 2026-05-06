@@ -266,9 +266,9 @@ function promptFile(agentName: string, prompt: string) {
 	return { dir, filePath }
 }
 
-function childSubmitResultExtensionPath() {
+function extensionSiblingPath(...parts: string[]) {
 	const file = fileURLToPath(import.meta.url)
-	return path.join(path.dirname(file), "internal", "submit-result-extension.ts")
+	return path.join(path.dirname(file), ...parts)
 }
 
 function parseSubmitResultPayload(input: Record<string, unknown>): SubmitResultPayload | null {
@@ -441,7 +441,8 @@ async function runTask(
 	try {
 		const piInvocation = getPiInvocationParts()
 		const [piCommand, ...piCommandArgs] = piInvocation
-		const childExtension = childSubmitResultExtensionPath()
+		const childExtension = extensionSiblingPath("internal", "submit-result-extension.ts")
+		const secretGuardExtension = extensionSiblingPath("..", "secret-guard", "index.ts")
 		const args: string[] = [
 			"--mode",
 			"json",
@@ -452,6 +453,8 @@ async function runTask(
 			"--no-prompt-templates",
 			"-e",
 			childExtension,
+			"-e",
+			secretGuardExtension,
 		]
 
 		const toolList = agent.tools

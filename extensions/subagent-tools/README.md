@@ -92,5 +92,5 @@ Precedence: `project > user > bundled`, same-name agent overrides lower priority
 - Subagent calls are blocking, progress is streamed via tool updates/UI.
 - With `agentScope: "project" | "both"` and `confirmProjectAgents: true`, interactive runs show a trust selector: `Allow once`, `Always allow this session`, or `Cancel`.
 - Long outputs are truncated in-context and spilled to `.pi/subagent-output/*`.
-- Spawned subprocesses run with `--no-extensions --no-skills --no-prompt-templates`, then inject only the internal `submit_result` extension.
+- Spawned subprocesses run with `--no-extensions --no-skills --no-prompt-templates`, then inject only the internal `submit_result` extension and package-local `secret-guard` extension.
 - Normal child tool access still comes from the selected agent's configured tool list; `submit_result` is separate from that list.
