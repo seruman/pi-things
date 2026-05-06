@@ -3,6 +3,15 @@
   "formatter": {
     "lineWidth": 120
   },
+  "linter": {
+    "rules": {
+      "correctness": {
+        "noUnusedImports": "error",
+        "noUnusedVariables": "error",
+        "noUnusedFunctionParameters": "error"
+      }
+    }
+  },
   "javascript": {
     "formatter": {
       "semicolons": "asNeeded"
