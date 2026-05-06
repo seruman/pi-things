@@ -12,7 +12,6 @@
     "check": "biome check .",
     "check:write": "biome check --write .",
     "test:shell-leash": "bun test extensions/shell-leash/*.test.ts",
-    "test:secret-guard": "bun test extensions/secret-guard/*.test.ts",
     "typecheck:web-search": "bunx tsc -p extensions/web-search/tsconfig.json",
     "typecheck:web-fetch": "bunx tsc -p extensions/web-fetch/tsconfig.json",
     "typecheck:task-tools": "bunx tsc -p extensions/task-tools/tsconfig.json",
