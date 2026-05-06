@@ -549,13 +549,6 @@ async function runTask(
 					pushEvent(result, `✓ ${SUBMIT_RESULT_TOOL}(${parsed.status})`)
 				}
 
-				if (data.type === "tool_call_start") {
-					const toolName = asString(data.toolName) ?? "tool"
-					const inputArgs = isRecord(data.input) ? data.input : {}
-					pushEvent(result, `→ ${summarizeToolCall(toolName, inputArgs)}`)
-					emit()
-				}
-
 				if (data.type === "tool_execution_start") {
 					const toolName = asString(data.toolName) ?? "tool"
 					const inputArgs = isRecord(data.args) ? data.args : {}

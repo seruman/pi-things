@@ -3,7 +3,7 @@ import { Type } from "typebox"
 
 const Params = Type.Object(
 	{
-		status: Type.Optional(Type.Union([Type.Literal("success"), Type.Literal("aborted")])),
+		status: Type.Union([Type.Literal("success"), Type.Literal("aborted")]),
 		data: Type.Optional(Type.Unknown({ description: "Structured result payload" })),
 		error: Type.Optional(Type.String({ description: "Error details for aborted status" })),
 	},
@@ -38,14 +38,13 @@ export default function (pi: ExtensionAPI) {
 		description: "Finalize delegated subagent work with structured output. Call exactly once when done.",
 		parameters: Params,
 		async execute(_toolCallId, params) {
-			const status: SubmitStatus = params.status === "aborted" ? "aborted" : "success"
 			const details: SubmitResultDetails = {
-				status,
+				status: params.status,
 				...(params.data !== undefined ? { data: params.data } : {}),
 				...(params.error ? { error: params.error } : {}),
 			}
 
-			if (status === "aborted" && !details.error) {
+			if (params.status === "aborted" && !details.error) {
 				return {
 					content: [{ type: "text", text: "submit_result aborted requires error" }],
 					details,
