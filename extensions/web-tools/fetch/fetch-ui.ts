@@ -36,21 +36,10 @@ export function renderFetchResult(
 
 export function renderFetchCall(args: Record<string, unknown>, theme: Theme, toolName = "web_fetch"): Text {
 	const url = typeof args.url === "string" ? args.url : ""
-	const urls = Array.isArray(args.urls) ? args.urls.filter((u): u is string => typeof u === "string") : []
 	const format = typeof args.format === "string" ? args.format : "auto"
 
-	if (!url && urls.length === 0) {
+	if (!url) {
 		return new Text(theme.fg("toolTitle", theme.bold(`${toolName} `)) + theme.fg("error", "(no URL)"), 0, 0)
-	}
-
-	if (urls.length > 0) {
-		const header = theme.fg("toolTitle", theme.bold(`${toolName} `)) + theme.fg("muted", `(${format})`)
-		const lines = [header]
-		for (const u of urls) {
-			const display = u.length > 120 ? `${u.slice(0, 117)}...` : u
-			lines.push(theme.fg("accent", display))
-		}
-		return new Text(lines.join("\n"), 0, 0)
 	}
 
 	const display = url.length > 80 ? `${url.slice(0, 77)}...` : url

@@ -11,16 +11,6 @@ import {
 
 type RetryableError = Error & { retryable?: boolean }
 
-type QueryResult = {
-	query: string
-	results: BraveWebResult[]
-	moreResultsAvailable: boolean
-	alteredQuery?: string
-	operatorsApplied?: boolean
-	mutatedByGoggles?: boolean
-	error?: string
-}
-
 const MAX_TOTAL_OUTPUT_CHARS = 120_000
 
 const braveWebResultSchema = z
@@ -54,16 +44,9 @@ const braveResponseSchema = z
 	.object({
 		query: z
 			.object({
-				original: z.string().optional(),
 				altered: z.string().optional(),
-				cleaned: z.string().optional(),
 				more_results_available: z.boolean().optional(),
-				search_operators: z
-					.object({
-						applied: z.boolean().optional(),
-					})
-					.passthrough()
-					.optional(),
+				search_operators: z.object({ applied: z.boolean().optional() }).passthrough().optional(),
 			})
 			.passthrough()
 			.optional(),
@@ -89,15 +72,6 @@ function clean(text: string): string {
 	return text.replace(/\s+/g, " ").trim()
 }
 
-function normalizeQueries(input: { query?: string; queries?: string[] }): string[] {
-	const single = typeof input.query === "string" ? input.query.trim() : ""
-	const many = Array.isArray(input.queries) ? input.queries.map((q) => q.trim()).filter(Boolean) : []
-
-	if (single && many.length) throw new Error("Provide either query or queries, not both")
-	if (!single && !many.length) throw new Error("Provide query or queries")
-	return single ? [single] : many
-}
-
 function pickSourceName(item: BraveWebResult): string {
 	return clean(item.profile?.long_name || item.profile?.name || "")
 }
@@ -115,91 +89,69 @@ function collectTypeHints(item: BraveWebResult): string[] {
 	return hints
 }
 
-function formatSingleResultBlocks(
+function formatResults(
+	query: string,
+	response: BraveResponse,
 	results: BraveWebResult[],
 	includeExtraSnippets: boolean,
-	options: { showLanguage: boolean },
-): string {
-	const lines: string[] = []
-	for (const [index, item] of results.entries()) {
-		const title = clean(item.title || item.url || "Untitled")
-		const url = clean(item.url || "")
-		const source = pickSourceName(item)
-		const language = clean(item.language || "")
-		const snippet = clip(clean(item.description || ""), 500)
-		const age = clean(item.age || "")
-		const published = clean(item.page_age || "")
-		const typeHints = collectTypeHints(item)
-
-		lines.push(`--- Result ${index + 1} ---`)
-		lines.push(`Title: ${title}`)
-		lines.push(`URL: ${url}`)
-		if (source) lines.push(`Source: ${source}`)
-		if (options.showLanguage && language) lines.push(`Language: ${language}`)
-		if (age) lines.push(`Age: ${age}`)
-		if (published) lines.push(`Published: ${published}`)
-		lines.push(`Snippet: ${snippet}`)
-		if (typeHints.length) lines.push(`Type Hints: ${typeHints.join(", ")}`)
-
-		if (includeExtraSnippets && item.extra_snippets?.length) {
-			const extras = item.extra_snippets
-				.map((s) => clean(s))
-				.filter(Boolean)
-				.slice(0, 5)
-			if (extras.length) {
-				lines.push("Extra Snippets:")
-				for (const extra of extras) lines.push(`- ${clip(extra, 220)}`)
-			}
-		}
-
-		lines.push("")
-	}
-	return lines.join("\n").trimEnd()
-}
-
-function formatBatchResultBlocks(
-	results: QueryResult[],
-	includeExtraSnippets: boolean,
 	debug: boolean,
-	options: { showLanguage: boolean },
+	showLanguage: boolean,
 ): string {
-	const lines: string[] = []
-	for (const [index, section] of results.entries()) {
-		lines.push(`=== Query ${index + 1} ===`)
-		lines.push(`Query: ${section.query}`)
-		if (section.alteredQuery && clean(section.alteredQuery) && clean(section.alteredQuery) !== clean(section.query)) {
-			lines.push(`Altered Query: ${clean(section.alteredQuery)}`)
-		}
-		lines.push(`More Results Available: ${section.moreResultsAvailable ? "true" : "false"}`)
-		if (section.mutatedByGoggles) lines.push("Re-ranked by Goggles: yes")
-		if (section.operatorsApplied === true) lines.push("Operators Applied: yes")
-		if (section.error) {
-			lines.push(`Error: ${section.error}`)
-			lines.push("")
-			continue
-		}
-
-		if (!section.results.length) {
-			lines.push("No results found.")
-			if (debug) {
-				lines.push("Debug:")
-				lines.push("- provider used: brave")
-				if (section.operatorsApplied !== undefined)
-					lines.push(`- operators_applied: ${section.operatorsApplied ? "true" : "false"}`)
-			}
-			lines.push("")
-			continue
-		}
-
-		lines.push(formatSingleResultBlocks(section.results, includeExtraSnippets, options))
-		if (debug) {
-			lines.push("Debug:")
-			lines.push("- provider used: brave")
-			if (section.operatorsApplied !== undefined)
-				lines.push(`- operators_applied: ${section.operatorsApplied ? "true" : "false"}`)
-		}
-		lines.push("")
+	const lines: string[] = [`Query: ${query}`]
+	if (response.query?.altered && clean(response.query.altered) !== clean(query)) {
+		lines.push(`Altered Query: ${clean(response.query.altered)}`)
 	}
+	lines.push(`More Results Available: ${response.query?.more_results_available === true ? "true" : "false"}`)
+	if (response.web?.mutated_by_goggles) lines.push("Re-ranked by Goggles: yes")
+	if (response.query?.search_operators?.applied === true) lines.push("Operators Applied: yes")
+	lines.push("")
+
+	if (!results.length) {
+		lines.push("No results found.")
+	} else {
+		for (const [index, item] of results.entries()) {
+			const title = clean(item.title || item.url || "Untitled")
+			const url = clean(item.url || "")
+			const source = pickSourceName(item)
+			const language = clean(item.language || "")
+			const snippet = clip(clean(item.description || ""), 500)
+			const age = clean(item.age || "")
+			const published = clean(item.page_age || "")
+			const typeHints = collectTypeHints(item)
+
+			lines.push(`--- Result ${index + 1} ---`)
+			lines.push(`Title: ${title}`)
+			lines.push(`URL: ${url}`)
+			if (source) lines.push(`Source: ${source}`)
+			if (showLanguage && language) lines.push(`Language: ${language}`)
+			if (age) lines.push(`Age: ${age}`)
+			if (published) lines.push(`Published: ${published}`)
+			lines.push(`Snippet: ${snippet}`)
+			if (typeHints.length) lines.push(`Type Hints: ${typeHints.join(", ")}`)
+
+			if (includeExtraSnippets && item.extra_snippets?.length) {
+				const extras = item.extra_snippets
+					.map((s) => clean(s))
+					.filter(Boolean)
+					.slice(0, 5)
+				if (extras.length) {
+					lines.push("Extra Snippets:")
+					for (const extra of extras) lines.push(`- ${clip(extra, 220)}`)
+				}
+			}
+
+			lines.push("")
+		}
+	}
+
+	if (debug) {
+		lines.push("Debug:")
+		lines.push("- provider used: brave")
+		if (response.query?.search_operators?.applied !== undefined) {
+			lines.push(`- operators_applied: ${response.query.search_operators.applied ? "true" : "false"}`)
+		}
+	}
+
 	return lines.join("\n").trimEnd()
 }
 
@@ -281,163 +233,51 @@ async function runBraveRequest(input: {
 	return parsed.data
 }
 
-async function runBatch(options: {
-	queries: string[]
-	count: number
-	offset: number
-	country: string
-	freshness?: string
-	searchLang?: string
-	uiLang?: string
-	safesearch?: "off" | "moderate" | "strict"
-	extraSnippets?: boolean
-	goggles?: string[]
-	concurrency: number
-	signal?: AbortSignal
-	onUpdate?: (completed: number, total: number, activeQuery?: string) => void
-}): Promise<QueryResult[]> {
-	const total = options.queries.length
-	const output: Array<QueryResult | undefined> = new Array(total)
-	let next = 0
-	let completed = 0
-
-	const worker = async () => {
-		while (true) {
-			if (options.signal?.aborted) throw new DOMException("aborted", "AbortError")
-			const current = next
-			next += 1
-			if (current >= total) return
-
-			const query = options.queries[current]
-			try {
-				const response = await withExponentialRetries({
-					maxRetries: 2,
-					baseDelayMs: 1000,
-					signal: options.signal,
-					shouldRetry: (err) => (err as RetryableError).retryable === true || isRetryableNetworkError(err),
-					run: async () =>
-						runBraveRequest({
-							query,
-							count: options.count,
-							offset: options.offset,
-							country: options.country,
-							freshness: options.freshness,
-							searchLang: options.searchLang,
-							uiLang: options.uiLang,
-							safesearch: options.safesearch,
-							extraSnippets: options.extraSnippets,
-							goggles: options.goggles,
-							signal: options.signal,
-						}),
-				})
-
-				const results = (response.web?.results || [])
-					.filter((item) => item.url)
-					.slice(0, Math.max(1, Math.min(20, options.count)))
-
-				output[current] = {
-					query,
-					results,
-					moreResultsAvailable: response.query?.more_results_available === true,
-					alteredQuery: response.query?.altered,
-					operatorsApplied: response.query?.search_operators?.applied,
-					mutatedByGoggles: response.web?.mutated_by_goggles === true,
-				}
-			} catch (error) {
-				if ((error instanceof Error && error.name === "AbortError") || options.signal?.aborted) throw error
-				const normalized = normalizeError(error)
-				output[current] = {
-					query,
-					results: [],
-					moreResultsAvailable: false,
-					error: normalized.message,
-				}
-			}
-
-			completed += 1
-			options.onUpdate?.(completed, total, query)
-		}
-	}
-
-	const workers = Math.min(Math.max(1, options.concurrency), total)
-	await Promise.all(Array.from({ length: workers }, () => worker()))
-	return output.filter((item): item is QueryResult => Boolean(item))
-}
-
 export function registerBraveSearchTool(pi: ExtensionAPI) {
 	pi.registerTool<typeof braveSearchParams, ProgressDetails>({
 		name: "web_search",
 		label: "Web Search",
-		description:
-			"Search the web using Brave Search API (primary provider). Supports single query or batched queries. If unavailable/auth fails, use web_search_fallback.",
+		description: "Search the web using Brave Search API.",
 		promptSnippet: "Search the web using Brave Search API",
 		parameters: braveSearchParams,
 		async execute(_toolCallId, params, signal, onUpdate) {
 			if (signal?.aborted) throw new DOMException("aborted", "AbortError")
 			const startedAt = Date.now()
-
-			let queries: string[]
-			try {
-				queries = normalizeQueries(params)
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error)
+			const query = params.query.trim()
+			if (!query) {
 				return {
-					content: [{ type: "text", text: `Error: ${message}` }],
+					content: [{ type: "text", text: "Error: query is required" }],
 					isError: true,
-					details: { error: message, phase: "error", label: "search", provider: "brave" },
+					details: { error: "query is required", phase: "error", label: "search", provider: "brave" },
 				}
 			}
 
-			const querySummary = queries.length === 1 ? queries[0] : `${queries[0]} +${Math.max(0, queries.length - 1)} more`
-			const detailQueries = queries.length > 1 ? queries : undefined
-			const isBatch = queries.length > 1
-			const perQueryCount = params.count ?? (isBatch ? 3 : 5)
-			const concurrency = params.concurrency ?? 3
-
 			onUpdate?.({
-				content: [
-					{ type: "text", text: `Searching Brave (${queries.length} quer${queries.length === 1 ? "y" : "ies"})…` },
-				],
-				details: {
-					phase: "search",
-					progress: 0.1,
-					label: "search",
-					provider: "brave",
-					query: querySummary,
-					queries: detailQueries,
-				},
+				content: [{ type: "text", text: `Searching Brave: ${query}` }],
+				details: { phase: "search", progress: 0.1, label: "search", provider: "brave", query },
 			})
 
-			let queryResults: QueryResult[]
+			let response: BraveResponse
 			try {
-				queryResults = await runBatch({
-					queries,
-					count: perQueryCount,
-					offset: params.offset ?? 0,
-					country: params.country ?? "US",
-					freshness: params.freshness,
-					searchLang: params.searchLang,
-					uiLang: params.uiLang,
-					safesearch: params.safesearch,
-					extraSnippets: params.extraSnippets,
-					goggles: params.goggles,
-					concurrency,
+				response = await withExponentialRetries({
+					maxRetries: 2,
+					baseDelayMs: 1000,
 					signal,
-					onUpdate: (completed, total, activeQuery) => {
-						onUpdate?.({
-							content: [
-								{ type: "text", text: `Searched ${completed}/${total}${activeQuery ? ` · ${activeQuery}` : ""}` },
-							],
-							details: {
-								phase: "search",
-								progress: 0.1 + (completed / Math.max(1, total)) * 0.85,
-								label: "search",
-								provider: "brave",
-								query: querySummary,
-								queries: detailQueries,
-							},
-						})
-					},
+					shouldRetry: (err) => (err as RetryableError).retryable === true || isRetryableNetworkError(err),
+					run: async () =>
+						runBraveRequest({
+							query,
+							count: params.count ?? 5,
+							offset: params.offset ?? 0,
+							country: params.country ?? "US",
+							freshness: params.freshness,
+							searchLang: params.searchLang,
+							uiLang: params.uiLang,
+							safesearch: params.safesearch,
+							extraSnippets: params.extraSnippets,
+							goggles: params.goggles,
+							signal,
+						}),
 				})
 			} catch (error) {
 				if ((error instanceof Error && error.name === "AbortError") || signal?.aborted) {
@@ -454,35 +294,38 @@ export function registerBraveSearchTool(pi: ExtensionAPI) {
 						statusCode: normalized.statusCode,
 						summary: "Brave search failed",
 						provider: "brave",
-						query: querySummary,
-						queries: detailQueries,
+						query,
 						durationMs: Date.now() - startedAt,
 					},
 				}
 			}
 
-			const failed = queryResults.filter((q) => q.error).length
-			const successful = queryResults.length - failed
-			const content = formatBatchResultBlocks(queryResults, params.extraSnippets === true, params.debug === true, {
-				showLanguage: Boolean(params.searchLang),
-			})
-			const aggregateTruncated = content.length > MAX_TOTAL_OUTPUT_CHARS
-			const output = aggregateTruncated
-				? `${content.slice(0, MAX_TOTAL_OUTPUT_CHARS)}\n\n[Output truncated: aggregate limit reached]`
-				: content
+			const results = (response.web?.results || [])
+				.filter((item) => item.url)
+				.slice(0, Math.max(1, Math.min(20, params.count ?? 5)))
+			const content = formatResults(
+				query,
+				response,
+				results,
+				params.extraSnippets === true,
+				params.debug === true,
+				Boolean(params.searchLang),
+			)
+			const output =
+				content.length > MAX_TOTAL_OUTPUT_CHARS
+					? `${content.slice(0, MAX_TOTAL_OUTPUT_CHARS)}\n\n[Output truncated: aggregate limit reached]`
+					: content
 
 			return {
 				content: [{ type: "text", text: output }],
-				isError: successful === 0,
+				isError: false,
 				details: {
 					phase: "done",
 					progress: 1,
 					label: "search",
 					summary: summarizeSearchResult(output),
 					provider: "brave",
-					query: querySummary,
-					queries: detailQueries,
-					error: successful === 0 && failed > 0 ? `${failed}/${queryResults.length} queries failed` : undefined,
+					query,
 					durationMs: Date.now() - startedAt,
 				},
 			}

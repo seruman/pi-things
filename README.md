@@ -4,7 +4,7 @@ Me just prompting the shit out of LLMs to create things I want in pi.
 
 ## Things
 
-- [web-tools](./extensions/web-tools/README.md)
+- [web-search / web-fetch](./extensions/web-tools/README.md)
 - [task-tools](./extensions/task-tools/README.md)
 - [subagent-tools](./extensions/subagent-tools/README.md)
 - [secret-guard](./extensions/secret-guard/README.md)

@@ -41,8 +41,7 @@ export function normalizeMarkdown(text: string): string {
 }
 
 export const fetchParams = Type.Object({
-	url: Type.Optional(Type.String({ description: "URL to fetch" })),
-	urls: Type.Optional(Type.Array(Type.String(), { minItems: 1, maxItems: 10, description: "URLs to fetch in batch" })),
+	url: Type.String({ description: "URL to fetch" }),
 	format: Type.Optional(
 		Type.Union([Type.Literal("auto"), Type.Literal("markdown"), Type.Literal("text"), Type.Literal("html")], {
 			description: "Output format (default: auto)",
@@ -51,9 +50,6 @@ export const fetchParams = Type.Object({
 	timeoutMs: Type.Optional(Type.Integer({ minimum: 1000, maximum: 120000, description: "Request timeout in ms" })),
 	perUrlMaxChars: Type.Optional(
 		Type.Integer({ minimum: 200, maximum: MAX_INLINE_CONTENT, description: "Max chars per URL (default: 3000)" }),
-	),
-	concurrency: Type.Optional(
-		Type.Integer({ minimum: 1, maximum: 10, description: "Batch fetch concurrency (default: 3)" }),
 	),
 })
 

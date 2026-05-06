@@ -1,62 +1,29 @@
 # web-tools
 
-Unified web extension for search and fetch tooling.
+Personal web tools for pi.
 
 ## Tools
 
 ### `web_search`
 
-Primary web search using Brave Search API.
+Brave Search only.
 
-**Requirements**
+Requirements:
 
-- Set either `BRAVE_SEARCH_API_KEY` (preferred) or `BRAVE_API_KEY`.
-
-**Notes**
-
-- Use exactly one of `query` or `queries`.
-- `web_search` does not auto-fallback; call `web_search_fallback` if Brave is unavailable.
-- In batch mode, output is grouped per query.
+- Set `BRAVE_SEARCH_API_KEY` or `BRAVE_API_KEY`.
 
 ```ts
 web_search({
-  query?: string,
-  queries?: string[],             // batch mode (max 8)
-  count?: number,                 // results per query: 1..20 (default 5; batch default 3)
+  query: string,
+  count?: number,                 // 1..20, default 5
   offset?: number,                // 0..9
-  country?: string,               // default: "US"
+  country?: string,               // default "US"
   freshness?: string,             // pd|pw|pm|py|YYYY-MM-DDtoYYYY-MM-DD
   searchLang?: string,
   uiLang?: string,
   safesearch?: "off" | "moderate" | "strict",
   extraSnippets?: boolean,
   goggles?: string[],
-  concurrency?: number,           // batch query concurrency (default 3)
-  debug?: boolean,
-})
-```
-
-### `web_search_fallback`
-
-Fallback search with provider fallback order.
-
-**Requirements**
-
-- Exa MCP endpoint is available without additional auth.
-- Optional authenticated Pi provider:
-  - `openai-codex` (OpenAI Codex)
-- Default fallback order is `openai` → `exa` (unless overridden via `providers`).
-
-**Provider/model mapping**
-
-- `exa` provider: `exa-mcp-web_search_exa`
-- `openai` provider (`openai-codex`): `gpt-5.3-codex`
-
-```ts
-web_search_fallback({
-  query: string,
-  providers?: ("openai" | "exa")[],
-  live?: boolean,
   debug?: boolean,
 })
 ```
@@ -65,48 +32,28 @@ web_search_fallback({
 
 Fetch URL content via regular HTTP.
 
-**Requirements**
-
-- No additional setup.
-
-**Notes**
-
-- Supports single or batch input (`url` or `urls`).
-- Truncation is applied per URL (`perUrlMaxChars`).
-- On cancellation/abort, the tool exits with abort (no normal content response).
-
 ```ts
 web_fetch({
-  url?: string,
-  urls?: string[],               // batch mode (max 10)
+  url: string,
   format?: "auto" | "markdown" | "text" | "html",
   timeoutMs?: number,
-  perUrlMaxChars?: number,       // truncation per URL (default 3000)
-  concurrency?: number,          // batch concurrency (default 3)
+  perUrlMaxChars?: number,        // default 3000
 })
 ```
 
 ### `web_fetch_rendered`
 
-Fetch URL content via rendered/browser path (Lightpanda).
+Fetch URL content via Lightpanda.
 
-**Requirements**
+Requirements:
 
-- [`lightpanda`](https://github.com/lightpanda-io/browser) installed and available in your `PATH`.
-
-**Notes**
-
-- Supports single or batch input (`url` or `urls`).
-- Truncation is applied per URL (`perUrlMaxChars`).
-- On cancellation/abort, the tool exits with abort (no normal content response).
+- `lightpanda` installed and available in `PATH`.
 
 ```ts
 web_fetch_rendered({
-  url?: string,
-  urls?: string[],               // batch mode (max 10)
+  url: string,
   format?: "auto" | "markdown" | "text" | "html",
   timeoutMs?: number,
-  perUrlMaxChars?: number,       // truncation per URL (default 3000)
-  concurrency?: number,          // batch concurrency (default 3)
+  perUrlMaxChars?: number,        // default 3000
 })
 ```

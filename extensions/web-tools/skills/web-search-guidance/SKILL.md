@@ -10,7 +10,7 @@ Use this skill when web results are noisy or when the user wants targeted search
 ## How to use this in pi
 
 - Use `web_search` for Brave search.
-- Put the search text in `query` or `queries`.
+- Put the search text in `query`.
 - Use tool params for filtering:
   - `freshness` for time windows
   - `searchLang` for preferred language

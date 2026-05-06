@@ -20,27 +20,11 @@ export type ProgressDetails = {
 	error?: string
 	provider?: string
 	query?: string
-	queries?: string[]
 	durationMs?: number
 }
 
-export const searchFallbackParams = Type.Object({
-	query: Type.String({ description: "The search query" }),
-	providers: Type.Optional(
-		Type.Array(Type.Union([Type.Literal("openai"), Type.Literal("exa")]), {
-			minItems: 1,
-			description: 'Provider fallback order (default: ["openai", "exa"])',
-		}),
-	),
-	live: Type.Optional(Type.Boolean({ description: "Use live web access when provider supports it (default: true)" })),
-	debug: Type.Optional(Type.Boolean({ description: "Include debug details in output" })),
-})
-
 export const braveSearchParams = Type.Object({
-	query: Type.Optional(Type.String({ description: "Single search query" })),
-	queries: Type.Optional(
-		Type.Array(Type.String(), { minItems: 1, maxItems: 8, description: "Batch search queries (max 8)" }),
-	),
+	query: Type.String({ description: "Search query" }),
 	count: Type.Optional(
 		Type.Integer({
 			minimum: 1,
@@ -62,9 +46,6 @@ export const braveSearchParams = Type.Object({
 	),
 	extraSnippets: Type.Optional(Type.Boolean({ description: "Include extra snippets from results" })),
 	goggles: Type.Optional(Type.Array(Type.String(), { minItems: 1, description: "Brave Goggles URLs/definitions" })),
-	concurrency: Type.Optional(
-		Type.Integer({ minimum: 1, maximum: 6, description: "Batch query concurrency (default: 3)" }),
-	),
 	debug: Type.Optional(Type.Boolean({ description: "Include debug details in output" })),
 })
 
@@ -119,10 +100,8 @@ export function renderToolResult(
 		const providerText = details.provider
 			? theme.italic(theme.fg("accent", details.provider))
 			: theme.fg("muted", "auto")
-		const queryList = (details.queries?.length ? details.queries : [details.query || ""])
-			.map((q) => q.trim())
-			.filter(Boolean)
-		const clippedQueries = queryList.map((q) => (q.length > 140 ? `${q.slice(0, 137)}...` : q))
+		const query = (details.query || "").trim()
+		const clippedQuery = query.length > 140 ? `${query.slice(0, 137)}...` : query
 
 		const bar = progressBar(details.progress, 10)
 		let state = phase
@@ -134,7 +113,7 @@ export function renderToolResult(
 		}
 
 		const lines = [providerText]
-		for (const q of clippedQueries) lines.push(theme.fg("dim", q))
+		if (clippedQuery) lines.push(theme.fg("dim", clippedQuery))
 		lines.push(theme.fg("accent", `[${bar}] ${state}`))
 		return new Text(lines.join("\n"), 0, 0)
 	}

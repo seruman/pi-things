@@ -19,7 +19,8 @@
   },
   "pi": {
     "extensions": [
-      "./extensions/web-tools/index.ts",
+      "./extensions/web-search/index.ts",
+      "./extensions/web-fetch/index.ts",
       "./extensions/task-tools/index.ts",
       "./extensions/subagent-tools/index.ts",
       "./extensions/split-fork.ts",
