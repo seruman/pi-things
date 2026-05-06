@@ -1,6 +1,6 @@
 ---
 name: ast-grep-refactor
-description: Structural refactoring and safe code rewrites with ast-grep across supported languages. Use for codemods, removing or replacing AST nodes (imports, docstrings, arguments), pattern-based migrations, and multi-file transformations where text-based replace is risky.
+description: Structural refactoring and safe code rewrites with ast-grep across supported languages. Use for codemods, removing or replacing AST nodes (imports, docstrings, arguments), pattern-based migrations, and multi-file transformations when plain text search/replace is likely to be unsafe.
 ---
 
 # ast-grep Refactor
@@ -38,13 +38,13 @@ Review matches via `ast-grep scan` output, `--interactive`, or `git diff` before
 
 ## References
 
-- Rule basics and selection: `ast-grep-refactor/references/rule-basics.md`
-- Rewrite and `fix`: `ast-grep-refactor/references/rewrite.md`
-- FixConfig expansion: `ast-grep-refactor/references/fix-expand.md`
-- Transformations: `ast-grep-refactor/references/transform.md`
-- Rewriters: `ast-grep-refactor/references/rewriter.md`
-- Troubleshooting: `ast-grep-refactor/references/troubleshooting.md`
-- Examples: `ast-grep-refactor/references/examples.md`
+- Rule basics and selection: `references/rule-basics.md`
+- Rewrite and `fix`: `references/rewrite.md`
+- FixConfig expansion: `references/fix-expand.md`
+- Transformations: `references/transform.md`
+- Rewriters: `references/rewriter.md`
+- Troubleshooting: `references/troubleshooting.md`
+- Examples: `references/examples.md`
 
 ## When to skip ast-grep
 
