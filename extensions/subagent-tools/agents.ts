@@ -10,7 +10,6 @@ export interface AgentConfig {
 	name: string
 	description: string
 	tools?: string[]
-	model?: string
 	systemPrompt: string
 	source: "bundled" | "user" | "project"
 	filePath: string
@@ -25,7 +24,6 @@ type Frontmatter = {
 	name?: string
 	description?: string
 	tools?: string
-	model?: string
 }
 
 function readAgents(dir: string, source: AgentConfig["source"]): AgentConfig[] {
@@ -60,7 +58,6 @@ function readAgents(dir: string, source: AgentConfig["source"]): AgentConfig[] {
 				name: frontmatter.name,
 				description: frontmatter.description,
 				tools: tools && tools.length > 0 ? tools : undefined,
-				model: frontmatter.model,
 				systemPrompt: body,
 				source,
 				filePath,
