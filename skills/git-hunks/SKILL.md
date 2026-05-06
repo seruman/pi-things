@@ -1,6 +1,6 @@
 ---
 name: git-hunks
-description: Selective hunk-level staging and commits with git-hunks. Use when you need to split changes into multiple logical commits, stage individual hunks instead of whole files, make surgical commits from a dirty worktree, or review changes at hunk granularity before committing. Also use when the user asks to "commit in hunks," "commit by hunk," or requests fine-grained staging.
+description: Selective hunk-level staging and commits with git-hunks. Use when the user asks to split changes into multiple logical commits, stage individual hunks instead of whole files, make surgical commits from a dirty worktree, or review changes at hunk granularity before committing. Also use when the user asks to "commit in hunks," "commit by hunk," or requests fine-grained staging.
 ---
 
 # git-hunks
@@ -53,7 +53,6 @@ git commit -m "focused commit message"
 ## When to skip git-hunks
 
 - All changes in a file belong to the same logical commit — use `git add <file>`.
-- Only one logical change across the entire worktree — use `git add -A`.
 - Changes need manual editing before staging — use `git add -p` interactively.
 
 ## Links
