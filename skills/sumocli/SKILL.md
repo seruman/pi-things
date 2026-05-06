@@ -1,6 +1,6 @@
 ---
 name: sumocli
-description: Query Sumo Logic logs from the command line using sumocli. Use when the user asks to search logs, find errors, count events by field, investigate a service/pod/host, or otherwise read data from Sumo Logic. Covers query syntax basics, time ranges, result modes (messages vs aggregation records), and output formats suitable for piping into jq/awk/duckdb.
+description: Query Sumo Logic operational logs from the command line using sumocli. Use when the user asks to search Sumo logs, find production errors, count events by field, investigate a service/pod/host, or otherwise read data from Sumo Logic. Covers query syntax basics, time ranges, result modes (messages vs aggregation records), and output formats suitable for jq/awk/duckdb.
 ---
 
 # sumocli
@@ -25,8 +25,8 @@ stdout-clean runs, e.g. `search job 4070B2C30BAE2884`.
 | `--from` | `-15m` | `now`, relative (`-15m`, `-1h30m`, `-7d`, `-1w`), or RFC3339 (`2025-04-16T08:30:00Z`) |
 | `--to` | `now` | same formats |
 | `--limit` | `1000` | `0` = no limit (API cap is 100k messages) |
-| `--mode` | `auto` | `auto` | `messages` | `records` |
-| `-o`, `--output` | `ndjson` | `ndjson` | `json` | `tsv` |
+| `--mode` | `auto` | `auto`, `messages`, or `records` |
+| `-o`, `--output` | `ndjson` | `ndjson`, `json`, or `tsv` |
 | `--poll-interval` | `1s` | initial poll; backs off to 5s |
 | `--by-receipt-time` | `false` | search by receipt time instead of message time |
 | `--no-header` | `false` | omit header row in tsv output |
@@ -36,8 +36,8 @@ stdout-clean runs, e.g. `search job 4070B2C30BAE2884`.
 Log results can be huge (tens of thousands of rows, many MB). Dumping raw
 results into the conversation burns context and often truncates. **Always
 redirect `sumocli` output to a file, then inspect it with targeted tools
-(`jq`, `rg`, `wc`, `head`, `duckdb`).** Never pipe raw results directly
-into the agent's stdout.
+(`jq`, `rg`, `wc`, `head`, `duckdb`).** Do not dump raw unfiltered
+`sumocli` output into the conversation; filtered or aggregated output is fine.
 
 Use a predictable scratch location so files can be cleaned up later:
 
@@ -71,10 +71,17 @@ duckdb -c "
 "
 ```
 
-Or open an interactive session:
+For a one-off filtered export, create a temporary table in the same command:
 
 ```bash
-duckdb -c "create view logs as select * from read_json_auto('$out', format='newline_delimited');"
+duckdb -c "
+  create temp table logs as
+    select * from read_json_auto('$out', format='newline_delimited');
+  select _messagetime, _sourcehost, _raw
+  from logs
+  where lower(_raw) like '%timeout%'
+  limit 50;
+"
 ```
 
 For aggregations (records mode), result sets are almost always small and
