@@ -316,10 +316,8 @@ function partToText(part: WordPart): string {
 			return "{...}"
 		case "Glob":
 			return part.pattern
-		default: {
-			const _exhaustive: never = part
-			return ""
-		}
+		default:
+			return part satisfies never
 	}
 }
 
