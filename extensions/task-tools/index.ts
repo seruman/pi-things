@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext, KeybindingsManager, Theme } from "@mariozechner/pi-coding-agent"
-import { type Component, Text, matchesKey, truncateToWidth } from "@mariozechner/pi-tui"
+import { type Component, matchesKey, truncateToWidth } from "@mariozechner/pi-tui"
 import { getDbIfExists, getListId, listTasksWithIssues } from "./db"
 import { ownerAssignedSuffix, ownerDisplay } from "./owner-format"
 import { registerTaskTool } from "./task.tool"
