@@ -32,7 +32,7 @@
       "./extensions/shell-leash/index.ts",
       "./extensions/secret-guard/index.ts"
     ],
-    "skills": ["./extensions/web-tools/skills"]
+    "skills": ["./skills", "./extensions/web-tools/skills"]
   },
   "dependencies": {
     "defuddle": "^0.15.0",
