@@ -1,5 +1,5 @@
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent"
-import { type TaskStore, getTask, getUnresolvedBlockers, runWithListLock, updateTaskFields } from "./db"
+import { type TaskStore, getTask, runWithListLock, updateTaskFields } from "./db"
 
 export async function claimTaskOwnership(options: {
 	db: TaskStore
@@ -16,10 +16,6 @@ export async function claimTaskOwnership(options: {
 		if (task.status === "completed") throw new Error(`Task #${options.taskId} is completed`)
 		if (task.owner && task.owner !== options.sessionId && !options.force) {
 			throw new Error(`Task #${options.taskId} is owned by another session`)
-		}
-		const unresolved = getUnresolvedBlockers(options.db, options.listId, options.taskId)
-		if (unresolved.length && !options.force) {
-			throw new Error(`Task #${options.taskId} is blocked by ${unresolved.map((id) => `#${id}`).join(", ")}`)
 		}
 		updateTaskFields(options.db, options.listId, options.taskId, { owner: options.sessionId })
 	})

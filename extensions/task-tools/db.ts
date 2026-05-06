@@ -25,15 +25,11 @@ const taskFrontMatterSchema = z
 	.object({
 		id: z.string().regex(/^\d+$/),
 		subject: z.string(),
-		description: z.string().optional(),
+		description: z.string().optional(), // legacy fallback; body is the source of truth
 		status: taskStatusSchema,
 		owner: z.string().nullable().optional(),
-		activeForm: z.string().nullable().optional(),
-		metadata: z.record(z.string(), z.unknown()).nullable().optional(),
 		created_at: z.string(),
 		updated_at: z.string(),
-		blocks: z.array(z.string().regex(/^\d+$/)).default([]),
-		blockedBy: z.array(z.string().regex(/^\d+$/)).default([]),
 	})
 	.passthrough()
 
@@ -87,21 +83,13 @@ function parseTaskIdFromFilename(fileName: string): number | null {
 }
 
 function parseMarkdownTask(content: string, fallbackId: number): Task {
-	let frontMatterText = ""
-	let body = ""
-
-	if (!content.startsWith("---\n")) {
-		throw new Error("missing YAML frontmatter")
-	}
+	if (!content.startsWith("---\n")) throw new Error("missing YAML frontmatter")
 
 	const end = content.indexOf("\n---\n", 4)
-	if (end === -1) {
-		throw new Error("unterminated YAML frontmatter")
-	}
+	if (end === -1) throw new Error("unterminated YAML frontmatter")
 
-	frontMatterText = content.slice(4, end)
-	body = content.slice(end + 5)
-
+	const frontMatterText = content.slice(4, end)
+	const body = content.slice(end + 5).trim()
 	const yamlParsed = YAML.parse(frontMatterText)
 	const result = taskFrontMatterSchema.safeParse(yamlParsed)
 	if (!result.success) {
@@ -109,15 +97,12 @@ function parseMarkdownTask(content: string, fallbackId: number): Task {
 			`frontmatter validation failed: ${result.error.issues.map((i) => `${i.path.join(".") || "root"}: ${i.message}`).join("; ")}`,
 		)
 	}
+
 	const fm = result.data
-
 	const id = Number(fm.id)
-	const blocks = fm.blocks.map((v) => Number(v)).filter((v) => Number.isFinite(v) && v > 0)
-	const blockedBy = fm.blockedBy.map((v) => Number(v)).filter((v) => Number.isFinite(v) && v > 0)
-
 	const createdAt = Number.isFinite(Date.parse(fm.created_at)) ? Date.parse(fm.created_at) : Date.now()
 	const updatedAt = Number.isFinite(Date.parse(fm.updated_at)) ? Date.parse(fm.updated_at) : createdAt
-	const description = typeof fm.description === "string" ? fm.description : body.trim()
+	const description = body || fm.description || ""
 
 	return {
 		id: Number.isFinite(id) && id > 0 ? id : fallbackId,
@@ -126,12 +111,8 @@ function parseMarkdownTask(content: string, fallbackId: number): Task {
 		description,
 		status: fm.status,
 		owner: typeof fm.owner === "string" && fm.owner.length > 0 ? fm.owner : null,
-		activeForm: typeof fm.activeForm === "string" && fm.activeForm.length > 0 ? fm.activeForm : null,
-		metadata: fm.metadata ?? null,
 		createdAt,
 		updatedAt,
-		blocks: Array.from(new Set(blocks)),
-		blockedBy: Array.from(new Set(blockedBy)),
 	}
 }
 
@@ -139,15 +120,10 @@ function serializeMarkdownTask(task: Task): string {
 	const frontMatter: TaskFrontMatter = {
 		id: String(task.id),
 		subject: task.subject,
-		description: task.description,
 		status: task.status,
 		owner: task.owner ?? null,
-		activeForm: task.activeForm ?? null,
-		metadata: task.metadata ?? null,
 		created_at: new Date(task.createdAt).toISOString(),
 		updated_at: new Date(task.updatedAt).toISOString(),
-		blocks: task.blocks.map(String),
-		blockedBy: task.blockedBy.map(String),
 	}
 
 	const yaml = YAML.stringify(frontMatter).trimEnd()
@@ -311,16 +287,7 @@ export function getListId(): string {
 	return process.env.TASK_LIST_ID ?? "default"
 }
 
-export function createTask(
-	db: TaskStore,
-	listId: string,
-	data: {
-		subject: string
-		description: string
-		activeForm?: string
-		metadata?: Record<string, unknown>
-	},
-): Task {
+export function createTask(db: TaskStore, listId: string, data: { subject: string; description: string }): Task {
 	const id = nextTaskId(db.cwd, listId)
 	const now = Date.now()
 	const task: Task = {
@@ -330,12 +297,8 @@ export function createTask(
 		description: data.description,
 		status: "pending",
 		owner: null,
-		activeForm: data.activeForm ?? null,
-		metadata: data.metadata ?? null,
 		createdAt: now,
 		updatedAt: now,
-		blocks: [],
-		blockedBy: [],
 	}
 	writeTask(db.cwd, listId, task)
 	return task
@@ -373,19 +336,6 @@ export function deleteTask(db: TaskStore, listId: string, taskId: number): boole
 
 	const filePath = taskFilePath(db.cwd, listId, taskId)
 	if (fs.existsSync(filePath)) fs.unlinkSync(filePath)
-
-	const tasks = listTasks(db, listId)
-	for (const task of tasks) {
-		const prevBlocks = task.blocks.length
-		const prevBlockedBy = task.blockedBy.length
-		task.blocks = task.blocks.filter((id) => id !== taskId)
-		task.blockedBy = task.blockedBy.filter((id) => id !== taskId)
-		if (task.blocks.length !== prevBlocks || task.blockedBy.length !== prevBlockedBy) {
-			task.updatedAt = Date.now()
-			writeTask(db.cwd, listId, task)
-		}
-	}
-
 	return true
 }
 
@@ -393,92 +343,23 @@ export function updateTaskFields(
 	db: TaskStore,
 	listId: string,
 	taskId: number,
-	fields: Partial<{
-		subject: string
-		description: string
-		activeForm: string | null
-		owner: string | null
-		status: TaskStatus
-		metadata: Record<string, unknown> | null
-	}>,
+	fields: Partial<{ subject: string; description: string; owner: string | null; status: TaskStatus }>,
 ): boolean {
 	const task = readTask(db.cwd, listId, taskId)
 	if (!task) return false
 
 	if (fields.subject !== undefined) task.subject = fields.subject
 	if (fields.description !== undefined) task.description = fields.description
-	if (fields.activeForm !== undefined) task.activeForm = fields.activeForm
 	if (fields.owner !== undefined) task.owner = fields.owner
 	if (fields.status !== undefined) task.status = fields.status
-	if (fields.metadata !== undefined) task.metadata = fields.metadata
 	task.updatedAt = Date.now()
 	writeTask(db.cwd, listId, task)
 	return true
 }
 
-function hasPath(db: TaskStore, listId: string, fromId: number, toId: number, visited = new Set<number>()): boolean {
-	if (fromId === toId) return true
-	if (visited.has(fromId)) return false
-	visited.add(fromId)
-
-	const node = readTask(db.cwd, listId, fromId)
-	if (!node) return false
-
-	for (const next of node.blocks) {
-		if (next === toId) return true
-		if (hasPath(db, listId, next, toId, visited)) return true
-	}
-	return false
-}
-
-export function addDependency(db: TaskStore, listId: string, blockerId: number, blockedId: number): void {
-	const blocker = readTask(db.cwd, listId, blockerId)
-	const blocked = readTask(db.cwd, listId, blockedId)
-	if (!blocker || !blocked) throw new Error("Task dependency target not found")
-	if (blockerId === blockedId) throw new Error("Task cannot depend on itself")
-	if (hasPath(db, listId, blockedId, blockerId)) {
-		throw new Error(`Dependency would create a cycle (#${blockerId} -> #${blockedId})`)
-	}
-
-	if (!blocker.blocks.includes(blockedId)) blocker.blocks.push(blockedId)
-	if (!blocked.blockedBy.includes(blockerId)) blocked.blockedBy.push(blockerId)
-	blocker.updatedAt = Date.now()
-	blocked.updatedAt = Date.now()
-	writeTask(db.cwd, listId, blocker)
-	writeTask(db.cwd, listId, blocked)
-}
-
-export function taskExists(db: TaskStore, listId: string, taskId: number): boolean {
-	return readTask(db.cwd, listId, taskId) !== null
-}
-
-export function getUnresolvedBlockers(db: TaskStore, listId: string, taskId: number): number[] {
-	const task = readTask(db.cwd, listId, taskId)
-	if (!task) return []
-
-	const unresolved: number[] = []
-	for (const blockerId of task.blockedBy) {
-		const blocker = readTask(db.cwd, listId, blockerId)
-		if (!blocker) continue
-		if (blocker.status !== "completed") unresolved.push(blockerId)
-	}
-	return unresolved
-}
-
-export function getCompletedTaskIds(db: TaskStore, listId: string): Set<number> {
-	const completed = listTasks(db, listId).filter((t) => t.status === "completed")
-	return new Set(completed.map((t) => t.id))
-}
-
-export function filterBlockedBy(blockedBy: number[], completedIds: Set<number>): number[] {
-	return blockedBy.filter((id) => !completedIds.has(id))
-}
-
 export function purgeTasks(db: TaskStore, listId: string, scope: "completed" | "all"): number {
 	const tasks = listTasks(db, listId)
 	const targets = scope === "all" ? tasks : tasks.filter((t) => t.status === "completed")
-	for (const task of targets) {
-		deleteTask(db, listId, task.id)
-	}
+	for (const task of targets) deleteTask(db, listId, task.id)
 	return targets.length
 }

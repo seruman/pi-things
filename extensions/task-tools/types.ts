@@ -9,12 +9,8 @@ export interface Task {
 	description: string
 	status: TaskStatus
 	owner: string | null
-	activeForm: string | null
-	metadata: Record<string, unknown> | null
 	createdAt: number
 	updatedAt: number
-	blocks: number[]
-	blockedBy: number[]
 }
 
 export type TaskCounts = { total: number; pending: number; inProgress: number; completed: number }
@@ -25,12 +21,7 @@ export type TaskToolInput = {
 	taskId?: string
 	subject?: string
 	description?: string
-	activeForm?: string
 	status?: TaskUpdateStatus
-	addBlocks?: string[]
-	addBlockedBy?: string[]
-	metadata?: Record<string, unknown>
-	includeCompletedBlockers?: boolean
 	force?: boolean
 	scope?: "completed" | "all"
 	confirm?: boolean

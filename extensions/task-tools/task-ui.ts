@@ -25,15 +25,8 @@ function statusColor(status: string, theme: Theme, text: string): string {
 	}
 }
 
-function blockedBadge(blockedBy: number[], theme: Theme): string {
-	if (!blockedBy.length) return ""
-	return ` ${theme.fg("error", "(blocked by ")}${blockedBy
-		.map((id) => theme.fg("accent", `#${id}`))
-		.join(theme.fg("error", ", "))}${theme.fg("error", ")")}`
-}
-
 function taskLine(task: Task, theme: Theme, currentSessionId?: string): string {
-	return `${statusIcon(task.status, theme)} ${theme.fg("accent", `#${task.id}`)} ${statusColor(task.status, theme, task.subject)}${theme.fg("dim", ownerAssignedSuffix(task.owner, currentSessionId))}${blockedBadge(task.blockedBy, theme)}`
+	return `${statusIcon(task.status, theme)} ${theme.fg("accent", `#${task.id}`)} ${statusColor(task.status, theme, task.subject)}${theme.fg("dim", ownerAssignedSuffix(task.owner, currentSessionId))}`
 }
 
 export function renderTaskCall(args: TaskToolInput, theme: Theme): Component {
@@ -50,9 +43,7 @@ export function renderTaskResult(
 	theme: Theme,
 ): Component {
 	const d = result.details
-	if (!d || typeof d !== "object") {
-		return new Text(theme.fg("muted", "Task result unavailable"), 0, 0)
-	}
+	if (!d || typeof d !== "object") return new Text(theme.fg("muted", "Task result unavailable"), 0, 0)
 	if ("error" in d) return new Text(theme.fg("error", `Error (${d.action}): ${d.error}`), 0, 0)
 
 	switch (d.action) {
@@ -68,8 +59,9 @@ export function renderTaskResult(
 				return new Text(`${theme.fg("warning", "▶ ")}Now working on ${theme.fg("accent", `#${d.taskId}`)}`, 0, 0)
 			if (d.statusChange?.to === "completed")
 				return new Text(`${theme.fg("success", "✓ ")}Completed ${theme.fg("accent", `#${d.taskId}`)}`, 0, 0)
+			const fields = d.updatedFields?.length ? d.updatedFields.join(", ") : "no changes"
 			return new Text(
-				`${theme.fg("success", "✓ ")}Updated ${theme.fg("accent", `#${d.taskId}`)}: ${theme.fg("muted", d.updatedFields?.join(", ") ?? "updated")}`,
+				`${theme.fg("success", "✓ ")}Updated ${theme.fg("accent", `#${d.taskId}`)}: ${theme.fg("muted", fields)}`,
 				0,
 				0,
 			)
@@ -102,16 +94,11 @@ export function renderTaskResult(
 				`  ${theme.fg("dim", "Status:")} ${statusColor(t.status, theme, t.status)}`,
 				`  ${theme.fg("dim", "Description:")} ${theme.fg("muted", t.description)}`,
 			]
-			if (t.owner)
+			if (t.owner) {
 				lines.push(
 					`  ${theme.fg("dim", "Owner:")} ${theme.fg("muted", ownerDisplay(t.owner, d.currentSessionId, { includeCurrentSessionId: true }))}`,
 				)
-			if (t.blockedBy.length)
-				lines.push(
-					`  ${theme.fg("dim", "Blocked by:")} ${t.blockedBy.map((id) => theme.fg("error", `#${id}`)).join(", ")}`,
-				)
-			if (t.blocks.length)
-				lines.push(`  ${theme.fg("dim", "Blocks:")} ${t.blocks.map((id) => theme.fg("accent", `#${id}`)).join(", ")}`)
+			}
 			return new Text(lines.join("\n"), 0, 0)
 		}
 		case "list": {

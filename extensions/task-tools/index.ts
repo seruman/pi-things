@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext, KeybindingsManager, Theme } from "@mariozechner/pi-coding-agent"
 import { type Component, Text, matchesKey, truncateToWidth } from "@mariozechner/pi-tui"
-import { filterBlockedBy, getCompletedTaskIds, getDbIfExists, getListId, listTasksWithIssues } from "./db"
+import { getDbIfExists, getListId, listTasksWithIssues } from "./db"
 import { ownerAssignedSuffix, ownerDisplay } from "./owner-format"
 import { registerTaskTool } from "./task.tool"
 import type { Task } from "./types"
@@ -13,8 +13,6 @@ function loadTasks(ctx: ExtensionContext): { tasks: Task[]; issues: Array<{ file
 		if (!db) return { tasks: [], issues: [] }
 		const listId = getListId()
 		const { tasks, issues } = listTasksWithIssues(db, listId)
-		const completedIds = getCompletedTaskIds(db, listId)
-		for (const t of tasks) t.blockedBy = filterBlockedBy(t.blockedBy, completedIds)
 		return { tasks, issues }
 	} catch (error) {
 		return {
@@ -189,13 +187,10 @@ class TaskListComponent implements Component {
 				const id = th.fg("accent", `#${t.id}`)
 				const subjectColor = t.status === "completed" ? "dim" : t.status === "in_progress" ? "warning" : "muted"
 				const subject = th.fg(subjectColor, t.subject)
-				const blocked = t.blockedBy.length
-					? ` ${th.fg("error", "(blocked by ")}${t.blockedBy.map((b) => th.fg("accent", `#${b}`)).join(th.fg("error", ", "))}${th.fg("error", ")")}`
-					: ""
 				const owner = th.fg("dim", ownerAssignedSuffix(t.owner, this.sessionId))
 				const pointer = idx === this.selected ? th.fg("accent", "> ") : "  "
 
-				lines.push(truncateToWidth(`  ${pointer}${icon} ${id} ${subject}${owner}${blocked}`, width))
+				lines.push(truncateToWidth(`  ${pointer}${icon} ${id} ${subject}${owner}`, width))
 			}
 		}
 
@@ -229,21 +224,6 @@ class TaskListComponent implements Component {
 			lines.push(truncateToWidth(`  ${th.bold("Status:")} ${task.status}`, width))
 			const ownerText = ownerDisplay(task.owner, this.sessionId, { none: "-", includeCurrentSessionId: true })
 			lines.push(truncateToWidth(`  ${th.bold("Owner:")} ${ownerText}`, width))
-			lines.push(
-				truncateToWidth(
-					`  ${th.bold("Blocked by:")} ${task.blockedBy.length ? task.blockedBy.map((id) => `#${id}`).join(", ") : "-"}`,
-					width,
-				),
-			)
-			lines.push(
-				truncateToWidth(
-					`  ${th.bold("Blocks:")} ${task.blocks.length ? task.blocks.map((id) => `#${id}`).join(", ") : "-"}`,
-					width,
-				),
-			)
-			if (task.metadata && Object.keys(task.metadata).length) {
-				lines.push(truncateToWidth(`  ${th.bold("Metadata:")} ${JSON.stringify(task.metadata)}`, width))
-			}
 			lines.push("")
 			lines.push(truncateToWidth(`  ${th.bold("Description:")}`, width))
 			for (const line of task.description.split("\n")) {
@@ -293,7 +273,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => updateWidget(ctx))
 
 	pi.on("tool_execution_end", async (event, ctx) => {
-		if (event.toolName.startsWith("task_")) updateWidget(ctx)
+		if (event.toolName === "task") updateWidget(ctx)
 	})
 
 	pi.registerShortcut("ctrl+shift+t", {
@@ -317,12 +297,9 @@ export default function (pi: ExtensionAPI) {
 					console.log("No tasks")
 				} else {
 					for (const task of tasks) {
-						const blocked = task.blockedBy.length
-							? ` [blocked by ${task.blockedBy.map((id) => `#${id}`).join(", ")}]`
-							: ""
 						const sessionId = ctx.sessionManager.getSessionId?.()
 						const owner = ownerAssignedSuffix(task.owner, sessionId)
-						console.log(`#${task.id} [${task.status}] ${task.subject}${owner}${blocked}`)
+						console.log(`#${task.id} [${task.status}] ${task.subject}${owner}`)
 					}
 				}
 				if (issues.length) {
