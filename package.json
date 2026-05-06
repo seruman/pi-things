@@ -13,9 +13,13 @@
     "check:write": "biome check --write .",
     "test:shell-leash": "bun test extensions/shell-leash/*.test.ts",
     "test:secret-guard": "bun test extensions/secret-guard/*.test.ts",
+    "typecheck:web-search": "bunx tsc -p extensions/web-search/tsconfig.json",
+    "typecheck:web-fetch": "bunx tsc -p extensions/web-fetch/tsconfig.json",
+    "typecheck:task-tools": "bunx tsc -p extensions/task-tools/tsconfig.json",
+    "typecheck:subagent-tools": "bunx tsc -p extensions/subagent-tools/tsconfig.json",
     "typecheck:shell-leash": "tsc -p extensions/shell-leash/tsconfig.json",
     "typecheck:secret-guard": "bunx tsc -p extensions/secret-guard/tsconfig.json",
-    "typecheck:subagent-tools": "bunx tsc -p extensions/subagent-tools/tsconfig.json"
+    "typecheck": "bun run typecheck:web-search && bun run typecheck:web-fetch && bun run typecheck:task-tools && bun run typecheck:subagent-tools && bun run typecheck:shell-leash && bun run typecheck:secret-guard"
   },
   "pi": {
     "extensions": [
