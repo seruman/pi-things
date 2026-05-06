@@ -65,7 +65,7 @@ type TaskResult = {
 }
 
 type Details = {
-	mode: "single" | "parallel" | "chain"
+	mode: "single" | "parallel"
 	agentScope: AgentScope
 	projectAgentsDir: string | null
 	results: TaskResult[]
@@ -351,29 +351,23 @@ function getPiInvocationParts(): [string, ...string[]] {
 	return ["pi"]
 }
 
-function agentDir() {
-	if (process.env.PI_CODING_AGENT_DIR) return process.env.PI_CODING_AGENT_DIR
-	return path.join(os.homedir(), ".pi", "agent")
-}
-
-function cloneAgentDir() {
-	const src = agentDir()
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-agent-"))
-	for (const file of ["auth.json", "settings.json", "models.json"]) {
-		const from = path.join(src, file)
-		const to = path.join(dir, file)
-		if (!fs.existsSync(from)) continue
-		fs.copyFileSync(from, to)
-	}
-	return dir
-}
-
 function parseFinalText(message: unknown) {
 	if (!isRecord(message)) return ""
 	if (asString(message.role) !== "assistant") return ""
 	const content = message.content
 	if (!Array.isArray(content)) return ""
 	for (const part of content) {
+		if (!isRecord(part)) continue
+		if (asString(part.type) !== "text") continue
+		const text = asString(part.text)
+		if (text) return text
+	}
+	return ""
+}
+
+function extractToolText(toolResult: unknown) {
+	if (!isRecord(toolResult) || !Array.isArray(toolResult.content)) return ""
+	for (const part of toolResult.content) {
 		if (!isRecord(part)) continue
 		if (asString(part.type) !== "text") continue
 		const text = asString(part.text)
@@ -425,7 +419,6 @@ async function runTask(
 
 	let tmpDir: string | undefined
 	let tmpPrompt: string | undefined
-	let tmpAgentDir: string | undefined
 	let aborted = false
 	let submitResult: SubmitResultPayload | null = null
 	let spinnerTimer: ReturnType<typeof setInterval> | undefined
@@ -474,7 +467,6 @@ async function runTask(
 		const spawnArgs = [...piCommandArgs, ...args]
 		const runId = createRun({ agent: input.agent, task: input.task, cwd, args: [piCommand, ...spawnArgs] })
 
-		tmpAgentDir = cloneAgentDir()
 		result.exitCode = await new Promise<number>((resolve) => {
 			const proc = spawn(piCommand, spawnArgs, {
 				cwd,
@@ -482,7 +474,6 @@ async function runTask(
 				stdio: ["ignore", "pipe", "pipe"],
 				env: {
 					...process.env,
-					PI_CODING_AGENT_DIR: tmpAgentDir,
 					PI_SKIP_VERSION_CHECK: process.env.PI_SKIP_VERSION_CHECK || "1",
 				},
 			})
@@ -538,11 +529,23 @@ async function runTask(
 					}
 				}
 
-				const captureSubmitResult = (toolName: string, rawArgs: unknown) => {
-					if (toolName !== SUBMIT_RESULT_TOOL) return
-					const inputArgs = isRecord(rawArgs) ? rawArgs : {}
-					const parsed = parseSubmitResultPayload(inputArgs)
-					if (!parsed) return
+				const captureSubmitResult = (toolResult: unknown, isError: boolean) => {
+					if (isError) {
+						const message = extractToolText(toolResult) || `${SUBMIT_RESULT_TOOL} failed`
+						result.stderr = result.stderr ? `${result.stderr.trim()}\n${message}` : message
+						pushEvent(result, `✗ ${SUBMIT_RESULT_TOOL}`)
+						return
+					}
+
+					const details = isRecord(toolResult) && isRecord(toolResult.details) ? toolResult.details : null
+					const parsed = details ? parseSubmitResultPayload(details) : null
+					if (!parsed) {
+						const message = `${SUBMIT_RESULT_TOOL} returned invalid details`
+						result.stderr = result.stderr ? `${result.stderr.trim()}\n${message}` : message
+						pushEvent(result, `✗ ${SUBMIT_RESULT_TOOL}(invalid)`)
+						return
+					}
+
 					submitResult = parsed
 					const submitted = truncateWithArtifact(formatSubmitResult(parsed), cwd, input.agent)
 					result.final = submitted.content
@@ -557,7 +560,6 @@ async function runTask(
 					const toolName = asString(data.toolName) ?? "tool"
 					const inputArgs = isRecord(data.input) ? data.input : {}
 					pushEvent(result, `→ ${summarizeToolCall(toolName, inputArgs)}`)
-					captureSubmitResult(toolName, inputArgs)
 					emit()
 				}
 
@@ -565,8 +567,15 @@ async function runTask(
 					const toolName = asString(data.toolName) ?? "tool"
 					const inputArgs = isRecord(data.args) ? data.args : {}
 					pushEvent(result, `→ ${summarizeToolCall(toolName, inputArgs)}`)
-					captureSubmitResult(toolName, inputArgs)
 					emit()
+				}
+
+				if (data.type === "tool_execution_end") {
+					const toolName = asString(data.toolName) ?? "tool"
+					if (toolName === SUBMIT_RESULT_TOOL) {
+						captureSubmitResult(data.result, data.isError === true)
+						emit()
+					}
 				}
 			}
 
@@ -651,12 +660,6 @@ async function runTask(
 			} catch {
 				// ignore
 			}
-		if (tmpAgentDir)
-			try {
-				fs.rmSync(tmpAgentDir, { recursive: true, force: true })
-			} catch {
-				// ignore
-			}
 	}
 
 	if (aborted) throw new Error("Subagent execution aborted")
@@ -722,17 +725,10 @@ const TaskItem = Type.Object({
 	cwd: Type.Optional(Type.String({ description: "Working directory override" })),
 })
 
-const ChainItem = Type.Object({
-	agent: Type.String({ description: "Subagent name" }),
-	task: Type.String({ description: "Task for this step; can include {previous}" }),
-	cwd: Type.Optional(Type.String({ description: "Working directory override" })),
-})
-
 const Params = Type.Object({
 	agent: Type.Optional(Type.String({ description: "Single mode: subagent name" })),
 	task: Type.Optional(Type.String({ description: "Single mode: task" })),
 	tasks: Type.Optional(Type.Array(TaskItem, { description: "Parallel mode" })),
-	chain: Type.Optional(Type.Array(ChainItem, { description: "Sequential chain mode" })),
 	agentScope: Type.Optional(StringEnum(["user", "project", "both"] as const, { default: "user" })),
 	confirmProjectAgents: Type.Optional(
 		Type.Boolean({
@@ -751,7 +747,7 @@ function normalizeAgentScope(value: unknown): AgentScope {
 function isDetails(value: unknown): value is Details {
 	if (!isRecord(value)) return false
 	if (!Array.isArray(value.results)) return false
-	if (value.mode !== "single" && value.mode !== "parallel" && value.mode !== "chain") return false
+	if (value.mode !== "single" && value.mode !== "parallel") return false
 	return true
 }
 
@@ -849,7 +845,7 @@ export default function (pi: ExtensionAPI) {
 		name: "subagent",
 		label: "Subagent",
 		description: [
-			"Delegate tasks to isolated subagents (single, parallel, chain).",
+			"Delegate tasks to isolated subagents (single or parallel).",
 			"Use parallel tasks for independent work units.",
 			"This tool is blocking: it streams progress and returns final results.",
 			"Do NOT call this tool repeatedly to poll status.",
@@ -858,10 +854,7 @@ export default function (pi: ExtensionAPI) {
 		parameters: Params,
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
-			const mode =
-				Number(Boolean(params.task && !params.tasks?.length && !params.chain?.length)) +
-				Number(Boolean(params.tasks?.length)) +
-				Number(Boolean(params.chain?.length))
+			const mode = Number(Boolean(params.task && !params.tasks?.length)) + Number(Boolean(params.tasks?.length))
 			const agentScope = normalizeAgentScope(params.agentScope)
 			const found = discoverAgents(ctx.cwd, agentScope)
 			const agents = found.agents
@@ -877,7 +870,7 @@ export default function (pi: ExtensionAPI) {
 
 			if (mode !== 1) {
 				return {
-					content: [{ type: "text", text: "Provide exactly one mode: task OR tasks[] OR chain[]." }],
+					content: [{ type: "text", text: "Provide exactly one mode: task OR tasks[]." }],
 					details: details("single", []),
 					isError: true,
 				}
@@ -893,7 +886,7 @@ export default function (pi: ExtensionAPI) {
 
 			if ((agentScope === "project" || agentScope === "both") && confirmProjectAgents && ctx.hasUI) {
 				const requested = new Set<string>()
-				if (params.task && !params.tasks?.length && !params.chain?.length) {
+				if (params.task && !params.tasks?.length) {
 					const picked = params.agent ?? defaultAgent(agents, preferred)
 					if (picked) requested.add(picked)
 				}
@@ -901,7 +894,6 @@ export default function (pi: ExtensionAPI) {
 					const picked = item.agent ?? defaultAgent(agents, preferred)
 					if (picked) requested.add(picked)
 				}
-				for (const item of params.chain ?? []) requested.add(item.agent)
 
 				const projectAgents = Array.from(requested)
 					.map((name) => agents.find((agent) => agent.name === name))
@@ -927,51 +919,6 @@ export default function (pi: ExtensionAPI) {
 							trustedProjectAgents.add(trustKey)
 						}
 					}
-				}
-			}
-
-			if (params.chain?.length) {
-				const results: TaskResult[] = []
-				let previous = ""
-				for (let i = 0; i < params.chain.length; i++) {
-					const item = params.chain[i]
-					const task = item.task.replace(/\{previous\}/g, previous)
-					const current = await executeWithRetry(
-						ctx.cwd,
-						agents,
-						{ agent: item.agent, task, cwd: item.cwd, step: i + 1 },
-						signal,
-						onUpdate
-							? (partial) => {
-									const running = partial.details?.results[0]
-									if (!running) return
-									const merged = details("chain", [...results, running])
-									onUpdate({
-										content: [{ type: "text", text: progress("chain", merged.results) }],
-										details: merged,
-									})
-								}
-							: undefined,
-						(single) => details("chain", single),
-					)
-					results.push(current)
-					if (current.exitCode !== 0 || current.stopReason === "error" || current.stopReason === "aborted") {
-						return {
-							content: [
-								{
-									type: "text",
-									text: `Chain failed at step ${i + 1} (${item.agent}): ${current.final || current.stderr}`,
-								},
-							],
-							details: details("chain", results),
-							isError: true,
-						}
-					}
-					previous = current.final
-				}
-				return {
-					content: [{ type: "text", text: results.at(-1)?.final || "(no output)" }],
-					details: details("chain", results),
 				}
 			}
 
@@ -1096,15 +1043,6 @@ export default function (pi: ExtensionAPI) {
 
 		renderCall(args, theme) {
 			const scope = normalizeAgentScope(args.agentScope)
-			if (args.chain?.length) {
-				return new Text(
-					theme.fg("toolTitle", theme.bold("subagent ")) +
-						theme.fg("accent", `chain(${args.chain.length})`) +
-						theme.fg("muted", ` [${scope}]`),
-					0,
-					0,
-				)
-			}
 			if (args.tasks?.length) {
 				return new Text(
 					theme.fg("toolTitle", theme.bold("subagent ")) +

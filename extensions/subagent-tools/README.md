@@ -1,6 +1,6 @@
 # subagent-tools
 
-Subagent extension for pi, with **single**, **parallel**, and **chain** delegation.
+Subagent extension for pi, with **single** and **parallel** delegation.
 
 ## Tool
 
@@ -18,9 +18,6 @@ subagent({
   // Parallel mode
   tasks?: Array<{ task: string; agent?: string; cwd?: string }>,
 
-  // Chain mode
-  chain?: Array<{ agent: string; task: string; cwd?: string }>,
-
   // Discovery / trust scope
   agentScope?: "user" | "project" | "both",
   confirmProjectAgents?: boolean,
@@ -32,9 +29,6 @@ subagent({
 Provide exactly one mode:
 - single: `task`
 - parallel: `tasks[]`
-- chain: `chain[]`
-
-Chain mode supports `{previous}` placeholder substitution from the prior step output.
 
 ## Defaults
 

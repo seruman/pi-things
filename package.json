@@ -14,7 +14,8 @@
     "test:shell-leash": "bun test extensions/shell-leash/*.test.ts",
     "test:secret-guard": "bun test extensions/secret-guard/*.test.ts",
     "typecheck:shell-leash": "tsc -p extensions/shell-leash/tsconfig.json",
-    "typecheck:secret-guard": "bunx tsc -p extensions/secret-guard/tsconfig.json"
+    "typecheck:secret-guard": "bunx tsc -p extensions/secret-guard/tsconfig.json",
+    "typecheck:subagent-tools": "bunx tsc -p extensions/subagent-tools/tsconfig.json"
   },
   "pi": {
     "extensions": [
@@ -25,8 +26,7 @@
       "./extensions/shell-leash/index.ts",
       "./extensions/secret-guard/index.ts"
     ],
-    "skills": ["./extensions/web-tools/skills"],
-    "prompts": ["./extensions/subagent-tools/prompts"]
+    "skills": ["./extensions/web-tools/skills"]
   },
   "dependencies": {
     "defuddle": "^0.15.0",
