@@ -10,6 +10,10 @@ Me just prompting the shit out of LLMs to create things I want in pi.
 - `/split-fork`
 - `/comment`
 - [secret-guard](./extensions/secret-guard/README.md)
+- skills:
+  - [ast-grep-refactor](./skills/ast-grep-refactor/SKILL.md)
+  - [git-hunks](./skills/git-hunks/SKILL.md)
+  - [sumocli](./skills/sumocli/SKILL.md)
 
 ## Install
 
