@@ -128,14 +128,20 @@ export function loadSecretGuardConfig(cwd: string): SecretGuardConfig {
 
 export function matchProtectedRead(config: SecretGuardConfig, requestedPath: string): MatchResult {
 	const absolutePath = path.resolve(config.root, requestedPath)
-	const fallbackRelativePath = toPosix(path.relative(config.projectRoot, absolutePath))
+	const realPath = realpathIfExists(absolutePath)
+	const fallbackRelativePath = toPosix(path.relative(config.projectRoot, realPath ?? absolutePath))
 	const matchedBy = new Set<string>()
 
-	for (const rules of config.ruleSets) {
-		const relativePath = relativeForRoot(rules.root, absolutePath)
-		if (!relativePath || !rules.matcher.ignores(relativePath)) continue
-		for (const pattern of matchingPatterns(rules.patterns, relativePath)) matchedBy.add(pattern)
+	const checkPath = (candidate: string) => {
+		for (const rules of config.ruleSets) {
+			const relativePath = relativeForRoot(rules.root, candidate)
+			if (!relativePath || !rules.matcher.ignores(relativePath)) continue
+			for (const pattern of matchingPatterns(rules.patterns, relativePath)) matchedBy.add(pattern)
+		}
 	}
+
+	checkPath(absolutePath)
+	if (realPath && realPath !== absolutePath) checkPath(realPath)
 
 	return {
 		blocked: matchedBy.size > 0,
@@ -143,6 +149,14 @@ export function matchProtectedRead(config: SecretGuardConfig, requestedPath: str
 		absolutePath,
 		relativePath: fallbackRelativePath,
 		matchedBy: [...matchedBy],
+	}
+}
+
+function realpathIfExists(filePath: string) {
+	try {
+		return fs.realpathSync.native(filePath)
+	} catch {
+		return undefined
 	}
 }
 
