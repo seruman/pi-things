@@ -1,5 +1,5 @@
-import { type AgentToolResult, type Theme, type ToolRenderResultOptions, keyHint } from "@mariozechner/pi-coding-agent"
-import { type Component, Text } from "@mariozechner/pi-tui"
+import { type AgentToolResult, type Theme, type ToolRenderResultOptions, keyHint } from "@earendil-works/pi-coding-agent"
+import { type Component, Text } from "@earendil-works/pi-tui"
 import { ownerAssignedSuffix, ownerDisplay } from "./owner-format"
 import type { Task, TaskToolDetails, TaskToolInput } from "./types"
 

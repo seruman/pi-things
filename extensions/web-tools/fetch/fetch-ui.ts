@@ -1,5 +1,5 @@
-import type { AgentToolResult, Theme, ToolRenderResultOptions } from "@mariozechner/pi-coding-agent"
-import { Text } from "@mariozechner/pi-tui"
+import type { AgentToolResult, Theme, ToolRenderResultOptions } from "@earendil-works/pi-coding-agent"
+import { Text } from "@earendil-works/pi-tui"
 import type { FetchDetails } from "./fetch-lib"
 
 function firstText(result: AgentToolResult<FetchDetails>): string {

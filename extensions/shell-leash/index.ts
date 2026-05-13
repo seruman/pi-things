@@ -1,6 +1,6 @@
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent"
-import { getSettingsListTheme, isToolCallEventType } from "@mariozechner/pi-coding-agent"
-import { Container, type SettingItem, SettingsList, Text } from "@mariozechner/pi-tui"
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
+import { getSettingsListTheme, isToolCallEventType } from "@earendil-works/pi-coding-agent"
+import { Container, type SettingItem, SettingsList, Text } from "@earendil-works/pi-tui"
 import { DEFAULT_CAPABILITIES, analyseShellCommand } from "./shell-capabilities"
 
 export default function (pi: ExtensionAPI) {
