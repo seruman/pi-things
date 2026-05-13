@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent"
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 import { registerFetchContentTool } from "./fetch/fetch-content.tool"
 import { registerFetchRenderedTool } from "./fetch/fetch-rendered.tool"
 import { registerBraveSearchTool } from "./search/brave-search.tool"

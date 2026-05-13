@@ -3,8 +3,8 @@ import {
 	type ExtensionAPI,
 	getSettingsListTheme,
 	isToolCallEventType,
-} from "@mariozechner/pi-coding-agent"
-import { Container, type SettingItem, SettingsList } from "@mariozechner/pi-tui"
+} from "@earendil-works/pi-coding-agent"
+import { Container, type SettingItem, SettingsList } from "@earendil-works/pi-tui"
 import { type SecretGuardConfig, loadSecretGuardConfig, matchProtectedRead } from "./guard"
 
 type Mode = "block" | "ask" | "audit" | "off"

@@ -4,8 +4,8 @@ import {
 	type ToolRenderResultOptions,
 	getMarkdownTheme,
 	keyHint,
-} from "@mariozechner/pi-coding-agent"
-import { type Component, Markdown, Text } from "@mariozechner/pi-tui"
+} from "@earendil-works/pi-coding-agent"
+import { type Component, Markdown, Text } from "@earendil-works/pi-tui"
 import { Type } from "typebox"
 
 export type ProgressDetails = {

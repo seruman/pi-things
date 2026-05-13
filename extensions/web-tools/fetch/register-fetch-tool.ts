@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent"
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent"
 import { type FetchDetails, type FetchFormat, type FetchMode, fetchParams } from "./fetch-lib"
 import { renderFetchCall, renderFetchResult } from "./fetch-ui"
 

@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import type { ExtensionAPI, SessionEntry } from "@mariozechner/pi-coding-agent"
+import type { ExtensionAPI, SessionEntry } from "@earendil-works/pi-coding-agent"
 
 type AssistantTextPart = { type: "text"; text: string }
 type AssistantLike = {

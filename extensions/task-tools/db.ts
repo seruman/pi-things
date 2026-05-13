@@ -1,6 +1,6 @@
 import fs from "node:fs"
 import path from "node:path"
-import type { ExtensionContext } from "@mariozechner/pi-coding-agent"
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent"
 import YAML from "yaml"
 import { z } from "zod"
 import type { Task, TaskStatus } from "./types"
