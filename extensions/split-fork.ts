@@ -4,8 +4,8 @@
 import { randomUUID } from "node:crypto"
 import { promises as fs, existsSync } from "node:fs"
 import * as path from "node:path"
-import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent"
-import type { AutocompleteItem } from "@mariozechner/pi-tui"
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent"
+import type { AutocompleteItem } from "@earendil-works/pi-tui"
 
 const VALID_DIRECTIONS = ["right", "left", "down", "up"] as const
 const DEFAULT_DIRECTION = "right"
