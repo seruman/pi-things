@@ -16,10 +16,11 @@
     "typecheck:web-fetch": "bunx tsc -p extensions/web-fetch/tsconfig.json",
     "typecheck:task-tools": "bunx tsc -p extensions/task-tools/tsconfig.json",
     "typecheck:subagent-tools": "bunx tsc -p extensions/subagent-tools/tsconfig.json",
+    "typecheck:diff-review": "bunx tsc -p extensions/diff-review/tsconfig.json",
     "typecheck:shell-leash": "tsc -p extensions/shell-leash/tsconfig.json",
     "typecheck:secret-guard": "bunx tsc -p extensions/secret-guard/tsconfig.json",
     "typecheck:single-extensions": "bunx tsc -p extensions/tsconfig.json",
-    "typecheck": "bun run typecheck:web-search && bun run typecheck:web-fetch && bun run typecheck:task-tools && bun run typecheck:subagent-tools && bun run typecheck:shell-leash && bun run typecheck:secret-guard && bun run typecheck:single-extensions"
+    "typecheck": "bun run typecheck:web-search && bun run typecheck:web-fetch && bun run typecheck:task-tools && bun run typecheck:subagent-tools && bun run typecheck:diff-review && bun run typecheck:shell-leash && bun run typecheck:secret-guard && bun run typecheck:single-extensions"
   },
   "pi": {
     "extensions": [
@@ -27,6 +28,7 @@
       "./extensions/web-fetch/index.ts",
       "./extensions/task-tools/index.ts",
       "./extensions/subagent-tools/index.ts",
+      "./extensions/diff-review/src/index.ts",
       "./extensions/split-fork.ts",
       "./extensions/comment.ts",
       "./extensions/shell-leash/index.ts",
@@ -36,6 +38,7 @@
   },
   "dependencies": {
     "defuddle": "^0.15.0",
+    "glimpseui": "^0.8.0",
     "ignore": "^7.0.5",
     "just-bash": "^2.14.2",
     "linkedom": "^0.18.12",
