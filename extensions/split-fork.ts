@@ -10,6 +10,7 @@ import type { AutocompleteItem } from "@earendil-works/pi-tui"
 const VALID_DIRECTIONS = ["right", "left", "down", "up"] as const
 const DEFAULT_DIRECTION = "right"
 type SplitDirection = (typeof VALID_DIRECTIONS)[number]
+type SplitLaunchResult = { ok: true; terminalName: string } | { ok: false; terminalName: string; reason: string }
 
 const GHOSTTY_SPLIT_SCRIPT = `on run argv
 	set targetCwd to item 1 of argv
@@ -43,6 +44,33 @@ end run`
 function shellQuote(value: string): string {
 	if (value.length === 0) return "''"
 	return `'${value.replace(/'/g, `'"'"'`)}'`
+}
+
+function isTeteyeSession(): boolean {
+	return Boolean(process.env.TETEYE_SOCKET?.trim() && process.env.TETEYE_PANE_ID?.trim())
+}
+
+function getTeteyeCtlPath(): string {
+	return process.env.TETEYECTL_PATH?.trim() || "teteyectl"
+}
+
+function getTeteyeResponseError(stdout: string | undefined, stderr: string | undefined): string {
+	const trimmedStdout = stdout?.trim()
+	if (trimmedStdout) {
+		try {
+			const response = JSON.parse(trimmedStdout) as { error?: unknown }
+			if (typeof response.error === "string" && response.error.length > 0) return response.error
+		} catch {
+			// Fall back to the raw output below.
+		}
+	}
+	return stderr?.trim() || trimmedStdout || "unknown teteyectl error"
+}
+
+function getPaneIdFromTeteyeResponse(stdout: string | undefined): string | undefined {
+	if (!stdout?.trim()) return undefined
+	const response = JSON.parse(stdout) as { result?: { pane_id?: unknown } }
+	return typeof response.result?.pane_id === "string" ? response.result.pane_id : undefined
 }
 
 function getPiInvocationParts(): string[] {
@@ -124,6 +152,67 @@ function parseSplitForkArgs(raw: string): { direction: SplitDirection; prompt: s
 	throw new Error(`Unknown option: ${unknownFlag ?? trimmed}`)
 }
 
+async function launchGhosttySplit(
+	pi: ExtensionAPI,
+	ctx: ExtensionCommandContext,
+	startupInput: string,
+	direction: SplitDirection,
+): Promise<SplitLaunchResult> {
+	const result = await pi.exec("osascript", ["-e", GHOSTTY_SPLIT_SCRIPT, "--", ctx.cwd, startupInput, direction])
+	if (result.code !== 0) {
+		return {
+			ok: false,
+			terminalName: "Ghostty",
+			reason: result.stderr?.trim() || result.stdout?.trim() || "unknown osascript error",
+		}
+	}
+	return { ok: true, terminalName: "Ghostty" }
+}
+
+async function launchTeteyeSplit(
+	pi: ExtensionAPI,
+	ctx: ExtensionCommandContext,
+	startupInput: string,
+	direction: SplitDirection,
+): Promise<SplitLaunchResult> {
+	const socket = process.env.TETEYE_SOCKET?.trim()
+	if (!socket || !process.env.TETEYE_PANE_ID?.trim()) {
+		return { ok: false, terminalName: "teteye", reason: "missing TETEYE_SOCKET or TETEYE_PANE_ID" }
+	}
+
+	const teteyectl = getTeteyeCtlPath()
+	const splitResult = await pi.exec(teteyectl, ["split", direction, "--socket", socket, "--json"])
+	if (splitResult.code !== 0) {
+		return { ok: false, terminalName: "teteye", reason: getTeteyeResponseError(splitResult.stdout, splitResult.stderr) }
+	}
+
+	let newPaneId: string
+	try {
+		newPaneId = getPaneIdFromTeteyeResponse(splitResult.stdout) ?? ""
+	} catch (error) {
+		const reason = error instanceof Error ? error.message : String(error)
+		return { ok: false, terminalName: "teteye", reason: `invalid split response: ${reason}` }
+	}
+	if (!newPaneId) {
+		return { ok: false, terminalName: "teteye", reason: "split response did not include a pane_id" }
+	}
+
+	const sendResult = await pi.exec(teteyectl, [
+		"send-text",
+		`cd ${shellQuote(ctx.cwd)} && ${startupInput}`,
+		"--socket",
+		socket,
+		"--pane",
+		newPaneId,
+		"--json",
+	])
+	if (sendResult.code !== 0) {
+		return { ok: false, terminalName: "teteye", reason: getTeteyeResponseError(sendResult.stdout, sendResult.stderr) }
+	}
+
+	return { ok: true, terminalName: "teteye" }
+}
+
 async function createForkedSession(ctx: ExtensionCommandContext): Promise<string | undefined> {
 	const sessionFile = ctx.sessionManager.getSessionFile()
 	if (!sessionFile) {
@@ -194,11 +283,11 @@ function getArgumentCompletions(prefix: string): AutocompleteItem[] | null {
 export default function (pi: ExtensionAPI): void {
 	pi.registerCommand("split-fork", {
 		description:
-			"Fork this session into a new pi process in a Ghostty split. Usage: /split-fork [-d right|left|down|up] [optional prompt]",
+			"Fork this session into a new pi process in a teteye or Ghostty split. Usage: /split-fork [-d right|left|down|up] [optional prompt]",
 		getArgumentCompletions,
 		handler: async (args, ctx) => {
-			if (process.platform !== "darwin") {
-				ctx.ui.notify("/split-fork currently requires macOS (Ghostty AppleScript).", "warning")
+			if (process.platform !== "darwin" && !isTeteyeSession()) {
+				ctx.ui.notify("/split-fork currently requires teteye or macOS (Ghostty AppleScript).", "warning")
 				return
 			}
 
@@ -215,17 +304,11 @@ export default function (pi: ExtensionAPI): void {
 			const forkedSessionFile = await createForkedSession(ctx)
 			const startupInput = buildPiStartupInput(forkedSessionFile, parsedArgs.prompt)
 
-			const result = await pi.exec("osascript", [
-				"-e",
-				GHOSTTY_SPLIT_SCRIPT,
-				"--",
-				ctx.cwd,
-				startupInput,
-				parsedArgs.direction,
-			])
-			if (result.code !== 0) {
-				const reason = result.stderr?.trim() || result.stdout?.trim() || "unknown osascript error"
-				ctx.ui.notify(`Failed to launch Ghostty split: ${reason}`, "error")
+			const result = isTeteyeSession()
+				? await launchTeteyeSplit(pi, ctx, startupInput, parsedArgs.direction)
+				: await launchGhosttySplit(pi, ctx, startupInput, parsedArgs.direction)
+			if (!result.ok) {
+				ctx.ui.notify(`Failed to launch ${result.terminalName} split: ${result.reason}`, "error")
 				if (forkedSessionFile) {
 					ctx.ui.notify(`Forked session was created: ${forkedSessionFile}`, "info")
 				}
@@ -235,12 +318,15 @@ export default function (pi: ExtensionAPI): void {
 			if (forkedSessionFile) {
 				const fileName = path.basename(forkedSessionFile)
 				const promptSuffix = parsedArgs.prompt ? " and sent prompt" : ""
-				ctx.ui.notify(`Forked to ${fileName} in a new Ghostty ${parsedArgs.direction} split${promptSuffix}.`, "info")
+				ctx.ui.notify(
+					`Forked to ${fileName} in a new ${result.terminalName} ${parsedArgs.direction} split${promptSuffix}.`,
+					"info",
+				)
 				if (wasBusy) {
 					ctx.ui.notify("Forked from current committed state (in-flight turn continues in original session).", "info")
 				}
 			} else {
-				ctx.ui.notify("Opened a new Ghostty split (no persisted session to fork).", "warning")
+				ctx.ui.notify(`Opened a new ${result.terminalName} split (no persisted session to fork).`, "warning")
 			}
 		},
 	})
