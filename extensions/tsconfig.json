@@ -3,5 +3,5 @@
   "compilerOptions": {
     "noEmit": true
   },
-  "include": ["comment.ts", "split-fork.ts"]
+  "include": ["comment.ts", "split-fork.ts", "goal.ts"]
 }

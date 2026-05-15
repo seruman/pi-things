@@ -30,6 +30,7 @@
       "./extensions/subagent-tools/index.ts",
       "./extensions/diff-review/src/index.ts",
       "./extensions/split-fork.ts",
+      "./extensions/goal.ts",
       "./extensions/comment.ts",
       "./extensions/shell-leash/index.ts",
       "./extensions/secret-guard/index.ts"
