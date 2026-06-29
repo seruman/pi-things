@@ -1,7 +1,7 @@
 import { Defuddle } from "defuddle/node"
 import { parseHTML } from "linkedom"
 import { Type } from "typebox"
-import { runLightpandaFetch } from "./lightpanda"
+import { runWbFetch } from "./wb"
 
 export type FetchMode = "http" | "rendered"
 export type FetchFormat = "auto" | "markdown" | "text" | "html"
@@ -28,6 +28,7 @@ export type FetchDetails = {
 
 export const MAX_INLINE_CONTENT = 30_000
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+const MAX_RENDERED_RESPONSE_BYTES = 10 * 1024 * 1024
 
 export function normalizeMarkdown(text: string): string {
 	return text
@@ -246,19 +247,19 @@ export async function fetchOneRendered(
 	timeoutMs = 30_000,
 ): Promise<FetchRecord> {
 	const target = ensureHttpUrl(url.trim())
-	const lp = await runLightpandaFetch(target, timeoutMs, signal)
+	const rendered = await runWbFetch(target, timeoutMs, signal)
 
-	if (!lp.content) {
+	if (!rendered.content) {
 		return {
 			url: target,
 			title: fallbackTitle(target),
 			content: "",
-			error: lp.error || "rendered fetch returned no content",
+			error: rendered.error || "rendered fetch returned no content",
 		}
 	}
 
-	const sizeBytes = Buffer.byteLength(lp.content, "utf8")
-	if (sizeBytes > MAX_RESPONSE_BYTES) {
+	const sizeBytes = Buffer.byteLength(rendered.content, "utf8")
+	if (sizeBytes > MAX_RENDERED_RESPONSE_BYTES) {
 		return {
 			url: target,
 			title: fallbackTitle(target),
@@ -267,5 +268,10 @@ export async function fetchOneRendered(
 		}
 	}
 
-	return await buildRecord(target, lp.content, looksLikeHtml(lp.content) ? "text/html" : "text/plain", format)
+	return await buildRecord(
+		target,
+		rendered.content,
+		looksLikeHtml(rendered.content) ? "text/html" : "text/plain",
+		format,
+	)
 }

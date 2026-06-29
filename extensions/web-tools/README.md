@@ -43,11 +43,12 @@ web_fetch({
 
 ### `web_fetch_rendered`
 
-Fetch URL content via Lightpanda.
+Fetch URL content via `wb` browser rendering.
 
 Requirements:
 
-- `lightpanda` installed and available in `PATH`.
+- `wb` installed and available in `PATH`.
+- Optional: set `WB_PATH` to use a custom binary, or `WB_FETCH_WB_DIR` to override the per-process fetch environment directory.
 
 ```ts
 web_fetch_rendered({
