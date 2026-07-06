@@ -447,25 +447,44 @@ export default function goalExtension(pi: ExtensionAPI) {
 		}
 	}
 
-	function reconstructState(ctx: ExtensionContext): void {
+	function isInheritedForkGoal(ctx: ExtensionContext, stateTimestamp: string | null): boolean {
+		if (!goal || goal.status !== "active" || !stateTimestamp) return false
+		const header = ctx.sessionManager.getHeader()
+		if (!header?.parentSession) return false
+
+		const headerTime = Date.parse(header.timestamp)
+		const stateTime = Date.parse(stateTimestamp)
+		if (!Number.isFinite(headerTime) || !Number.isFinite(stateTime)) return false
+
+		return stateTime <= headerTime
+	}
+
+	function reconstructState(ctx: ExtensionContext, pauseInheritedForkGoal = false): void {
 		goal = null
 		activeSinceMs = null
 		activeGoalIdAtAgentStart = null
 		continuationQueued = false
 		goalCompactionInFlight = false
 
+		let latestGoalEntryTimestamp: string | null = null
 		for (const entry of ctx.sessionManager.getBranch()) {
 			if (entry.type !== "custom" || entry.customType !== STATE_TYPE) continue
 			const data = entry.data as Partial<PersistedGoalState> | undefined
 			goal = data?.goal ? cloneGoal(data.goal) : null
+			latestGoalEntryTimestamp = entry.timestamp
 		}
 		if (goal?.status === "active") {
 			activeSinceMs = Date.now()
 		}
+		if (pauseInheritedForkGoal && isInheritedForkGoal(ctx, latestGoalEntryTimestamp)) {
+			const updatedGoal = setGoalStatus("paused")
+			persist("status")
+			showGoalMessage(`Inherited goal paused in fork\n\n${goalSummary(updatedGoal)}`)
+		}
 		updateStatus(ctx)
 	}
 
-	pi.on("session_start", async (_event, ctx) => reconstructState(ctx))
+	pi.on("session_start", async (_event, ctx) => reconstructState(ctx, true))
 	pi.on("session_tree", async (_event, ctx) => reconstructState(ctx))
 
 	pi.on("before_agent_start", async (event) => {
