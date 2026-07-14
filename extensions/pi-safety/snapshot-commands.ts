@@ -13,6 +13,7 @@ import {
 	garbageCollectSnapshots,
 	observeWorkspace,
 	observeWorkspacePaths,
+	storedSnapshotPath,
 } from "./snapshot"
 import { SNAPSHOT_USAGE, type SnapshotCommand } from "./snapshot-cli"
 import {
@@ -69,8 +70,7 @@ export function runSnapshotCommand(
 			const entry = loaded.value.manifest.entries.find((candidate) => candidate.path === command.path)
 			if (!entry) return err({ kind: "path-not-found", path: command.path })
 			if (entry.kind !== "file") return ok(JSON.stringify(entry, null, 2))
-			const storageRoot = entry.storage.kind === "protected" ? "protected" : "tree"
-			const storedPath = path.join(loaded.value.directory, storageRoot, entry.path)
+			const storedPath = storedSnapshotPath(loaded.value.directory, entry)
 			try {
 				const content = fs.readFileSync(storedPath)
 				if (content.includes(0)) return err({ kind: "binary-content", path: command.path })
@@ -177,8 +177,7 @@ function diffSnapshot(
 		else if (!after) changes.push(`deleted\t${relativePath}`)
 		else if (entryChanged(before, after)) changes.push(`modified\t${relativePath}`)
 		else if (before.kind === "file" && after.kind === "file") {
-			const storageRoot = before.storage.kind === "protected" ? "protected" : "tree"
-			const snapshotPath = path.join(loaded.value.directory, storageRoot, before.path)
+			const snapshotPath = storedSnapshotPath(loaded.value.directory, before)
 			const livePath = path.join(store.workspaceRoot, after.path)
 			try {
 				if (!fs.readFileSync(snapshotPath).equals(fs.readFileSync(livePath))) {
@@ -216,10 +215,7 @@ function createSelectedTextPatch(
 	let beforeBytes = Buffer.alloc(0)
 	let afterBytes = Buffer.alloc(0)
 	try {
-		if (before?.kind === "file") {
-			const storageRoot = before.storage.kind === "protected" ? "protected" : "tree"
-			beforeBytes = fs.readFileSync(path.join(snapshot.directory, storageRoot, relativePath))
-		}
+		if (before?.kind === "file") beforeBytes = fs.readFileSync(storedSnapshotPath(snapshot.directory, before))
 		if (after?.kind === "file") afterBytes = fs.readFileSync(path.join(store.workspaceRoot, relativePath))
 	} catch (cause) {
 		return ioError("diff-text", relativePath, cause)
@@ -288,13 +284,8 @@ function exportSnapshot(
 				fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 })
 				fs.symlinkSync(entry.target, target)
 			} else {
-				const storageRoot = entry.storage.kind === "protected" ? "protected" : "tree"
 				fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 })
-				fs.copyFileSync(
-					path.join(loaded.value.directory, storageRoot, entry.path),
-					target,
-					fs.constants.COPYFILE_FICLONE_FORCE,
-				)
+				fs.copyFileSync(storedSnapshotPath(loaded.value.directory, entry), target, fs.constants.COPYFILE_FICLONE_FORCE)
 				fs.chmodSync(target, entry.mode)
 				fs.utimesSync(target, entry.mtimeMs / 1000, entry.mtimeMs / 1000)
 			}

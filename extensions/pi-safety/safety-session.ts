@@ -1,6 +1,6 @@
 import { compileBashProfile } from "./bash-profile"
 import { parseCanonicalPath } from "./canonical-path"
-import { type CheckpointError, type CheckpointRun, type CheckpointStatus, createCheckpointRun } from "./checkpoint"
+import { type CheckpointError, CheckpointRun, type CheckpointStatus } from "./checkpoint"
 import { type DefaultRulesError, createBashFilePolicy } from "./default-rules"
 import type { FilePolicy } from "./file-policy"
 import {
@@ -20,7 +20,7 @@ import { type Result, err, ok } from "./result"
 import { createConfiguredSnapshotStore } from "./safety-filesystem"
 import type { CompiledSbpl } from "./sbpl"
 import { type SnapshotError, type SnapshotStore, createSnapshot } from "./snapshot"
-import { type GuardedToolCall, type ToolAuthorizationError, authorizeBuiltinToolCall } from "./tool-authorization"
+import { type ToolAuthorizationError, authorizeBuiltinToolCall } from "./tool-authorization"
 
 export interface RawSafetySessionConfiguration extends RawInitialFilePolicy {
 	readonly privateTemp: string
@@ -34,14 +34,7 @@ export type SafetySessionError =
 	| { readonly kind: "integration"; readonly cause: IntegrationError }
 	| { readonly kind: "snapshot-store"; readonly cause: SnapshotError }
 
-export type SafetyDecisionCause =
-	| { readonly kind: "authorization"; readonly cause: ToolAuthorizationError }
-	| { readonly kind: "run-not-started" }
-	| { readonly kind: "checkpoint"; readonly cause: CheckpointError }
-
-export type SafetyDecision =
-	| { readonly kind: "allow"; readonly authorization: GuardedToolCall }
-	| { readonly kind: "block"; readonly reason: string; readonly cause: SafetyDecisionCause }
+export type SafetyDecision = { readonly kind: "allow" } | { readonly kind: "block"; readonly reason: string }
 
 export type SafetySessionCheckpointStatus = CheckpointStatus | { readonly kind: "run-not-started" }
 
@@ -78,7 +71,7 @@ class ManagedSafetySession implements SafetySession {
 		if (this.#checkpointRun?.status().kind === "creating") {
 			return err({ kind: "checkpoint-creation-in-progress" })
 		}
-		this.#checkpointRun = createCheckpointRun(async () => createSnapshot(this.snapshotStore))
+		this.#checkpointRun = new CheckpointRun(async () => createSnapshot(this.snapshotStore))
 		return ok(undefined)
 	}
 
@@ -103,28 +96,20 @@ class ManagedSafetySession implements SafetySession {
 	async authorize(toolName: string, input: unknown): Promise<SafetyDecision> {
 		const authorization = authorizeBuiltinToolCall(toolName, input, this.#filePolicy)
 		if (!authorization.ok) {
-			const cause = { kind: "authorization", cause: authorization.error } as const
-			return { kind: "block", reason: formatAuthorizationError(authorization.error), cause }
+			return { kind: "block", reason: formatAuthorizationError(authorization.error) }
 		}
-		if (authorization.value.kind === "read" || authorization.value.kind === "other") {
-			return { kind: "allow", authorization: authorization.value }
-		}
+		if (authorization.value.kind === "read" || authorization.value.kind === "other") return { kind: "allow" }
 		if (!this.#checkpointRun) {
-			return {
-				kind: "block",
-				reason: "pi-safety: checkpoint run has not started",
-				cause: { kind: "run-not-started" },
-			}
+			return { kind: "block", reason: "pi-safety: checkpoint run has not started" }
 		}
 		const checkpoint = await this.#checkpointRun.ensureCheckpoint()
 		if (!checkpoint.ok) {
 			return {
 				kind: "block",
 				reason: `pi-safety: checkpoint failed (${formatCheckpointError(checkpoint.error)})`,
-				cause: { kind: "checkpoint", cause: checkpoint.error },
 			}
 		}
-		return { kind: "allow", authorization: authorization.value }
+		return { kind: "allow" }
 	}
 }
 

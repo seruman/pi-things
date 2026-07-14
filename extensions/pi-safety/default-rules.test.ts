@@ -53,6 +53,45 @@ test("snapshot-only policy uses the same default exclusion declarations", () => 
 	assert.equal(decideFileAccess(policy, canonicalPath(path.join(workspace, "README.md"))).value, "read-write")
 })
 
+test("runtime socket adapters use exact grants and broad wb denials", () => {
+	const root = canonicalPath("/")
+	const sshSocket = canonicalPath("/tmp/pi-safety-ssh.sock")
+	const dockerSocket = canonicalPath("/tmp/pi-safety-docker.sock")
+	const wbSocket = canonicalPath("/tmp/pi-safety-wb/wb.sock")
+	const policy = unwrap(createSnapshotFilePolicy(canonicalPath("/tmp/pi-safety-default-socket-policy")))
+	const compiled = emitSbplProfile(
+		defaultRuntimeRules({
+			policy,
+			integrations: {
+				gitExecutable: canonicalExecutable("/usr/bin/git"),
+				sshAgent: { kind: "unix-socket", socket: sshSocket },
+				docker: { kind: "unix-socket", socket: dockerSocket },
+				wb: {
+					kind: "enabled",
+					executable: canonicalExecutable("/usr/bin/true"),
+					runtimeDirectory: canonicalPath("/tmp/pi-safety-wb"),
+					socket: wbSocket,
+					log: canonicalPath("/tmp/pi-safety-wb/wb.log"),
+					webKitState: canonicalPath("/tmp/pi-safety-webkit"),
+					cacheState: canonicalPath("/tmp/pi-safety-cache"),
+				},
+			},
+		}),
+	)
+	const reference = (value: string): string => {
+		const parameter = compiled.parameters.find((candidate) => candidate.value === value)
+		assert.ok(parameter, `missing parameter for ${value}`)
+		return `(param "${parameter.name}")`
+	}
+
+	for (const socket of [sshSocket, dockerSocket, wbSocket]) {
+		assert.ok(compiled.source.includes(`(remote unix-socket (path ${reference(socket)}))`))
+	}
+	assert.ok(compiled.source.includes(`(allow network-bind\n    (local unix-socket (path ${reference(wbSocket)}))`))
+	assert.ok(compiled.source.includes(`(deny network-outbound\n    (remote unix-socket (subpath ${reference(root)}))`))
+	assert.ok(compiled.source.includes(`(deny network-bind\n    (local unix-socket (subpath ${reference(root)}))`))
+})
+
 test("default runtime permissions are emitted entirely through the typed SBPL DSL", () => {
 	const policy = unwrap(createSnapshotFilePolicy(canonicalPath("/tmp/pi-safety-default-runtime-policy")))
 	const compiled = emitSbplProfile(

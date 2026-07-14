@@ -77,14 +77,6 @@ type FileRule = ProcessScope & {
 	readonly matchers: NonEmptyReadonlyArray<PathMatcher>
 }
 
-type FileRuleExceptProcess = {
-	readonly kind: "file-except-process"
-	readonly effect: RuleEffect
-	readonly operations: NonEmptyReadonlyArray<FileOperation>
-	readonly matchers: NonEmptyReadonlyArray<PathMatcher>
-	readonly process: CanonicalExecutable
-}
-
 type FileRuleExceptProcesses = {
 	readonly kind: "file-except-processes"
 	readonly effect: RuleEffect
@@ -158,7 +150,6 @@ type PosixIpcRule = {
 
 type RuleNode =
 	| FileRule
-	| FileRuleExceptProcess
 	| FileRuleExceptProcesses
 	| MachLookupRule
 	| UnixSocketRule
@@ -218,12 +209,10 @@ export function xpcMachService(input: string): Result<MachService, MachServiceNa
 }
 
 export function allowRuntimeOperations(operations: NonEmptyReadonlyArray<RuntimeOperation>): Rule {
-	assertNonEmpty(operations, "runtime operations")
 	return freezeRule({ kind: "runtime-operation", effect: "allow", operations: freezeTuple(operations) })
 }
 
 export function allowSameSandbox(operations: NonEmptyReadonlyArray<SameSandboxOperation>): Rule {
-	assertNonEmpty(operations, "same-sandbox operations")
 	return freezeRule({ kind: "same-sandbox", effect: "allow", operations: freezeTuple(operations) })
 }
 
@@ -256,8 +245,6 @@ export function fileRule(input: {
 	readonly matchers: NonEmptyReadonlyArray<PathMatcher>
 	readonly process?: CanonicalExecutable
 }): Rule {
-	assertNonEmpty(input.operations, "file operations")
-	assertNonEmpty(input.matchers, "file matchers")
 	return freezeRule({
 		kind: "file",
 		effect: input.effect,
@@ -282,18 +269,6 @@ export function fileRuleExceptProcesses(input: {
 	readonly matchers: NonEmptyReadonlyArray<PathMatcher>
 	readonly processes: NonEmptyReadonlyArray<CanonicalExecutable>
 }): Rule {
-	assertNonEmpty(input.operations, "file operations")
-	assertNonEmpty(input.matchers, "file matchers")
-	assertNonEmpty(input.processes, "excluded processes")
-	if (input.processes.length === 1) {
-		return freezeRule({
-			kind: "file-except-process",
-			effect: input.effect,
-			operations: freezeTuple(input.operations),
-			matchers: freezeTuple(input.matchers),
-			process: input.processes[0],
-		})
-	}
 	return freezeRule({
 		kind: "file-except-processes",
 		effect: input.effect,
@@ -308,7 +283,6 @@ export function machLookupRule(input: {
 	readonly services: NonEmptyReadonlyArray<MachService>
 	readonly process?: CanonicalExecutable
 }): Rule {
-	assertNonEmpty(input.services, "Mach services")
 	return freezeRule({
 		kind: "mach-lookup",
 		effect: input.effect,
@@ -333,29 +307,20 @@ export function unixBindRule(input: {
 	return unixSocketRule("unix-bind", input)
 }
 
-export function allowFileExtensionIssue(input: {
-	readonly extensionClass: FileExtensionClass
-	readonly matchers: NonEmptyReadonlyArray<PathMatcher>
-	readonly process: CanonicalExecutable
-}): Rule {
-	return fileExtensionIssueRule("allow", input)
-}
-
 export function allowFileExtensionIssues(input: {
 	readonly grants: NonEmptyReadonlyArray<FileExtensionGrant>
 	readonly process: CanonicalExecutable
 }): Rule {
-	assertNonEmpty(input.grants, "file extension grants")
-	const freezeGrant = (grant: FileExtensionGrant): FileExtensionGrant =>
+	const grants = input.grants.map((grant) =>
 		Object.freeze({
 			extensionClass: grant.extensionClass,
 			matchers: freezeTuple(grant.matchers),
-		})
-	const [first, ...rest] = input.grants
+		}),
+	)
 	return freezeRule({
 		kind: "file-extension-issue",
 		effect: "allow",
-		grants: freezeTuple([freezeGrant(first), ...rest.map(freezeGrant)]),
+		grants: freezeTuple(grants),
 		process: input.process,
 	})
 }
@@ -376,7 +341,6 @@ function fileExtensionIssueRule(
 		readonly process: CanonicalExecutable
 	},
 ): Rule {
-	assertNonEmpty(input.matchers, "file extension matchers")
 	return freezeRule({
 		kind: "file-extension-issue",
 		effect,
@@ -413,7 +377,6 @@ function unixSocketRule(
 		readonly process?: CanonicalExecutable
 	},
 ): Rule {
-	assertNonEmpty(input.matchers, "Unix socket matchers")
 	return freezeRule({
 		kind,
 		effect: input.effect,
@@ -425,25 +388,21 @@ function unixSocketRule(
 function emitRule(rule: RuleNode, parameters: ParameterEmitter): string {
 	if (rule.kind === "file-except-processes") {
 		const processFilters = rule.processes.map((process) => `(process-path ${parameters.reference(process)})`)
-		const excluded = `(require-not (require-any ${processFilters.join(" ")}))`
+		const excluded =
+			processFilters.length === 1
+				? `(require-not ${processFilters[0]})`
+				: `(require-not (require-any ${processFilters.join(" ")}))`
 		return [`(with-filter ${excluded}`, indent(emitFileRule({ ...rule, kind: "file" }, parameters)), ")"].join("\n")
 	}
 	if (!("process" in rule) || rule.process === undefined) return emitUnscopedRule(rule, parameters)
-	const process = parameters.reference(rule.process)
-	const unscoped =
-		rule.kind === "file-except-process"
-			? emitFileRule({ ...rule, kind: "file" }, parameters)
-			: emitUnscopedRule(rule, parameters)
-	const filter =
-		rule.kind === "file-except-process" ? `(require-not (process-path ${process}))` : `(process-path ${process})`
-	return [`(with-filter ${filter}`, indent(unscoped), ")"].join("\n")
+	const filter = `(process-path ${parameters.reference(rule.process)})`
+	return [`(with-filter ${filter}`, indent(emitUnscopedRule(rule, parameters)), ")"].join("\n")
 }
 
 function emitUnscopedRule(rule: RuleNode, parameters: ParameterEmitter): string {
 	switch (rule.kind) {
 		case "file":
 			return emitFileRule(rule, parameters)
-		case "file-except-process":
 		case "file-except-processes":
 			throw new TypeError("except-process rules must be emitted through their process filter")
 		case "mach-lookup":
@@ -585,12 +544,9 @@ function freezeRule(rule: RuleNode): Rule {
 	return Object.freeze(rule) as Rule
 }
 
-function freezeTuple<T>(items: NonEmptyReadonlyArray<T>): NonEmptyReadonlyArray<T> {
+function freezeTuple<T>(items: readonly T[]): NonEmptyReadonlyArray<T> {
+	if (items.length === 0) throw new TypeError("expected a non-empty tuple")
 	return Object.freeze([...items]) as unknown as NonEmptyReadonlyArray<T>
-}
-
-function assertNonEmpty<T>(items: readonly T[], label: string): asserts items is NonEmptyReadonlyArray<T> {
-	if (items.length === 0) throw new TypeError(`${label} must not be empty`)
 }
 
 function isMachServiceName(input: string): boolean {

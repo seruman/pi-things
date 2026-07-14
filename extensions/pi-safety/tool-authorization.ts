@@ -3,27 +3,14 @@ import type { CanonicalPath } from "./canonical-path"
 import { type FileAccess, type FilePolicy, decideFileAccess } from "./file-policy"
 import { type Result, err, ok } from "./result"
 
-declare const authorizedReadBrand: unique symbol
-declare const authorizedWriteTargetBrand: unique symbol
-
-export interface AuthorizedRead {
-	readonly path: CanonicalPath
-	readonly [authorizedReadBrand]: true
-}
-
-export interface AuthorizedWriteTarget {
-	readonly path: CanonicalPath
-	readonly [authorizedWriteTargetBrand]: true
-}
-
 type MutatingBuiltinTool = "write" | "edit"
 type GuardedBuiltinTool = "read" | MutatingBuiltinTool
 
 export type GuardedToolCall =
 	| { readonly kind: "bash" }
-	| { readonly kind: "read"; readonly source: AuthorizedRead }
-	| { readonly kind: "write"; readonly target: AuthorizedWriteTarget }
-	| { readonly kind: "edit"; readonly target: AuthorizedWriteTarget }
+	| { readonly kind: "read" }
+	| { readonly kind: "write" }
+	| { readonly kind: "edit" }
 	| { readonly kind: "other" }
 
 export type ToolAuthorizationError =
@@ -68,12 +55,11 @@ export function authorizeBuiltinToolCall(
 	const decision = decideFileAccess(policy, resolvedPath.value)
 	if (toolName === "read") {
 		if (decision.value === "none") return denied(toolName, resolvedPath.value, "read", decision)
-		return ok({ kind: "read", source: Object.freeze({ path: resolvedPath.value }) as AuthorizedRead })
+		return ok({ kind: "read" })
 	}
 	if (decision.value !== "read-write") return denied(toolName, resolvedPath.value, "write", decision)
 
-	const target = Object.freeze({ path: resolvedPath.value }) as AuthorizedWriteTarget
-	return toolName === "write" ? ok({ kind: "write", target }) : ok({ kind: "edit", target })
+	return ok({ kind: toolName })
 }
 
 function denied(

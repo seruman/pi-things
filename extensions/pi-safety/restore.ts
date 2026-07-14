@@ -12,6 +12,7 @@ import {
 	observeWorkspacePaths,
 	parseRelativeSnapshotPath,
 	planSnapshot,
+	storedSnapshotPath,
 } from "./snapshot"
 import { type LoadedSnapshot, type SnapshotHistoryError, verifySnapshotEntries } from "./snapshot-history"
 
@@ -146,8 +147,7 @@ export function planRestore(
 		} else if (entry.kind === "symlink") {
 			creations.push({ kind: "symlink", entry })
 		} else if (entry.kind === "file") {
-			const storageRoot = entry.storage.kind === "protected" ? "protected" : "tree"
-			const sourcePath = path.join(snapshot.directory, storageRoot, entry.path)
+			const sourcePath = storedSnapshotPath(snapshot.directory, entry)
 			const source = parseCanonicalPath(sourcePath)
 			if (!source.ok) return err({ kind: "source-path", path: sourcePath, message: JSON.stringify(source.error) })
 			creations.push({ kind: "file", entry, source: source.value })

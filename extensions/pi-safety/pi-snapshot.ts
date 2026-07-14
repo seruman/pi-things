@@ -24,16 +24,16 @@ export function main(args: readonly string[]): number {
 		console.error(`pi-snapshot: ${invocation.value.command.kind} is unavailable inside Pi Bash`)
 		return 1
 	}
-	let filesystem: ReturnType<typeof createSafetyFilesystem>
+	let snapshotStore: ReturnType<typeof createSafetyFilesystem>
 	if (sandboxed) {
-		filesystem = createSandboxedSafetyFilesystem({ cwd: projectRoot, stateHome })
+		snapshotStore = createSandboxedSafetyFilesystem({ cwd: projectRoot, stateHome })
 	} else {
 		const projectConfiguration = loadProjectSafetyConfiguration(projectRoot)
 		if (!projectConfiguration.ok) {
 			console.error(`pi-snapshot: configuration failed (${projectConfiguration.error.message})`)
 			return 1
 		}
-		filesystem = createSafetyFilesystem({
+		snapshotStore = createSafetyFilesystem({
 			cwd: projectRoot,
 			home,
 			stateHome,
@@ -41,12 +41,12 @@ export function main(args: readonly string[]): number {
 			additionalNoAccessPatterns: projectConfiguration.value.additionalNoAccessPatterns,
 		})
 	}
-	if (!filesystem.ok) {
-		console.error(`pi-snapshot: initialization failed (${filesystem.error.kind})`)
+	if (!snapshotStore.ok) {
+		console.error(`pi-snapshot: initialization failed (${snapshotStore.error.kind})`)
 		return 1
 	}
 	const authority = sandboxed ? { kind: "sandboxed" as const } : { kind: "direct-user" as const }
-	const result = runSnapshotCommand(filesystem.value.snapshotStore, invocation.value.command, authority)
+	const result = runSnapshotCommand(snapshotStore.value, invocation.value.command, authority)
 	if (!result.ok) {
 		console.error(`pi-snapshot: ${JSON.stringify(result.error)}`)
 		return 1

@@ -4,7 +4,6 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { unwrap } from "./result"
 import {
-	allowFileExtensionIssue,
 	allowFileExtensionIssues,
 	allowWebKitBrokerExtension,
 	emitSbpl,
@@ -52,6 +51,19 @@ test("emits file rules through stable sandbox parameters", () => {
 		{ name: "PI_SAFETY_0", value: tmp },
 		{ name: "PI_SAFETY_1", value: usr },
 	])
+})
+
+test("rejects forged empty tuples at the shared runtime boundary", () => {
+	const executable = canonicalExecutable("/usr/bin/true")
+	const tmp = canonicalPath("/tmp")
+	assert.throws(
+		() => Reflect.apply(fileRule, undefined, [{ effect: "allow", operations: [], matchers: [literal(tmp)] }]),
+		/expected a non-empty tuple/,
+	)
+	assert.throws(
+		() => Reflect.apply(allowFileExtensionIssues, undefined, [{ grants: [], process: executable }]),
+		/expected a non-empty tuple/,
+	)
 })
 
 test("emits process exclusions without allowing mixed process scopes", () => {
@@ -125,9 +137,13 @@ test("encodes Unix connect and bind as different rule variants", () => {
 test("constrains file extension issuance by class, paths, and process", () => {
 	const executable = canonicalExecutable("/usr/bin/true")
 	const compiled = emitSbpl([
-		allowFileExtensionIssue({
-			extensionClass: "com.apple.app-sandbox.read-write",
-			matchers: [subpath(canonicalPath("/tmp")), subpath(canonicalPath("/usr"))],
+		allowFileExtensionIssues({
+			grants: [
+				{
+					extensionClass: "com.apple.app-sandbox.read-write",
+					matchers: [subpath(canonicalPath("/tmp")), subpath(canonicalPath("/usr"))],
+				},
+			],
 			process: executable,
 		}),
 	])
@@ -224,9 +240,13 @@ test("sandbox-exec accepts emitted rules and parameter definitions", () => {
 		}),
 		unixConnectRule({ effect: "allow", matchers: [socket], process: executable }),
 		unixBindRule({ effect: "allow", matchers: [socket], process: executable }),
-		allowFileExtensionIssue({
-			extensionClass: "com.apple.app-sandbox.read",
-			matchers: [subpath(canonicalPath("/tmp"))],
+		allowFileExtensionIssues({
+			grants: [
+				{
+					extensionClass: "com.apple.app-sandbox.read",
+					matchers: [subpath(canonicalPath("/tmp"))],
+				},
+			],
 			process: executable,
 		}),
 		allowWebKitBrokerExtension("generic", executable),

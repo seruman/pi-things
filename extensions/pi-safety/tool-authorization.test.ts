@@ -41,14 +41,10 @@ test("authorizes workspace writes and rejects writes outside the workspace", () 
 
 		const policy = testFilePolicy(workspace, home)
 
-		const allowed = authorizeBuiltinToolCall("write", { path: "inside.txt", content: "safe" }, policy)
-		assert.equal(allowed.ok, true)
-		if (allowed.ok) {
-			assert.equal(allowed.value.kind, "write")
-			if (allowed.value.kind === "write") {
-				assert.equal(allowed.value.target.path, path.join(workspace, "inside.txt"))
-			}
-		}
+		assert.deepEqual(authorizeBuiltinToolCall("write", { path: "inside.txt", content: "safe" }, policy), {
+			ok: true,
+			value: { kind: "write" },
+		})
 
 		const denied = authorizeBuiltinToolCall("write", { path: outside, content: "unsafe" }, policy)
 		assert.equal(denied.ok, false)
@@ -124,12 +120,10 @@ test("allows ordinary reads but denies the no-access fallback path Pi would sele
 			noAccessPatterns: [pathPattern(protectedFile, canonicalWorkspace)],
 		})
 
-		const allowed = authorizeBuiltinToolCall("read", { path: publicFile }, policy)
-		assert.equal(allowed.ok, true)
-		if (allowed.ok) {
-			assert.equal(allowed.value.kind, "read")
-			if (allowed.value.kind === "read") assert.equal(allowed.value.source.path, publicFile)
-		}
+		assert.deepEqual(authorizeBuiltinToolCall("read", { path: publicFile }, policy), {
+			ok: true,
+			value: { kind: "read" },
+		})
 
 		const denied = authorizeBuiltinToolCall("read", { path: "Capture d'archive.txt" }, policy)
 		assert.equal(denied.ok, false)

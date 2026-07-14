@@ -6,12 +6,8 @@ import {
 	type RawInitialFilePolicy,
 	parseInitialSafetyConfiguration,
 } from "./policy-configuration"
-import { type Result, err, ok } from "./result"
+import { type Result, err } from "./result"
 import { type SnapshotError, type SnapshotStore, createSnapshotStore } from "./snapshot"
-
-export interface SafetyFilesystem {
-	readonly snapshotStore: SnapshotStore
-}
 
 export type SafetyFilesystemError =
 	| { readonly kind: "file-policy-configuration"; readonly cause: FilePolicyConfigurationError }
@@ -19,18 +15,17 @@ export type SafetyFilesystemError =
 	| { readonly kind: "file-policy"; readonly cause: DefaultRulesError }
 	| { readonly kind: "snapshot-store"; readonly cause: SnapshotError }
 
-export function createSafetyFilesystem(raw: RawInitialFilePolicy): Result<SafetyFilesystem, SafetyFilesystemError> {
+export function createSafetyFilesystem(raw: RawInitialFilePolicy): Result<SnapshotStore, SafetyFilesystemError> {
 	const configuration = parseInitialSafetyConfiguration(raw)
 	if (!configuration.ok) return err({ kind: "file-policy-configuration", cause: configuration.error })
 	const snapshotStore = createConfiguredSnapshotStore(configuration.value)
-	if (!snapshotStore.ok) return err({ kind: "snapshot-store", cause: snapshotStore.error })
-	return ok(Object.freeze({ snapshotStore: snapshotStore.value }))
+	return snapshotStore.ok ? snapshotStore : err({ kind: "snapshot-store", cause: snapshotStore.error })
 }
 
 export function createSandboxedSafetyFilesystem(raw: {
 	readonly cwd: string
 	readonly stateHome: string
-}): Result<SafetyFilesystem, SafetyFilesystemError> {
+}): Result<SnapshotStore, SafetyFilesystemError> {
 	const workspaceRoot = parseSnapshotRoot("cwd", raw.cwd)
 	if (!workspaceRoot.ok) return workspaceRoot
 	const stateHome = parseSnapshotRoot("stateHome", raw.stateHome)
@@ -42,8 +37,7 @@ export function createSandboxedSafetyFilesystem(raw: {
 		stateRoot: stateHome.value,
 		filePolicy: filePolicy.value,
 	})
-	if (!snapshotStore.ok) return err({ kind: "snapshot-store", cause: snapshotStore.error })
-	return ok(Object.freeze({ snapshotStore: snapshotStore.value }))
+	return snapshotStore.ok ? snapshotStore : err({ kind: "snapshot-store", cause: snapshotStore.error })
 }
 
 function parseSnapshotRoot(field: "cwd" | "stateHome", pathname: string): Result<CanonicalPath, SafetyFilesystemError> {
