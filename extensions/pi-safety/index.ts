@@ -81,7 +81,7 @@ export default function piSafety(pi: ExtensionAPI): void {
 			home,
 			stateHome: process.env.XDG_STATE_HOME ?? path.join(home, ".local", "state"),
 			piConfigDir: process.env.PI_CODING_AGENT_DIR ?? path.join(home, ".pi", "agent"),
-			additionalSecretPatterns: projectConfiguration.value.additionalSecretPatterns,
+			additionalNoAccessPatterns: projectConfiguration.value.additionalNoAccessPatterns,
 			privateTemp: process.env.TMPDIR ?? os.tmpdir(),
 			integrationEnvironment: {
 				path: process.env.PATH,

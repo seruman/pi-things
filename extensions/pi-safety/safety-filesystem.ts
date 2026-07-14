@@ -1,10 +1,11 @@
-import {
-	type BuiltinPolicyError,
-	type InitialBuiltinConfiguration,
-	type RawInitialBuiltinAccessPolicy,
-	parseInitialBuiltinConfiguration,
-} from "./builtin-policy"
 import { type CanonicalPath, parseCanonicalPath } from "./canonical-path"
+import { type DefaultRulesError, createSnapshotFilePolicy } from "./default-rules"
+import {
+	type FilePolicyConfigurationError,
+	type InitialSafetyConfiguration,
+	type RawInitialFilePolicy,
+	parseInitialSafetyConfiguration,
+} from "./policy-configuration"
 import { type Result, err, ok } from "./result"
 import { type SnapshotError, type SnapshotStore, createSnapshotStore } from "./snapshot"
 
@@ -13,15 +14,14 @@ export interface SafetyFilesystem {
 }
 
 export type SafetyFilesystemError =
-	| { readonly kind: "builtin-policy"; readonly cause: BuiltinPolicyError }
+	| { readonly kind: "file-policy-configuration"; readonly cause: FilePolicyConfigurationError }
 	| { readonly kind: "snapshot-root"; readonly field: "cwd" | "stateHome"; readonly path: string }
+	| { readonly kind: "file-policy"; readonly cause: DefaultRulesError }
 	| { readonly kind: "snapshot-store"; readonly cause: SnapshotError }
 
-export function createSafetyFilesystem(
-	raw: RawInitialBuiltinAccessPolicy,
-): Result<SafetyFilesystem, SafetyFilesystemError> {
-	const configuration = parseInitialBuiltinConfiguration(raw)
-	if (!configuration.ok) return err({ kind: "builtin-policy", cause: configuration.error })
+export function createSafetyFilesystem(raw: RawInitialFilePolicy): Result<SafetyFilesystem, SafetyFilesystemError> {
+	const configuration = parseInitialSafetyConfiguration(raw)
+	if (!configuration.ok) return err({ kind: "file-policy-configuration", cause: configuration.error })
 	const snapshotStore = createConfiguredSnapshotStore(configuration.value)
 	if (!snapshotStore.ok) return err({ kind: "snapshot-store", cause: snapshotStore.error })
 	return ok(Object.freeze({ snapshotStore: snapshotStore.value }))
@@ -35,10 +35,12 @@ export function createSandboxedSafetyFilesystem(raw: {
 	if (!workspaceRoot.ok) return workspaceRoot
 	const stateHome = parseSnapshotRoot("stateHome", raw.stateHome)
 	if (!stateHome.ok) return stateHome
+	const filePolicy = createSnapshotFilePolicy(workspaceRoot.value)
+	if (!filePolicy.ok) return err({ kind: "file-policy", cause: filePolicy.error })
 	const snapshotStore = createSnapshotStore({
 		workspaceRoot: workspaceRoot.value,
 		stateRoot: stateHome.value,
-		protection: { patterns: [], protectedRoots: [] },
+		filePolicy: filePolicy.value,
 	})
 	if (!snapshotStore.ok) return err({ kind: "snapshot-store", cause: snapshotStore.error })
 	return ok(Object.freeze({ snapshotStore: snapshotStore.value }))
@@ -50,20 +52,11 @@ function parseSnapshotRoot(field: "cwd" | "stateHome", pathname: string): Result
 }
 
 export function createConfiguredSnapshotStore(
-	configuration: InitialBuiltinConfiguration,
+	configuration: InitialSafetyConfiguration,
 ): Result<SnapshotStore, SnapshotError> {
-	const policy = configuration.accessPolicy
 	return createSnapshotStore({
-		workspaceRoot: policy.workspaceRoot,
+		workspaceRoot: configuration.filePolicy.workspaceRoot,
 		stateRoot: configuration.stateHome,
-		protection: {
-			patterns: policy.secretPatterns,
-			protectedRoots: [
-				{
-					root: policy.ssh.protectedRoot,
-					ordinaryExceptions: policy.ssh.readableMetadata,
-				},
-			],
-		},
+		filePolicy: configuration.filePolicy,
 	})
 }

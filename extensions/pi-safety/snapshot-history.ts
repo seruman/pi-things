@@ -83,7 +83,7 @@ export function loadSnapshot(
 	} catch (cause) {
 		return ioError("read-manifest", manifestPath, cause)
 	}
-	const manifest = parseSnapshotManifest(input)
+	const manifest = parseSnapshotManifest(input, store.filePolicy)
 	if (!manifest.ok) return err({ kind: "manifest", path: manifestPath, cause: manifest.error })
 	if (manifest.value.id !== id) {
 		return err({ kind: "snapshot-id-mismatch", expected: id, actual: manifest.value.id })
@@ -98,7 +98,7 @@ export function loadSnapshot(
 				const workspacePath = path.join(store.workspaceRoot, entry.path)
 				const canonical = appendCanonicalPath(store.workspaceRoot, entry.path.split(path.sep))
 				if (!canonical.ok) return ioError("classify-snapshot-entry", workspacePath, JSON.stringify(canonical.error))
-				if (classifySnapshotStorage(store.protection, canonical.value).kind !== entry.storage.kind) {
+				if (classifySnapshotStorage(store.filePolicy, canonical.value).kind !== entry.storage.kind) {
 					return err({ kind: "storage-classification-mismatch", path: entry.path })
 				}
 			}

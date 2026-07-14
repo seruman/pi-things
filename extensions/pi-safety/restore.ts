@@ -61,7 +61,6 @@ export function selectedRestoreScope(inputs: readonly string[]): Result<RestoreS
 	for (const input of inputs) {
 		const parsed = parseRelativeSnapshotPath(input)
 		if (!parsed.ok) return err({ kind: "invalid-selection", input, message: JSON.stringify(parsed.error) })
-		if (isExcludedSnapshotPath(parsed.value)) return err({ kind: "excluded-selection", path: parsed.value })
 		if (!seen.has(parsed.value)) {
 			seen.add(parsed.value)
 			paths.push(parsed.value)
@@ -81,16 +80,22 @@ export function planRestore(
 	snapshot: LoadedSnapshot,
 	scope: RestoreScope,
 ): Result<RestorePlan, RestoreError> {
+	if (scope.kind === "selected") {
+		const excluded = scope.paths.find((candidate) =>
+			isExcludedSnapshotPath(store.filePolicy, store.workspaceRoot, candidate),
+		)
+		if (excluded !== undefined) return err({ kind: "excluded-selection", path: excluded })
+	}
 	const targetEntries = snapshot.manifest.entries.filter((entry) => entry.kind !== "excluded")
 	const affectedTarget = targetEntries.filter((entry) => isTargetAffected(entry, scope))
 	const verified = verifySnapshotEntries(snapshot, affectedTarget)
 	if (!verified.ok) return err({ kind: "snapshot-verification", cause: verified.error })
 	const live =
 		scope.kind === "all"
-			? planSnapshot({ workspaceRoot: store.workspaceRoot, protection: store.protection })
+			? planSnapshot({ workspaceRoot: store.workspaceRoot, filePolicy: store.filePolicy })
 			: observeWorkspacePaths({
 					workspaceRoot: store.workspaceRoot,
-					protection: store.protection,
+					filePolicy: store.filePolicy,
 					paths: scope.paths,
 				})
 	if (!live.ok) return err({ kind: "live-tree", cause: live.error })

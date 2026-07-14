@@ -3,7 +3,7 @@ import * as path from "node:path"
 import { type Result, err, ok } from "./result"
 
 export interface ProjectSafetyConfiguration {
-	readonly additionalSecretPatterns: readonly string[]
+	readonly additionalNoAccessPatterns: readonly string[]
 }
 
 export type SafetyConfigurationError = {
@@ -16,7 +16,7 @@ export function loadProjectSafetyConfiguration(
 	cwd: string,
 ): Result<ProjectSafetyConfiguration, SafetyConfigurationError> {
 	const configurationPath = path.join(cwd, ".pi", "pi-safety.json")
-	if (!fs.existsSync(configurationPath)) return ok({ additionalSecretPatterns: [] })
+	if (!fs.existsSync(configurationPath)) return ok({ additionalNoAccessPatterns: [] })
 	let input: unknown
 	try {
 		input = JSON.parse(fs.readFileSync(configurationPath, "utf8"))
@@ -41,7 +41,7 @@ export function loadProjectSafetyConfiguration(
 		}
 		patterns.push(pattern)
 	}
-	return ok(Object.freeze({ additionalSecretPatterns: Object.freeze(patterns) }))
+	return ok(Object.freeze({ additionalNoAccessPatterns: Object.freeze(patterns) }))
 }
 
 function invalid(pathname: string, message: string): Result<never, SafetyConfigurationError> {

@@ -142,10 +142,10 @@ function diffSnapshot(
 	if (!loaded.ok) return err({ kind: "history", cause: loaded.error })
 	const live =
 		scope.kind === "all"
-			? observeWorkspace({ workspaceRoot: store.workspaceRoot, protection: store.protection })
+			? observeWorkspace({ workspaceRoot: store.workspaceRoot, filePolicy: store.filePolicy })
 			: observeWorkspacePaths({
 					workspaceRoot: store.workspaceRoot,
-					protection: store.protection,
+					filePolicy: store.filePolicy,
 					paths: scope.paths,
 				})
 	if (!live.ok) return err({ kind: "snapshot", cause: live.error })

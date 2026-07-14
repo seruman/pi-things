@@ -1,4 +1,5 @@
 import type { CanonicalPath } from "./canonical-path"
+import type { FilePolicy } from "./file-policy"
 import type {
 	PublishedSnapshotRef,
 	RelativeSnapshotPath,
@@ -10,6 +11,7 @@ import type {
 
 declare const canonicalPath: CanonicalPath
 declare const snapshotId: SnapshotId
+declare const filePolicy: FilePolicy
 
 // @ts-expect-error Snapshot plans can only be produced by planSnapshot.
 const forgedPlan: SnapshotPlan = { workspaceRoot: canonicalPath, entries: [] }
@@ -25,7 +27,7 @@ const forgedPublished: PublishedSnapshotRef = {
 const forgedStore: SnapshotStore = {
 	workspaceRoot: canonicalPath,
 	projectDirectory: canonicalPath,
-	protection: { patterns: [], protectedRoots: [] },
+	filePolicy,
 	maxSnapshots: 20,
 }
 

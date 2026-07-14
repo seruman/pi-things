@@ -2,25 +2,32 @@ import { test } from "bun:test"
 import assert from "node:assert/strict"
 import * as fs from "node:fs"
 import * as path from "node:path"
-import { movementProtectionRules } from "./move-protection"
+import { pattern, tree } from "./file-policy"
+import { movementRuleForSelector } from "./move-protection"
 import { emitSbpl } from "./sbpl"
-import { canonicalExecutable, canonicalPath, protectedPattern } from "./test-domain-values"
+import { canonicalExecutable, canonicalPath, pathPattern } from "./test-domain-values"
 import { assertDenied, runWithSeatbelt } from "./test-seatbelt"
 import { withTestTempDirectory } from "./test-temp-directory"
 
-test("orders broad denials, writable-root re-allows, and terminal denials", () => {
+test("emits movement effects in file-policy order", () => {
 	withTestTempDirectory("pi-safety-move-", (root) => {
 		const workspace = path.join(root, "workspace")
 		fs.mkdirSync(workspace)
 		const canonicalRoot = canonicalPath(root)
-		const rules = movementProtectionRules({
-			scope: { kind: "sandbox" },
-			broadDenied: [protectedPattern(root, canonicalRoot)],
-			writableRoots: [canonicalPath(workspace)],
-			terminalDenied: [protectedPattern(path.join(workspace, ".env"), canonicalRoot)],
-		})
+		const rules = [
+			movementRuleForSelector({ scope: { kind: "sandbox" }, selector: tree(canonicalRoot), writable: false }),
+			movementRuleForSelector({
+				scope: { kind: "sandbox" },
+				selector: tree(canonicalPath(workspace)),
+				writable: true,
+			}),
+			movementRuleForSelector({
+				scope: { kind: "sandbox" },
+				selector: pattern(pathPattern(path.join(workspace, ".env"), canonicalRoot)),
+				writable: false,
+			}),
+		]
 		const effects = emitSbpl(rules).source.matchAll(/^\((allow|deny) /gm)
-
 		assert.deepEqual(
 			[...effects].map((match) => match[1]),
 			["deny", "allow", "deny"],
@@ -41,18 +48,29 @@ test("blocks protected moves and missing-ancestor symlinks without blocking ordi
 		fs.writeFileSync(path.join(workspace, "nested", "api.key"), "secret")
 
 		const canonicalRoot = canonicalPath(root)
-		const compiled = emitSbpl(
-			movementProtectionRules({
+		const compiled = emitSbpl([
+			movementRuleForSelector({
 				scope: { kind: "sandbox" },
-				broadDenied: [protectedPattern(home, canonicalRoot)],
-				writableRoots: [canonicalPath(workspace)],
-				terminalDenied: [
-					protectedPattern(path.join(workspace, ".env"), canonicalRoot),
-					protectedPattern(path.join(workspace, ".secrets", "credentials"), canonicalRoot),
-					protectedPattern(path.join(workspace, "**", "*.key"), canonicalRoot),
-				],
+				selector: tree(canonicalPath(home)),
+				writable: false,
 			}),
-		)
+			movementRuleForSelector({
+				scope: { kind: "sandbox" },
+				selector: tree(canonicalPath(workspace)),
+				writable: true,
+			}),
+			...[
+				pathPattern(path.join(workspace, ".env"), canonicalRoot),
+				pathPattern(path.join(workspace, ".secrets", "credentials"), canonicalRoot),
+				pathPattern(path.join(workspace, "**", "*.key"), canonicalRoot),
+			].map((selector) =>
+				movementRuleForSelector({
+					scope: { kind: "sandbox" },
+					selector: pattern(selector),
+					writable: false,
+				}),
+			),
+		])
 
 		const ordinarySource = path.join(workspace, "ordinary.txt")
 		const ordinaryDestination = path.join(workspace, "renamed.txt")
@@ -91,14 +109,13 @@ test("process-excepted movement rules deny every executable except the selected 
 		const third = path.join(root, "third.txt")
 		fs.writeFileSync(first, "excepted")
 		const canonicalRoot = canonicalPath(root)
-		const compiled = emitSbpl(
-			movementProtectionRules({
+		const compiled = emitSbpl([
+			movementRuleForSelector({
 				scope: { kind: "except-process", executable: canonicalExecutable(process.execPath) },
-				broadDenied: [],
-				writableRoots: [],
-				terminalDenied: [protectedPattern(path.join(root, "**", "*.txt"), canonicalRoot)],
+				selector: pattern(pathPattern(path.join(root, "**", "*.txt"), canonicalRoot)),
+				writable: false,
 			}),
-		)
+		])
 
 		assertDenied(runWithSeatbelt(compiled, "/bin/mv", [first, second]))
 		assert.equal(fs.existsSync(first), true)
@@ -116,14 +133,13 @@ test("process-scoped movement rules affect only the selected executable", () => 
 		const third = path.join(root, "third.txt")
 		fs.writeFileSync(first, "scoped")
 		const canonicalRoot = canonicalPath(root)
-		const compiled = emitSbpl(
-			movementProtectionRules({
+		const compiled = emitSbpl([
+			movementRuleForSelector({
 				scope: { kind: "process", executable: canonicalExecutable("/bin/mv") },
-				broadDenied: [],
-				writableRoots: [],
-				terminalDenied: [protectedPattern(path.join(root, "**", "*.txt"), canonicalRoot)],
+				selector: pattern(pathPattern(path.join(root, "**", "*.txt"), canonicalRoot)),
+				writable: false,
 			}),
-		)
+		])
 
 		assertDenied(runWithSeatbelt(compiled, "/bin/mv", [first, second]))
 		assert.equal(fs.existsSync(first), true)

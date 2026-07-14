@@ -2,11 +2,12 @@ import { test } from "bun:test"
 import assert from "node:assert/strict"
 import * as fs from "node:fs"
 import * as path from "node:path"
+import { createSnapshotFilePolicy } from "./default-rules"
 import { executeRestore, planRestore, selectedRestoreScope } from "./restore"
 import { unwrap } from "./result"
 import { createSnapshot, createSnapshotStore } from "./snapshot"
 import { loadSnapshot } from "./snapshot-history"
-import { canonicalPath, protectedPattern } from "./test-domain-values"
+import { canonicalPath, pathPattern, testFilePolicy } from "./test-domain-values"
 import { withTestTempDirectory } from "./test-temp-directory"
 
 function fixture(root: string) {
@@ -21,11 +22,12 @@ function fixture(root: string) {
 	fs.symlinkSync("deleted.txt", path.join(workspace, "link"))
 	fs.mkdirSync(path.join(workspace, "node_modules"))
 	fs.writeFileSync(path.join(workspace, "node_modules", "preserved.js"), "before-generated")
+	const workspaceRoot = canonicalPath(workspace)
 	const store = unwrap(
 		createSnapshotStore({
-			workspaceRoot: canonicalPath(workspace),
+			workspaceRoot,
 			stateRoot: canonicalPath(state),
-			protection: { patterns: [], protectedRoots: [] },
+			filePolicy: unwrap(createSnapshotFilePolicy(workspaceRoot)),
 		}),
 	)
 	const published = unwrap(createSnapshot(store))
@@ -82,7 +84,9 @@ test("selected ordinary restore verifies only required snapshot sources", () => 
 			createSnapshotStore({
 				workspaceRoot,
 				stateRoot: canonicalPath(state),
-				protection: { patterns: [protectedPattern(path.join(workspace, ".env"), workspaceRoot)], protectedRoots: [] },
+				filePolicy: testFilePolicy(workspace, state, {
+					noAccessPatterns: [pathPattern(path.join(workspace, ".env"), workspaceRoot)],
+				}),
 			}),
 		)
 		const published = unwrap(createSnapshot(store))
@@ -98,8 +102,10 @@ test("selected ordinary restore verifies only required snapshot sources", () => 
 
 test("selected restore rejects excluded paths before mutation", () => {
 	withTestTempDirectory("restore-excluded-", (root) => {
-		fixture(root)
-		const scope = selectedRestoreScope(["node_modules/preserved.js"])
-		assert.equal(scope.ok, false)
+		const value = fixture(root)
+		const scope = unwrap(selectedRestoreScope(["node_modules/preserved.js"]))
+		const plan = planRestore(value.store, value.loaded, scope)
+		assert.equal(plan.ok, false)
+		if (!plan.ok) assert.equal(plan.error.kind, "excluded-selection")
 	})
 })
