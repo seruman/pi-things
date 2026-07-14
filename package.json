@@ -6,21 +6,23 @@
   "description": "Pi extensions: unified web tools",
   "license": "MIT",
   "keywords": ["pi-package"],
+  "bin": {
+    "pi-snapshot": "./extensions/pi-safety/pi-snapshot.ts"
+  },
   "scripts": {
     "lint": "biome lint .",
     "format": "biome format --write .",
     "check": "biome check .",
     "check:write": "biome check --write .",
-    "test:shell-leash": "bun test extensions/shell-leash/*.test.ts",
+    "test:pi-safety": "bun test ./extensions/pi-safety/*.integration.ts && bun test extensions/pi-safety/*.test.ts",
     "typecheck:web-search": "bunx tsc -p extensions/web-search/tsconfig.json",
     "typecheck:web-fetch": "bunx tsc -p extensions/web-fetch/tsconfig.json",
     "typecheck:task-tools": "bunx tsc -p extensions/task-tools/tsconfig.json",
     "typecheck:subagent-tools": "bunx tsc -p extensions/subagent-tools/tsconfig.json",
     "typecheck:diff-review": "bunx tsc -p extensions/diff-review/tsconfig.json",
-    "typecheck:shell-leash": "tsc -p extensions/shell-leash/tsconfig.json",
-    "typecheck:secret-guard": "bunx tsc -p extensions/secret-guard/tsconfig.json",
+    "typecheck:pi-safety": "bunx tsc -p extensions/pi-safety/tsconfig.json",
     "typecheck:single-extensions": "bunx tsc -p extensions/tsconfig.json",
-    "typecheck": "bun run typecheck:web-search && bun run typecheck:web-fetch && bun run typecheck:task-tools && bun run typecheck:subagent-tools && bun run typecheck:diff-review && bun run typecheck:shell-leash && bun run typecheck:secret-guard && bun run typecheck:single-extensions"
+    "typecheck": "bun run typecheck:web-search && bun run typecheck:web-fetch && bun run typecheck:task-tools && bun run typecheck:subagent-tools && bun run typecheck:diff-review && bun run typecheck:pi-safety && bun run typecheck:single-extensions"
   },
   "pi": {
     "extensions": [
@@ -32,17 +34,19 @@
       "./extensions/split-fork.ts",
       "./extensions/goal.ts",
       "./extensions/comment.ts",
-      "./extensions/shell-leash/index.ts",
-      "./extensions/secret-guard/index.ts"
+      "./extensions/pi-safety/index.ts"
     ],
     "skills": ["./skills", "./extensions/web-tools/skills"]
   },
   "dependencies": {
     "defuddle": "^0.15.0",
+    "diff": "8.0.4",
     "glimpseui": "^0.8.0",
+    "glob-to-regexp": "0.4.1",
     "ignore": "^7.0.5",
     "just-bash": "^2.14.2",
     "linkedom": "^0.18.12",
+    "minimatch": "10.2.5",
     "yaml": "^2.8.1",
     "zod": "^3.24.1"
   },
@@ -55,10 +59,12 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
-    "@earendil-works/pi-agent-core": "^0.74.0",
-    "@earendil-works/pi-ai": "^0.74.0",
-    "@earendil-works/pi-coding-agent": "^0.74.0",
-    "@earendil-works/pi-tui": "^0.74.0",
+    "@earendil-works/pi-agent-core": "0.80.5",
+    "@earendil-works/pi-ai": "0.80.5",
+    "@earendil-works/pi-coding-agent": "0.80.5",
+    "@earendil-works/pi-tui": "0.80.5",
+    "@types/bun": "1.3.13",
+    "@types/glob-to-regexp": "0.4.4",
     "@types/node": "^24.4.0",
     "typebox": "^1.0.55",
     "typescript": "^6.0.0-dev.20260416"

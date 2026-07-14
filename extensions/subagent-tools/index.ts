@@ -429,7 +429,7 @@ async function runTask(
 		const piInvocation = getPiInvocationParts()
 		const [piCommand, ...piCommandArgs] = piInvocation
 		const childExtension = extensionSiblingPath("internal", "submit-result-extension.ts")
-		const secretGuardExtension = extensionSiblingPath("..", "secret-guard", "index.ts")
+		const piSafetyExtension = extensionSiblingPath("..", "pi-safety", "index.ts")
 		const args: string[] = [
 			"--mode",
 			"json",
@@ -441,7 +441,7 @@ async function runTask(
 			"-e",
 			childExtension,
 			"-e",
-			secretGuardExtension,
+			piSafetyExtension,
 		]
 
 		const toolList = agent.tools
