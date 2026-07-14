@@ -3,7 +3,10 @@ import assert from "node:assert/strict"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { compileBashProfile } from "./bash-profile"
-import { canonicalExecutable, canonicalPath, protectedPattern, testBuiltinAccessPolicy } from "./test-domain-values"
+import { createBashFilePolicy } from "./default-rules"
+import { defineFilePolicy, readOnly, readWrite, tree } from "./file-policy"
+import { unwrap } from "./result"
+import { canonicalExecutable, canonicalPath, pathPattern, testFilePolicy } from "./test-domain-values"
 import { assertDenied, runWithSeatbeltProfile as runWithSeatbelt } from "./test-seatbelt"
 import { withTestTempDirectory } from "./test-temp-directory"
 
@@ -20,31 +23,30 @@ function fixture(root: string) {
 	const extensionState = path.join(root, "state")
 	for (const directory of [workspace, home, privateTemp, extensionState]) fs.mkdirSync(directory)
 	const canonicalWorkspace = canonicalPath(workspace)
-	const gitWritePatterns = [
-		protectedPattern(path.join(workspace, ".git", "hooks"), canonicalWorkspace),
-		protectedPattern(path.join(workspace, ".git", "config"), canonicalWorkspace),
-		protectedPattern(path.join(workspace, ".git", "config.worktree"), canonicalWorkspace),
+	const gitConfigurationPaths = [
+		pathPattern(path.join(workspace, ".git", "hooks"), canonicalWorkspace),
+		pathPattern(path.join(workspace, ".git", "config"), canonicalWorkspace),
+		pathPattern(path.join(workspace, ".git", "config.worktree"), canonicalWorkspace),
 	]
-	const policy = testBuiltinAccessPolicy(workspace, home, {
-		secretPatterns: [protectedPattern(path.join(workspace, "**", ".env*"), canonicalWorkspace)],
-		gitWritePatterns,
-		immutableWriteRoots: [canonicalPath(extensionState)],
+	const gitExecutable = installedGit()
+	const base = testFilePolicy(workspace, home, {
+		noAccessPatterns: [pathPattern(path.join(workspace, "**", ".env*"), canonicalWorkspace)],
+		readOnlyPatterns: gitConfigurationPaths,
+		executableWrites: [{ executable: gitExecutable, patterns: gitConfigurationPaths }],
 	})
+	const integrations = {
+		gitExecutable,
+		sshAgent: { kind: "disabled" },
+		docker: { kind: "disabled" },
+		wb: { kind: "disabled" },
+	} as const
+	const policy = unwrap(createBashFilePolicy({ base, privateTemp: canonicalPath(privateTemp), integrations }))
 	return {
 		workspace,
 		home,
 		privateTemp,
 		extensionState,
-		compiled: compileBashProfile({
-			policy,
-			privateTemp: canonicalPath(privateTemp),
-			integrations: {
-				gitExecutable: installedGit(),
-				sshAgent: { kind: "disabled" },
-				docker: { kind: "disabled" },
-				wb: { kind: "disabled" },
-			},
-		}),
+		compiled: compileBashProfile({ policy, integrations }),
 	}
 }
 
@@ -60,6 +62,42 @@ test("Bash profile permits normal workspace workflows and private temporary file
 		const result = runWithSeatbelt(value.compiled, "/bin/bash", ["-c", command], value.workspace)
 		assert.equal(result.status, 0, result.stderr)
 		assert.equal(fs.readFileSync(path.join(value.privateTemp, "temporary.txt"), "utf8"), "temporary")
+	})
+})
+
+test("later path rules re-allow a writable subtree without weakening its read-only parent", () => {
+	withTestTempDirectory("bash-profile-rule-order-", (root) => {
+		const workspace = path.join(root, "workspace")
+		const home = path.join(root, "home")
+		const protectedDirectory = path.join(workspace, "protected")
+		const writableChild = path.join(protectedDirectory, "generated")
+		for (const directory of [workspace, home, protectedDirectory, writableChild]) fs.mkdirSync(directory)
+		const workspaceRoot = canonicalPath(workspace)
+		const policy = defineFilePolicy({
+			workspaceRoot,
+			homeRoot: canonicalPath(home),
+			rules: [
+				readOnly(tree(canonicalPath("/"))),
+				readWrite(tree(workspaceRoot)),
+				readOnly(tree(canonicalPath(protectedDirectory))),
+				readWrite(tree(canonicalPath(writableChild))),
+			],
+		})
+		const integrations = {
+			gitExecutable: installedGit(),
+			sshAgent: { kind: "disabled" },
+			docker: { kind: "disabled" },
+			wb: { kind: "disabled" },
+		} as const
+		const compiled = compileBashProfile({ policy, integrations })
+		assertDenied(runWithSeatbelt(compiled, "/bin/bash", ["-c", "printf denied > protected/denied"], workspace))
+		const allowed = runWithSeatbelt(
+			compiled,
+			"/bin/bash",
+			["-c", "printf allowed > protected/generated/file && mv protected/generated/file protected/generated/moved"],
+			workspace,
+		)
+		assert.equal(allowed.status, 0, allowed.stderr)
 	})
 })
 
@@ -106,25 +144,23 @@ test("native wb grants remain scoped to the wb executable", () => {
 		const cacheState = path.join(home, "Library", "Caches", "wb")
 		for (const directory of [workspace, privateTemp, webKitState, cacheState])
 			fs.mkdirSync(directory, { recursive: true })
-		const policy = testBuiltinAccessPolicy(workspace, home)
-		const compiled = compileBashProfile({
-			policy,
-			privateTemp: canonicalPath(privateTemp),
-			integrations: {
-				gitExecutable: installedGit(),
-				sshAgent: { kind: "disabled" },
-				docker: { kind: "disabled" },
-				wb: {
-					kind: "enabled",
-					executable: canonicalExecutable("/bin/bash"),
-					runtimeDirectory: canonicalPath(privateTemp),
-					socket: canonicalPath(path.join(privateTemp, "wb.sock")),
-					log: canonicalPath(path.join(privateTemp, "wb.log")),
-					webKitState: canonicalPath(webKitState),
-					cacheState: canonicalPath(cacheState),
-				},
+		const base = testFilePolicy(workspace, home)
+		const integrations = {
+			gitExecutable: installedGit(),
+			sshAgent: { kind: "disabled" },
+			docker: { kind: "disabled" },
+			wb: {
+				kind: "enabled",
+				executable: canonicalExecutable("/bin/bash"),
+				runtimeDirectory: canonicalPath(privateTemp),
+				socket: canonicalPath(path.join(privateTemp, "wb.sock")),
+				log: canonicalPath(path.join(privateTemp, "wb.log")),
+				webKitState: canonicalPath(webKitState),
+				cacheState: canonicalPath(cacheState),
 			},
-		})
+		} as const
+		const policy = unwrap(createBashFilePolicy({ base, privateTemp: canonicalPath(privateTemp), integrations }))
+		const compiled = compileBashProfile({ policy, integrations })
 		const allowedFile = path.join(webKitState, "allowed")
 		const allowed = runWithSeatbelt(
 			compiled,

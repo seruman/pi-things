@@ -1,8 +1,8 @@
 import { createHash, randomBytes } from "node:crypto"
 import * as fs from "node:fs"
 import * as path from "node:path"
-import { type CanonicalPath, isCanonicalPathWithin, parseCanonicalPath } from "./canonical-path"
-import { type ProtectedPathPattern, matchesProtectedPath } from "./protected-path"
+import { type CanonicalPath, appendCanonicalPath, isCanonicalPathWithin, parseCanonicalPath } from "./canonical-path"
+import { type FilePolicy, decideFileAccess, decideSnapshotDisposition } from "./file-policy"
 import { type Result, err, ok } from "./result"
 
 const snapshotPlanBrand: unique symbol = Symbol("SnapshotPlan")
@@ -12,28 +12,18 @@ const publishedSnapshotBrand: unique symbol = Symbol("PublishedSnapshotRef")
 const snapshotIdBrand: unique symbol = Symbol("SnapshotId")
 const relativeSnapshotPathBrand: unique symbol = Symbol("RelativeSnapshotPath")
 
-const EXCLUDED_COMPONENTS = new Set([
-	".git",
-	".pi",
-	".wb",
-	"node_modules",
-	"dist",
-	"build",
-	"target",
-	".next",
-	".cache",
-	"coverage",
-	"__pycache__",
-	".pytest_cache",
-])
-
 export type SnapshotId = string & { readonly [snapshotIdBrand]: true }
 export type RelativeSnapshotPath = string & { readonly [relativeSnapshotPathBrand]: true }
 
 export type SnapshotFileStorage = { readonly kind: "ordinary" } | { readonly kind: "protected" }
 
-export function isExcludedSnapshotPath(relativePath: RelativeSnapshotPath): boolean {
-	return relativePath.split(path.sep).some((component) => EXCLUDED_COMPONENTS.has(component))
+export function isExcludedSnapshotPath(
+	policy: FilePolicy,
+	workspaceRoot: CanonicalPath,
+	relativePath: RelativeSnapshotPath,
+): boolean {
+	const absolute = appendCanonicalPath(workspaceRoot, relativePath.split(path.sep))
+	return absolute.ok && decideSnapshotDisposition(policy, absolute.value).value === "exclude"
 }
 
 export type SnapshotPlanEntry =
@@ -59,7 +49,7 @@ export type SnapshotPlanEntry =
 	| {
 			readonly kind: "excluded"
 			readonly path: RelativeSnapshotPath
-			readonly reason: "generated-component"
+			readonly reason: "policy"
 	  }
 
 export interface SnapshotPlan {
@@ -78,31 +68,14 @@ export interface WorkspaceObservation {
 	readonly nonComparable: readonly NonComparableWorkspaceEntry[]
 }
 
-export interface SnapshotProtectionPolicy {
-	readonly patterns: readonly ProtectedPathPattern[]
-	readonly protectedRoots: readonly {
-		readonly root: CanonicalPath
-		readonly ordinaryExceptions: readonly ProtectedPathPattern[]
-	}[]
-}
-
-export function classifySnapshotStorage(
-	protection: SnapshotProtectionPolicy,
-	path: CanonicalPath,
-): SnapshotFileStorage {
-	const protectedByPattern = protection.patterns.some((pattern) => matchesProtectedPath(pattern, path))
-	const protectedByRoot = protection.protectedRoots.some(
-		(protectedRoot) =>
-			isCanonicalPathWithin(protectedRoot.root, path) &&
-			!protectedRoot.ordinaryExceptions.some((pattern) => matchesProtectedPath(pattern, path)),
-	)
-	return protectedByPattern || protectedByRoot ? { kind: "protected" } : { kind: "ordinary" }
+export function classifySnapshotStorage(policy: FilePolicy, path: CanonicalPath): SnapshotFileStorage {
+	return decideFileAccess(policy, path).value === "none" ? { kind: "protected" } : { kind: "ordinary" }
 }
 
 export interface SnapshotStore {
 	readonly workspaceRoot: CanonicalPath
 	readonly projectDirectory: CanonicalPath
-	readonly protection: SnapshotProtectionPolicy
+	readonly filePolicy: FilePolicy
 	readonly maxSnapshots: number
 	readonly [snapshotStoreBrand]: true
 }
@@ -181,7 +154,7 @@ function entryType(stat: fs.Stats): string {
 export function createSnapshotStore(input: {
 	readonly workspaceRoot: CanonicalPath
 	readonly stateRoot: CanonicalPath
-	readonly protection: SnapshotProtectionPolicy
+	readonly filePolicy: FilePolicy
 	readonly maxSnapshots?: number
 }): Result<SnapshotStore, SnapshotError> {
 	const maxSnapshots = input.maxSnapshots ?? 20
@@ -207,17 +180,7 @@ export function createSnapshotStore(input: {
 		Object.freeze({
 			workspaceRoot: input.workspaceRoot,
 			projectDirectory: projectDirectory.value,
-			protection: Object.freeze({
-				patterns: Object.freeze([...input.protection.patterns]),
-				protectedRoots: Object.freeze(
-					input.protection.protectedRoots.map((protectedRoot) =>
-						Object.freeze({
-							root: protectedRoot.root,
-							ordinaryExceptions: Object.freeze([...protectedRoot.ordinaryExceptions]),
-						}),
-					),
-				),
-			}),
+			filePolicy: input.filePolicy,
 			maxSnapshots,
 		}) as SnapshotStore,
 	)
@@ -225,7 +188,7 @@ export function createSnapshotStore(input: {
 
 type WorkspaceObservationInput = {
 	readonly workspaceRoot: CanonicalPath
-	readonly protection: SnapshotProtectionPolicy
+	readonly filePolicy: FilePolicy
 }
 
 type WorkspaceObservationScope =
@@ -273,8 +236,8 @@ function observeWorkspaceScope(
 		relative: RelativeSnapshotPath,
 		presence: "optional" | "required",
 	): Result<undefined, SnapshotError> => {
-		if (isExcludedSnapshotPath(relative)) {
-			entries.push({ kind: "excluded", path: relative, reason: "generated-component" })
+		if (isExcludedSnapshotPath(input.filePolicy, input.workspaceRoot, relative)) {
+			entries.push({ kind: "excluded", path: relative, reason: "policy" })
 			return ok(undefined)
 		}
 		const absolute = path.join(input.workspaceRoot, relative)
@@ -303,7 +266,7 @@ function observeWorkspaceScope(
 				mode: stat.mode & 0o7777,
 				mtimeMs: stat.mtimeMs,
 				size: stat.size,
-				storage: classifySnapshotStorage(input.protection, canonical.value),
+				storage: classifySnapshotStorage(input.filePolicy, canonical.value),
 			})
 			return ok(undefined)
 		}
@@ -343,7 +306,7 @@ function observeWorkspaceScope(
 
 export function planSnapshot(input: {
 	readonly workspaceRoot: CanonicalPath
-	readonly protection: SnapshotProtectionPolicy
+	readonly filePolicy: FilePolicy
 }): Result<SnapshotPlan, SnapshotError> {
 	const observed = observeWorkspace(input)
 	if (!observed.ok) return observed
@@ -488,7 +451,7 @@ function stageSnapshotTransaction(
 			fs.utimesSync(directory.destination, directory.mtimeMs / 1000, directory.mtimeMs / 1000)
 		}
 		const manifest = {
-			version: 1,
+			version: 2,
 			id,
 			createdAt,
 			workspace: plan.workspaceRoot,
@@ -580,7 +543,7 @@ function createSnapshotTransaction(
 	store: SnapshotStore,
 	options: { readonly preserve?: SnapshotId },
 ): Result<PublishedSnapshotRef, SnapshotError> {
-	const plan = planSnapshot({ workspaceRoot: store.workspaceRoot, protection: store.protection })
+	const plan = planSnapshot({ workspaceRoot: store.workspaceRoot, filePolicy: store.filePolicy })
 	if (!plan.ok) return plan
 	const directory = ensureDirectory(store.projectDirectory)
 	if (!directory.ok) return directory

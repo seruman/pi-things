@@ -3,6 +3,7 @@ import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
 import * as fs from "node:fs"
 import * as path from "node:path"
+import { createSnapshotFilePolicy } from "./default-rules"
 import { unwrap } from "./result"
 import { createSnapshot, createSnapshotStore } from "./snapshot"
 import { parseSnapshotCommand } from "./snapshot-cli"
@@ -16,11 +17,12 @@ function fixture(root: string) {
 	fs.mkdirSync(workspace)
 	fs.mkdirSync(state)
 	fs.writeFileSync(path.join(workspace, "file.txt"), "before")
+	const workspaceRoot = canonicalPath(workspace)
 	const store = unwrap(
 		createSnapshotStore({
-			workspaceRoot: canonicalPath(workspace),
+			workspaceRoot,
 			stateRoot: canonicalPath(state),
-			protection: { patterns: [], protectedRoots: [] },
+			filePolicy: unwrap(createSnapshotFilePolicy(workspaceRoot)),
 		}),
 	)
 	const snapshot = unwrap(createSnapshot(store))

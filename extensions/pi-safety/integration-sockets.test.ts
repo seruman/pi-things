@@ -4,7 +4,9 @@ import { spawnSync } from "node:child_process"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { compileBashProfile } from "./bash-profile"
-import { canonicalExecutable, canonicalPath, testBuiltinAccessPolicy } from "./test-domain-values"
+import { createBashFilePolicy } from "./default-rules"
+import { unwrap } from "./result"
+import { canonicalExecutable, canonicalPath, testFilePolicy } from "./test-domain-values"
 import { runWithSeatbeltProfile } from "./test-seatbelt"
 import { withPrivateTmpDirectory } from "./test-temp-directory"
 
@@ -27,17 +29,15 @@ test("explicit Docker Unix socket capability permits only the discovered endpoin
 				if (Date.now() >= deadline) throw new Error("temporary Docker socket server did not start")
 				Bun.sleepSync(10)
 			}
-			const policy = testBuiltinAccessPolicy(workspace, home)
-			const compiled = compileBashProfile({
-				policy,
-				privateTemp: canonicalPath(privateTemp),
-				integrations: {
-					gitExecutable: canonicalExecutable("/usr/bin/git"),
-					sshAgent: { kind: "disabled" },
-					docker: { kind: "unix-socket", socket: canonicalPath(socket) },
-					wb: { kind: "disabled" },
-				},
-			})
+			const base = testFilePolicy(workspace, home)
+			const integrations = {
+				gitExecutable: canonicalExecutable("/usr/bin/git"),
+				sshAgent: { kind: "disabled" },
+				docker: { kind: "unix-socket", socket: canonicalPath(socket) },
+				wb: { kind: "disabled" },
+			} as const
+			const policy = unwrap(createBashFilePolicy({ base, privateTemp: canonicalPath(privateTemp), integrations }))
+			const compiled = compileBashProfile({ policy, integrations })
 			const script = "import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); s.close()"
 			const result = runWithSeatbeltProfile(compiled, "/usr/bin/python3", ["-c", script, socket], workspace)
 			assert.equal(result.status, 0, result.stderr)
@@ -60,17 +60,15 @@ test("explicit SSH agent socket capability permits agent use without private-key
 		if (!pidMatch) throw new Error(`could not parse test ssh-agent pid: ${started.stdout}`)
 		const agentPid = Number(pidMatch[1])
 		try {
-			const policy = testBuiltinAccessPolicy(workspace, home)
-			const compiled = compileBashProfile({
-				policy,
-				privateTemp: canonicalPath(privateTemp),
-				integrations: {
-					gitExecutable: canonicalExecutable("/usr/bin/git"),
-					sshAgent: { kind: "unix-socket", socket: canonicalPath(socket) },
-					docker: { kind: "disabled" },
-					wb: { kind: "disabled" },
-				},
-			})
+			const base = testFilePolicy(workspace, home)
+			const integrations = {
+				gitExecutable: canonicalExecutable("/usr/bin/git"),
+				sshAgent: { kind: "unix-socket", socket: canonicalPath(socket) },
+				docker: { kind: "disabled" },
+				wb: { kind: "disabled" },
+			} as const
+			const policy = unwrap(createBashFilePolicy({ base, privateTemp: canonicalPath(privateTemp), integrations }))
+			const compiled = compileBashProfile({ policy, integrations })
 			const result = runWithSeatbeltProfile(compiled, "/usr/bin/ssh-add", ["-l"], workspace, {
 				...process.env,
 				SSH_AUTH_SOCK: socket,

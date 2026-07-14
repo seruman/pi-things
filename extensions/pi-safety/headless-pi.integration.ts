@@ -142,7 +142,7 @@ test("headless Pi blocks denied calls before execution or checkpoint creation", 
 		assert.equal(toolEnds.length, 1)
 		assert.equal(toolEnds[0].toolName, "write")
 		assert.equal(toolEnds[0].isError, true)
-		assert.match(JSON.stringify(toolEnds[0].result), /pi-safety: blocked write outside workspace/)
+		assert.match(JSON.stringify(toolEnds[0].result), /pi-safety: blocked write: write access denied/)
 	})
 })
 
@@ -162,7 +162,7 @@ test("headless Pi loads strict project-specific secret paths", () => {
 		])
 		const toolEnd = events.find((event) => event.type === "tool_execution_end")
 		assert.equal(toolEnd?.isError, true)
-		assert.match(JSON.stringify(toolEnd?.result), /protected secret/)
+		assert.match(JSON.stringify(toolEnd?.result), /read access denied/)
 	})
 })
 
@@ -255,7 +255,7 @@ test("headless Pi protects persistence configuration in built-in tools and Bash"
 		const toolEnds = events.filter((event) => event.type === "tool_execution_end")
 		assert.equal(toolEnds.length, 2)
 		assert.equal(toolEnds[0].isError, true)
-		assert.match(JSON.stringify(toolEnds[0].result), /protected configuration/)
+		assert.match(JSON.stringify(toolEnds[0].result), /write access denied.*MCP configuration/)
 		assert.equal(toolEnds[1].isError, false)
 		assert.match(JSON.stringify(toolEnds[1].result), /hook:[1-9][0-9]* mcp:[1-9][0-9]*/)
 		assert.equal(fs.existsSync(path.join(fixture.workspace, ".git", "hooks", "post-commit")), false)

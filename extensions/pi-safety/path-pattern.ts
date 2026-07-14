@@ -10,11 +10,11 @@ import {
 import { type Result, err, ok } from "./result"
 
 declare const compiledPathRegexBrand: unique symbol
-declare const protectedPathPatternBrand: unique symbol
+declare const pathPatternBrand: unique symbol
 
 export type CompiledPathRegex = string & { readonly [compiledPathRegexBrand]: true }
 
-type ProtectedPathPatternNode =
+type PathPatternNode =
 	| { readonly kind: "literal"; readonly path: CanonicalPath }
 	| {
 			readonly kind: "glob"
@@ -23,18 +23,18 @@ type ProtectedPathPatternNode =
 			readonly staticBase: CanonicalPath
 	  }
 
-export type ProtectedPathPattern = ProtectedPathPatternNode & { readonly [protectedPathPatternBrand]: true }
+export type PathPattern = PathPatternNode & { readonly [pathPatternBrand]: true }
 
-export function literalProtectedPath(path: CanonicalPath): ProtectedPathPattern {
-	return Object.freeze({ kind: "literal", path }) as ProtectedPathPattern
+export function literalPathPattern(path: CanonicalPath): PathPattern {
+	return Object.freeze({ kind: "literal", path }) as PathPattern
 }
 
-export function matchesProtectedPath(pattern: ProtectedPathPattern, candidate: CanonicalPath): boolean {
+export function matchesPathPattern(pattern: PathPattern, candidate: CanonicalPath): boolean {
 	if (pattern.kind === "literal") return isCanonicalPathWithin(pattern.path, candidate)
 	return new RegExp(pattern.regex).test(candidate)
 }
 
-export type ProtectedPathPatternError =
+export type PathPatternError =
 	| { readonly kind: "empty-pattern" }
 	| { readonly kind: "pattern-too-long"; readonly length: number }
 	| { readonly kind: "canonical-path"; readonly input: string; readonly cause: CanonicalPathError }
@@ -53,10 +53,7 @@ const MINIMATCH_OPTIONS = {
 } as const satisfies MinimatchOptions
 
 /** Parse a literal path or the supported *, **, ?, and character-class glob subset. */
-export function parseProtectedPathPattern(
-	input: string,
-	relativeTo: CanonicalPath,
-): Result<ProtectedPathPattern, ProtectedPathPatternError> {
+export function parsePathPattern(input: string, relativeTo: CanonicalPath): Result<PathPattern, PathPatternError> {
 	if (input.length === 0) return err({ kind: "empty-pattern" })
 	if (input.length > MAX_PATTERN_LENGTH) return err({ kind: "pattern-too-long", length: input.length })
 	if (containsControlCharacter(input)) {
@@ -122,20 +119,17 @@ export function parseProtectedPathPattern(
 			pattern: canonicalPattern,
 			regex: seatbeltRegex,
 			staticBase: staticBaseResult.value,
-		}) as ProtectedPathPattern,
+		}) as PathPattern,
 	)
 }
 
-function parseLiteralPattern(
-	absolutePath: string,
-	input: string,
-): Result<ProtectedPathPattern, ProtectedPathPatternError> {
+function parseLiteralPattern(absolutePath: string, input: string): Result<PathPattern, PathPatternError> {
 	const parsed = parseCanonicalPath(absolutePath)
 	if (!parsed.ok) return err({ kind: "canonical-path", input, cause: parsed.error })
-	return ok(Object.freeze({ kind: "literal", path: parsed.value }) as ProtectedPathPattern)
+	return ok(Object.freeze({ kind: "literal", path: parsed.value }) as PathPattern)
 }
 
-function unsupportedGlob(input: string, reason: string): Result<never, ProtectedPathPatternError> {
+function unsupportedGlob(input: string, reason: string): Result<never, PathPatternError> {
 	return err({ kind: "unsupported-glob", input, reason })
 }
 

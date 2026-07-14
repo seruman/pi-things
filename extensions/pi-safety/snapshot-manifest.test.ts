@@ -2,8 +2,10 @@ import { test } from "bun:test"
 import assert from "node:assert/strict"
 import * as fs from "node:fs"
 import * as path from "node:path"
+import { createSnapshotFilePolicy } from "./default-rules"
+import { unwrap } from "./result"
 import { parseSnapshotManifest } from "./snapshot-manifest"
-import { canonicalPath } from "./test-domain-values"
+import { canonicalPath, testFilePolicy } from "./test-domain-values"
 import { withTestTempDirectory } from "./test-temp-directory"
 
 function validManifest(workspace: string): Record<string, unknown> {
@@ -32,7 +34,8 @@ test("parses a versioned snapshot manifest into precise entries", () => {
 	withTestTempDirectory("manifest-valid-", (root) => {
 		const workspace = path.join(root, "workspace")
 		fs.mkdirSync(workspace)
-		const parsed = parseSnapshotManifest(validManifest(workspace))
+		const policy = unwrap(createSnapshotFilePolicy(canonicalPath(workspace)))
+		const parsed = parseSnapshotManifest(validManifest(workspace), policy)
 		assert.equal(parsed.ok, true)
 		if (parsed.ok) {
 			assert.equal(parsed.value.workspace, canonicalPath(workspace))
@@ -60,10 +63,11 @@ test("hostile generated manifest values never escape parsed domain invariants", 
 				return next()
 		}
 	}
+	const policy = testFilePolicy("/tmp", "/tmp")
 	for (let index = 0; index < 500; index += 1) {
-		const parsed = parseSnapshotManifest(generated(3))
+		const parsed = parseSnapshotManifest(generated(3), policy)
 		if (!parsed.ok) continue
-		assert.equal(parsed.value.version, 1)
+		assert.ok(parsed.value.version === 1 || parsed.value.version === 2)
 		assert.equal(new Set(parsed.value.entries.map((entry) => entry.path)).size, parsed.value.entries.length)
 		for (const entry of parsed.value.entries) {
 			assert.equal(path.isAbsolute(entry.path), false)
@@ -79,8 +83,9 @@ test("rejects unknown versions, traversal, duplicates, invalid variants, and exc
 	withTestTempDirectory("manifest-invalid-", (root) => {
 		const workspace = path.join(root, "workspace")
 		fs.mkdirSync(workspace)
+		const policy = unwrap(createSnapshotFilePolicy(canonicalPath(workspace)))
 		const cases = [
-			{ ...validManifest(workspace), version: 2 },
+			{ ...validManifest(workspace), version: 3 },
 			{ ...validManifest(workspace), createdAt: "2026-07-13T21:30:49.841Z" },
 			{
 				...validManifest(workspace),
@@ -111,6 +116,6 @@ test("rejects unknown versions, traversal, duplicates, invalid variants, and exc
 				],
 			},
 		]
-		for (const input of cases) assert.equal(parseSnapshotManifest(input).ok, false)
+		for (const input of cases) assert.equal(parseSnapshotManifest(input, policy).ok, false)
 	})
 })

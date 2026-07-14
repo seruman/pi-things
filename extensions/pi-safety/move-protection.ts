@@ -1,11 +1,12 @@
-import { type CanonicalExecutable, type CanonicalPath, canonicalAncestors } from "./canonical-path"
-import type { ProtectedPathPattern } from "./protected-path"
+import { type CanonicalExecutable, canonicalAncestors } from "./canonical-path"
+import type { FileSelector } from "./file-policy"
 import {
 	type NonEmptyReadonlyArray,
 	type PathMatcher,
 	type Rule,
 	fileRule,
 	fileRuleExceptProcess,
+	fileRuleExceptProcesses,
 	literal,
 	pathRegex,
 	subpath,
@@ -15,88 +16,67 @@ export type MovementProtectionScope =
 	| { readonly kind: "sandbox" }
 	| { readonly kind: "process"; readonly executable: CanonicalExecutable }
 	| { readonly kind: "except-process"; readonly executable: CanonicalExecutable }
+	| {
+			readonly kind: "except-processes"
+			readonly executables: readonly [CanonicalExecutable, ...CanonicalExecutable[]]
+	  }
 
-export type MovementProtectionInput = {
+export function movementRuleForSelector(input: {
 	readonly scope: MovementProtectionScope
-	readonly broadDenied: readonly ProtectedPathPattern[]
-	readonly writableRoots: readonly CanonicalPath[]
-	readonly terminalDenied: readonly ProtectedPathPattern[]
-}
-
-export interface MovementProtectionRulePhases {
-	readonly broadDenials: readonly Rule[]
-	readonly writableRootAllows: readonly Rule[]
-	readonly terminalDenials: readonly Rule[]
-}
-
-/** Emit broad movement denials, writable-root re-allows, then terminal denials. */
-export function movementProtectionRules(input: MovementProtectionInput): readonly Rule[] {
-	const phases = movementProtectionRulePhases(input)
-	return Object.freeze([...phases.broadDenials, ...phases.writableRootAllows, ...phases.terminalDenials])
-}
-
-/** Keep phases distinct when callers must interleave independent scopes without a later allow weakening an earlier terminal deny. */
-export function movementProtectionRulePhases(input: MovementProtectionInput): MovementProtectionRulePhases {
-	return Object.freeze({
-		broadDenials: Object.freeze(input.broadDenied.map((pattern) => denyMovement(pattern, input.scope))),
-		writableRootAllows: Object.freeze(input.writableRoots.map((root) => allowMovement(root, input.scope))),
-		terminalDenials: Object.freeze(input.terminalDenied.map((pattern) => denyMovement(pattern, input.scope))),
-	})
-}
-
-function denyMovement(pattern: ProtectedPathPattern, scope: MovementProtectionScope): Rule {
+	readonly selector: FileSelector
+	readonly writable: boolean
+}): Rule {
 	return scopedFileRule(
 		{
-			effect: "deny",
+			effect: input.writable ? "allow" : "deny",
 			operations: ["file-write-unlink", "file-write-create"],
-			matchers: protectionMatchers(pattern),
+			matchers: input.writable ? selectorMatchers(input.selector) : selectorProtectionMatchers(input.selector),
 		},
-		scope,
-	)
-}
-
-function allowMovement(root: CanonicalPath, scope: MovementProtectionScope): Rule {
-	return scopedFileRule(
-		{
-			effect: "allow",
-			operations: ["file-write-unlink", "file-write-create"],
-			matchers: [subpath(root)],
-		},
-		scope,
+		input.scope,
 	)
 }
 
 function scopedFileRule(input: Parameters<typeof fileRule>[0], scope: MovementProtectionScope): Rule {
-	if (scope.kind === "except-process") {
-		return fileRuleExceptProcess({ ...input, process: scope.executable })
-	}
-	return fileRule({ ...input, ...processScope(scope) })
-}
-
-function protectionMatchers(pattern: ProtectedPathPattern): NonEmptyReadonlyArray<PathMatcher> {
-	switch (pattern.kind) {
-		case "literal":
-			return [subpath(pattern.path), ...canonicalAncestors(pattern.path).map(literal)]
-		case "glob":
-			return [
-				pathRegex(pattern.regex),
-				literal(pattern.staticBase),
-				...canonicalAncestors(pattern.staticBase).map(literal),
-			]
-		default:
-			return pattern satisfies never
-	}
-}
-
-function processScope(scope: Exclude<MovementProtectionScope, { readonly kind: "except-process" }>): {
-	readonly process?: CanonicalExecutable
-} {
 	switch (scope.kind) {
 		case "sandbox":
-			return {}
+			return fileRule(input)
 		case "process":
-			return { process: scope.executable }
+			return fileRule({ ...input, process: scope.executable })
+		case "except-process":
+			return fileRuleExceptProcess({ ...input, process: scope.executable })
+		case "except-processes":
+			return fileRuleExceptProcesses({ ...input, processes: scope.executables })
 		default:
 			return scope satisfies never
+	}
+}
+
+function selectorMatchers(selector: FileSelector): NonEmptyReadonlyArray<PathMatcher> {
+	switch (selector.kind) {
+		case "file":
+			return [literal(selector.path)]
+		case "tree":
+			return [literal(selector.path), subpath(selector.path)]
+		case "glob":
+			return [pathRegex(selector.pattern.regex)]
+		default:
+			return selector satisfies never
+	}
+}
+
+function selectorProtectionMatchers(selector: FileSelector): NonEmptyReadonlyArray<PathMatcher> {
+	switch (selector.kind) {
+		case "file":
+			return [literal(selector.path), ...canonicalAncestors(selector.path).map(literal)]
+		case "tree":
+			return [literal(selector.path), subpath(selector.path), ...canonicalAncestors(selector.path).map(literal)]
+		case "glob":
+			return [
+				pathRegex(selector.pattern.regex),
+				literal(selector.pattern.staticBase),
+				...canonicalAncestors(selector.pattern.staticBase).map(literal),
+			]
+		default:
+			return selector satisfies never
 	}
 }

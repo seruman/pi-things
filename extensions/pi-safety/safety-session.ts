@@ -1,11 +1,8 @@
 import { compileBashProfile } from "./bash-profile"
-import {
-	type BuiltinPolicyError,
-	type RawInitialBuiltinAccessPolicy,
-	parseInitialBuiltinConfiguration,
-} from "./builtin-policy"
-import { type CanonicalPath, parseCanonicalPath } from "./canonical-path"
+import { parseCanonicalPath } from "./canonical-path"
 import { type CheckpointError, type CheckpointRun, type CheckpointStatus, createCheckpointRun } from "./checkpoint"
+import { type DefaultRulesError, createBashFilePolicy } from "./default-rules"
+import type { FilePolicy } from "./file-policy"
 import {
 	type BashIntegrations,
 	type IntegrationError,
@@ -14,24 +11,25 @@ import {
 	parseBashIntegrations,
 	prepareBashIntegrations,
 } from "./integrations"
+import {
+	type FilePolicyConfigurationError,
+	type RawInitialFilePolicy,
+	parseInitialSafetyConfiguration,
+} from "./policy-configuration"
 import { type Result, err, ok } from "./result"
 import { createConfiguredSnapshotStore } from "./safety-filesystem"
 import type { CompiledSbpl } from "./sbpl"
 import { type SnapshotError, type SnapshotStore, createSnapshot } from "./snapshot"
-import {
-	type BuiltinAccessPolicy,
-	type GuardedToolCall,
-	type ToolAuthorizationError,
-	authorizeBuiltinToolCall,
-} from "./tool-authorization"
+import { type GuardedToolCall, type ToolAuthorizationError, authorizeBuiltinToolCall } from "./tool-authorization"
 
-export interface RawSafetySessionConfiguration extends RawInitialBuiltinAccessPolicy {
+export interface RawSafetySessionConfiguration extends RawInitialFilePolicy {
 	readonly privateTemp: string
 	readonly integrationEnvironment: RawIntegrationEnvironment
 }
 
 export type SafetySessionError =
-	| { readonly kind: "builtin-policy"; readonly cause: BuiltinPolicyError }
+	| { readonly kind: "file-policy"; readonly cause: FilePolicyConfigurationError }
+	| { readonly kind: "bash-file-policy"; readonly cause: DefaultRulesError }
 	| { readonly kind: "private-temp"; readonly message: string }
 	| { readonly kind: "integration"; readonly cause: IntegrationError }
 	| { readonly kind: "snapshot-store"; readonly cause: SnapshotError }
@@ -59,19 +57,19 @@ export interface SafetySession {
 
 class ManagedSafetySession implements SafetySession {
 	readonly snapshotStore: SnapshotStore
-	readonly #policy: BuiltinAccessPolicy
-	readonly #privateTemp: CanonicalPath
+	readonly #filePolicy: FilePolicy
+	readonly #bashPolicy: FilePolicy
 	readonly #integrations: BashIntegrations
 	#checkpointRun: CheckpointRun | undefined
 
 	constructor(
-		policy: BuiltinAccessPolicy,
-		privateTemp: CanonicalPath,
+		filePolicy: FilePolicy,
+		bashPolicy: FilePolicy,
 		integrations: BashIntegrations,
 		snapshotStore: SnapshotStore,
 	) {
-		this.#policy = policy
-		this.#privateTemp = privateTemp
+		this.#filePolicy = filePolicy
+		this.#bashPolicy = bashPolicy
 		this.#integrations = integrations
 		this.snapshotStore = snapshotStore
 	}
@@ -89,11 +87,7 @@ class ManagedSafetySession implements SafetySession {
 	}
 
 	compileBashProfile(): CompiledSbpl {
-		return compileBashProfile({
-			policy: this.#policy,
-			privateTemp: this.#privateTemp,
-			integrations: this.#integrations,
-		})
+		return compileBashProfile({ policy: this.#bashPolicy, integrations: this.#integrations })
 	}
 
 	bashEnvironment(): Readonly<NodeJS.ProcessEnv> {
@@ -107,7 +101,7 @@ class ManagedSafetySession implements SafetySession {
 	}
 
 	async authorize(toolName: string, input: unknown): Promise<SafetyDecision> {
-		const authorization = authorizeBuiltinToolCall(toolName, input, this.#policy)
+		const authorization = authorizeBuiltinToolCall(toolName, input, this.#filePolicy)
 		if (!authorization.ok) {
 			const cause = { kind: "authorization", cause: authorization.error } as const
 			return { kind: "block", reason: formatAuthorizationError(authorization.error), cause }
@@ -135,13 +129,13 @@ class ManagedSafetySession implements SafetySession {
 }
 
 export function createSafetySession(raw: RawSafetySessionConfiguration): Result<SafetySession, SafetySessionError> {
-	const configuration = parseInitialBuiltinConfiguration(raw)
-	if (!configuration.ok) return err({ kind: "builtin-policy", cause: configuration.error })
+	const configuration = parseInitialSafetyConfiguration(raw)
+	if (!configuration.ok) return err({ kind: "file-policy", cause: configuration.error })
 	const privateTemp = parseCanonicalPath(raw.privateTemp)
 	if (!privateTemp.ok) return err({ kind: "private-temp", message: JSON.stringify(privateTemp.error) })
 	const integrations = parseBashIntegrations({
 		environment: raw.integrationEnvironment,
-		home: configuration.value.accessPolicy.homeRoot,
+		home: configuration.value.filePolicy.homeRoot,
 	})
 	if (!integrations.ok) return err({ kind: "integration", cause: integrations.error })
 	const preparedIntegrations = prepareBashIntegrations(integrations.value)
@@ -153,13 +147,19 @@ export function createSafetySession(raw: RawSafetySessionConfiguration): Result<
 			? err({ kind: "snapshot-store", cause: snapshotStore.error })
 			: err({ kind: "integration", cause: cleaned.error })
 	}
+	const bashPolicy = createBashFilePolicy({
+		base: configuration.value.filePolicy,
+		privateTemp: privateTemp.value,
+		integrations: integrations.value,
+	})
+	if (!bashPolicy.ok) {
+		const cleaned = cleanupBashIntegrations(integrations.value)
+		return cleaned.ok
+			? err({ kind: "bash-file-policy", cause: bashPolicy.error })
+			: err({ kind: "integration", cause: cleaned.error })
+	}
 	return ok(
-		new ManagedSafetySession(
-			configuration.value.accessPolicy,
-			privateTemp.value,
-			integrations.value,
-			snapshotStore.value,
-		),
+		new ManagedSafetySession(configuration.value.filePolicy, bashPolicy.value, integrations.value, snapshotStore.value),
 	)
 }
 
@@ -169,16 +169,8 @@ function formatAuthorizationError(error: ToolAuthorizationError): string {
 			return `pi-safety: blocked ${error.tool}: ${error.reason}`
 		case "path-resolution":
 			return `pi-safety: blocked ${error.tool}: path resolution failed (${error.cause.kind})`
-		case "secret-path":
-			return `pi-safety: blocked ${error.tool} of protected secret ${error.path}`
-		case "protected-snapshot-path":
-			return `pi-safety: blocked ${error.tool} of protected snapshot content ${error.path}`
-		case "protected-write-path":
-			return `pi-safety: blocked ${error.tool} to protected configuration ${error.path}`
-		case "immutable-write-root":
-			return `pi-safety: blocked ${error.tool} to immutable state ${error.path}`
-		case "outside-workspace":
-			return `pi-safety: blocked ${error.tool} outside workspace ${error.workspaceRoot}: ${error.path}`
+		case "access-denied":
+			return `pi-safety: blocked ${error.tool}: ${error.required} access denied to ${error.path}${error.label ? ` (${error.label})` : ""}`
 	}
 }
 

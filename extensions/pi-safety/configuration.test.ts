@@ -14,14 +14,14 @@ test("loads a strict versioned project safety configuration", () => {
 		)
 		assert.deepEqual(loadProjectSafetyConfiguration(root), {
 			ok: true,
-			value: { additionalSecretPatterns: ["secrets/**", "config/private.json"] },
+			value: { additionalNoAccessPatterns: ["secrets/**", "config/private.json"] },
 		})
 	})
 })
 
 test("missing configuration is empty while malformed shapes fail closed", () => {
 	withTestTempDirectory("pi-safety-config-invalid-", (root) => {
-		assert.deepEqual(loadProjectSafetyConfiguration(root), { ok: true, value: { additionalSecretPatterns: [] } })
+		assert.deepEqual(loadProjectSafetyConfiguration(root), { ok: true, value: { additionalNoAccessPatterns: [] } })
 		fs.mkdirSync(path.join(root, ".pi"))
 		for (const input of [
 			{ version: 2, protectedPaths: [] },

@@ -20,7 +20,7 @@ function fixture(root: string) {
 			home,
 			stateHome,
 			piConfigDir,
-			additionalSecretPatterns: [],
+			additionalNoAccessPatterns: [],
 			privateTemp,
 			integrationEnvironment: {
 				path: undefined,
@@ -41,6 +41,11 @@ test("reads and denied mutations do not create a lazy checkpoint", async () => {
 		assert.equal(read.kind, "allow")
 		const denied = await session.authorize("write", { path: path.join(root, "outside.txt"), content: "x" })
 		assert.equal(denied.kind, "block")
+		const privateTempDenied = await session.authorize("write", {
+			path: path.join(root, "tmp", "built-in.txt"),
+			content: "x",
+		})
+		assert.equal(privateTempDenied.kind, "block")
 		assert.deepEqual(session.checkpointStatus(), { kind: "not-started" })
 		assert.equal(fs.existsSync(session.snapshotStore.projectDirectory), false)
 	})

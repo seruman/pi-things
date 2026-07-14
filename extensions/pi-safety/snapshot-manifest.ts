@@ -1,5 +1,6 @@
 import * as path from "node:path"
 import { type CanonicalPath, parseCanonicalPath } from "./canonical-path"
+import type { FilePolicy } from "./file-policy"
 import { type Result, err, ok } from "./result"
 import {
 	type RelativeSnapshotPath,
@@ -13,7 +14,7 @@ import {
 const snapshotManifestBrand: unique symbol = Symbol("SnapshotManifest")
 
 export interface SnapshotManifest {
-	readonly version: 1
+	readonly version: 1 | 2
 	readonly id: SnapshotId
 	readonly createdAt: string
 	readonly workspace: CanonicalPath
@@ -27,9 +28,12 @@ export type SnapshotManifestError =
 	| { readonly kind: "duplicate-path"; readonly path: RelativeSnapshotPath }
 	| { readonly kind: "path-conflict"; readonly path: RelativeSnapshotPath; readonly ancestor: RelativeSnapshotPath }
 
-export function parseSnapshotManifest(input: unknown): Result<SnapshotManifest, SnapshotManifestError> {
+export function parseSnapshotManifest(
+	input: unknown,
+	filePolicy: FilePolicy,
+): Result<SnapshotManifest, SnapshotManifestError> {
 	if (!isRecord(input)) return invalidManifest("manifest", "expected an object")
-	if (input.version !== 1) return invalidManifest("version", "expected version 1")
+	if (input.version !== 1 && input.version !== 2) return invalidManifest("version", "expected version 1 or 2")
 	if (typeof input.id !== "string") return invalidManifest("id", "expected a string")
 	const id = parseSnapshotId(input.id)
 	if (!id.ok) return invalidManifest("id", "invalid snapshot identifier")
@@ -47,7 +51,7 @@ export function parseSnapshotManifest(input: unknown): Result<SnapshotManifest, 
 	const entries: SnapshotPlanEntry[] = []
 	const paths = new Map<string, SnapshotPlanEntry>()
 	for (const [index, rawEntry] of input.entries.entries()) {
-		const parsed = parseEntry(rawEntry, index)
+		const parsed = parseEntry(rawEntry, index, input.version, filePolicy, workspace.value)
 		if (!parsed.ok) return parsed
 		if (paths.has(parsed.value.path)) return err({ kind: "duplicate-path", path: parsed.value.path })
 		paths.set(parsed.value.path, parsed.value)
@@ -67,7 +71,7 @@ export function parseSnapshotManifest(input: unknown): Result<SnapshotManifest, 
 	}
 	return ok(
 		Object.freeze({
-			version: 1,
+			version: input.version,
 			id: id.value,
 			createdAt: input.createdAt,
 			workspace: workspace.value,
@@ -76,7 +80,13 @@ export function parseSnapshotManifest(input: unknown): Result<SnapshotManifest, 
 	)
 }
 
-function parseEntry(input: unknown, index: number): Result<SnapshotPlanEntry, SnapshotManifestError> {
+function parseEntry(
+	input: unknown,
+	index: number,
+	version: 1 | 2,
+	filePolicy: FilePolicy,
+	workspace: CanonicalPath,
+): Result<SnapshotPlanEntry, SnapshotManifestError> {
 	if (!isRecord(input) || typeof input.kind !== "string" || typeof input.path !== "string") {
 		return invalidEntry(index, "expected an entry object with kind and path")
 	}
@@ -84,14 +94,19 @@ function parseEntry(input: unknown, index: number): Result<SnapshotPlanEntry, Sn
 	if (!parsedPath.ok) return invalidEntry(index, "invalid relative path")
 	const relativePath = parsedPath.value
 	if (input.kind === "excluded") {
-		if (!hasExactKeys(input, ["kind", "path", "reason"]) || input.reason !== "generated-component") {
-			return invalidEntry(index, "invalid excluded entry")
+		if (!hasExactKeys(input, ["kind", "path", "reason"])) return invalidEntry(index, "invalid excluded entry")
+		if (version === 1 && input.reason !== "generated-component") {
+			return invalidEntry(index, "version 1 excluded entries require generated-component")
 		}
-		if (!isExcludedSnapshotPath(relativePath)) return invalidEntry(index, "excluded path has no excluded component")
-		return ok({ kind: "excluded", path: relativePath, reason: "generated-component" })
+		if (version === 2 && input.reason !== "policy") {
+			return invalidEntry(index, "version 2 excluded entries require policy")
+		}
+		if (!isExcludedSnapshotPath(filePolicy, workspace, relativePath))
+			return invalidEntry(index, "excluded path is not excluded by policy")
+		return ok({ kind: "excluded", path: relativePath, reason: "policy" })
 	}
-	if (isExcludedSnapshotPath(relativePath))
-		return invalidEntry(index, "non-excluded entry contains an excluded component")
+	if (isExcludedSnapshotPath(filePolicy, workspace, relativePath))
+		return invalidEntry(index, "non-excluded entry is excluded by policy")
 	if (input.kind === "directory") {
 		if (!hasExactKeys(input, ["kind", "path", "mode", "mtimeMs"]) || !isMode(input.mode) || !isTime(input.mtimeMs)) {
 			return invalidEntry(index, "invalid directory entry")
