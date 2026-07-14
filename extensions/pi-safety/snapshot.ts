@@ -58,6 +58,14 @@ export interface SnapshotPlan {
 	readonly [snapshotPlanBrand]: true
 }
 
+export function storedSnapshotPath(
+	snapshotDirectory: CanonicalPath,
+	entry: Exclude<SnapshotPlanEntry, { readonly kind: "excluded" }>,
+): string {
+	const storageRoot = entry.kind === "file" && entry.storage.kind === "protected" ? "protected" : "tree"
+	return path.join(snapshotDirectory, storageRoot, entry.path)
+}
+
 export interface NonComparableWorkspaceEntry {
 	readonly path: RelativeSnapshotPath
 	readonly entryType: string
@@ -439,8 +447,7 @@ function stageSnapshotTransaction(
 			if (!current.ok || current.value.size !== entry.size) {
 				return current.ok ? err({ kind: "filesystem-race", path: source, expected: "file" }) : current
 			}
-			const storageRoot = entry.storage.kind === "protected" ? "protected" : "tree"
-			const destination = path.join(staging.value, storageRoot, entry.path)
+			const destination = storedSnapshotPath(staging.value, entry)
 			fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 })
 			fs.copyFileSync(source, destination, fs.constants.COPYFILE_FICLONE_FORCE)
 			fs.chmodSync(destination, entry.mode)

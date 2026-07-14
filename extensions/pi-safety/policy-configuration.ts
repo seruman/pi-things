@@ -24,11 +24,6 @@ export interface InitialSafetyConfiguration {
 	readonly stateHome: CanonicalPath
 }
 
-export function parseInitialFilePolicy(raw: RawInitialFilePolicy): Result<FilePolicy, FilePolicyConfigurationError> {
-	const configuration = parseInitialSafetyConfiguration(raw)
-	return configuration.ok ? ok(configuration.value.filePolicy) : configuration
-}
-
 export function parseInitialSafetyConfiguration(
 	raw: RawInitialFilePolicy,
 ): Result<InitialSafetyConfiguration, FilePolicyConfigurationError> {

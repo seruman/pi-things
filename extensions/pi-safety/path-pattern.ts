@@ -140,11 +140,8 @@ function seatbeltRegexSource(regex: RegExp): CompiledPathRegex | undefined {
 }
 
 function containsControlCharacter(input: string): boolean {
-	for (const character of input) {
-		const codePoint = character.codePointAt(0)
-		if (codePoint !== undefined && (codePoint <= 0x1f || codePoint === 0x7f)) return true
-	}
-	return false
+	// biome-ignore lint/suspicious/noControlCharactersInRegex: These are precisely the characters this predicate detects.
+	return /[\x00-\x1f\x7f]/u.test(input)
 }
 
 function containsGlobSyntax(input: string): boolean {

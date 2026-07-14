@@ -37,6 +37,7 @@ import {
 	subpath,
 	unixBindRule,
 	unixConnectRule,
+	unixSocketPath,
 	unixSocketSubpath,
 	xpcMachService,
 } from "./sbpl"
@@ -228,7 +229,7 @@ function defaultIntegrationRuntimeRules(integrations: BashIntegrations, policy: 
 	const rules: Rule[] = []
 	for (const integration of [integrations.sshAgent, integrations.docker]) {
 		if (integration.kind === "unix-socket") {
-			rules.push(unixConnectRule({ effect: "allow", matchers: [unixSocketSubpath(integration.socket)] }))
+			rules.push(unixConnectRule({ effect: "allow", matchers: [unixSocketPath(integration.socket)] }))
 		}
 	}
 	if (integrations.wb.kind === "enabled") rules.push(...defaultWbRuntimeRules(integrations.wb, policy))
@@ -295,8 +296,8 @@ function defaultWbRuntimeRules(
 		}),
 		unixConnectRule({ effect: "deny", matchers: [unixSocketSubpath(fixedPath("/"))], process }),
 		unixBindRule({ effect: "deny", matchers: [unixSocketSubpath(fixedPath("/"))], process }),
-		unixConnectRule({ effect: "allow", matchers: [unixSocketSubpath(wb.socket)], process }),
-		unixBindRule({ effect: "allow", matchers: [unixSocketSubpath(wb.socket)], process }),
+		unixConnectRule({ effect: "allow", matchers: [unixSocketPath(wb.socket)], process }),
+		unixBindRule({ effect: "allow", matchers: [unixSocketPath(wb.socket)], process }),
 		...noAccessMatchers.flatMap((matcher) => [
 			denyFileExtensionIssue({
 				extensionClass: "com.apple.app-sandbox.read",

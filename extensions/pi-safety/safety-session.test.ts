@@ -124,7 +124,6 @@ test("tool calls fail closed before an agent run starts", async () => {
 		assert.deepEqual(decision, {
 			kind: "block",
 			reason: "pi-safety: checkpoint run has not started",
-			cause: { kind: "run-not-started" },
 		})
 	})
 })

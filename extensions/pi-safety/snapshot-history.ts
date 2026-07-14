@@ -2,7 +2,13 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { type CanonicalPath, appendCanonicalPath, isCanonicalPathWithin, parseCanonicalPath } from "./canonical-path"
 import { type Result, err, ok } from "./result"
-import { type SnapshotId, type SnapshotStore, classifySnapshotStorage, parseSnapshotId } from "./snapshot"
+import {
+	type SnapshotId,
+	type SnapshotStore,
+	classifySnapshotStorage,
+	parseSnapshotId,
+	storedSnapshotPath,
+} from "./snapshot"
 import { type SnapshotManifest, type SnapshotManifestError, parseSnapshotManifest } from "./snapshot-manifest"
 
 const loadedSnapshotBrand: unique symbol = Symbol("LoadedSnapshot")
@@ -121,8 +127,7 @@ export function verifySnapshotEntries(
 ): Result<undefined, SnapshotHistoryError> {
 	for (const entry of entries) {
 		if (entry.kind === "excluded") continue
-		const storageRoot = entry.kind === "file" && entry.storage.kind === "protected" ? "protected" : "tree"
-		const storedPath = path.join(snapshot.directory, storageRoot, entry.path)
+		const storedPath = storedSnapshotPath(snapshot.directory, entry)
 		let stat: fs.Stats
 		try {
 			stat = fs.lstatSync(storedPath)

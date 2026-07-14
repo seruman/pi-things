@@ -19,12 +19,7 @@ type CheckpointState =
 
 type SnapshotCreator = () => Promise<Result<PublishedSnapshotRef, SnapshotError>>
 
-export interface CheckpointRun {
-	status(): CheckpointStatus
-	ensureCheckpoint(): Promise<Result<PublishedSnapshotRef, CheckpointError>>
-}
-
-class ManagedCheckpointRun implements CheckpointRun {
+export class CheckpointRun {
 	readonly #createSnapshot: SnapshotCreator
 	#state: CheckpointState = { kind: "not-started" }
 
@@ -76,8 +71,4 @@ class ManagedCheckpointRun implements CheckpointRun {
 			}
 		}
 	}
-}
-
-export function createCheckpointRun(createSnapshot: SnapshotCreator): CheckpointRun {
-	return new ManagedCheckpointRun(createSnapshot)
 }

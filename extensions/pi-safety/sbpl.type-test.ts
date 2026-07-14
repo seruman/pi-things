@@ -1,7 +1,7 @@
 import type { CanonicalExecutable, CanonicalPath } from "./canonical-path"
 import {
 	type Rule,
-	allowFileExtensionIssue,
+	allowFileExtensionIssues,
 	allowWebKitBrokerExtension,
 	fileRule,
 	fileRuleExceptProcess,
@@ -30,7 +30,9 @@ function compileTimeFixtures(path: CanonicalPath, executable: CanonicalExecutabl
 	unixConnectRule({ effect: "allow", matchers: [literal(path)] })
 
 	// @ts-expect-error File-extension issuance must be scoped to an executable.
-	allowFileExtensionIssue({ extensionClass: "com.apple.app-sandbox.read", matchers: [literal(path)] })
+	allowFileExtensionIssues({
+		grants: [{ extensionClass: "com.apple.app-sandbox.read", matchers: [literal(path)] }],
+	})
 
 	// @ts-expect-error Broker extension classes are a closed, source-derived set.
 	allowWebKitBrokerExtension("arbitrary", executable)

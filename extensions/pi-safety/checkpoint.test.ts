@@ -2,7 +2,7 @@ import { test } from "bun:test"
 import assert from "node:assert/strict"
 import * as fs from "node:fs"
 import * as path from "node:path"
-import { createCheckpointRun } from "./checkpoint"
+import { CheckpointRun } from "./checkpoint"
 import { err, ok, unwrap } from "./result"
 import { type PublishedSnapshotRef, createSnapshot, createSnapshotStore } from "./snapshot"
 import { canonicalPath, testFilePolicy } from "./test-domain-values"
@@ -39,7 +39,7 @@ test("concurrent first mutations share one checkpoint and later calls reuse it",
 		const published = await publishedSnapshot(root)
 		const gate = deferred()
 		let creations = 0
-		const run = createCheckpointRun(async () => {
+		const run = new CheckpointRun(async () => {
 			creations += 1
 			await gate.promise
 			return ok(published)
@@ -66,7 +66,7 @@ test("checkpoint failure is terminal for the run", async () => {
 	await withTestTempDirectoryAsync("checkpoint-failure-", async (root) => {
 		const failure = { kind: "project-locked", path: path.join(root, ".lock") } as const
 		let creations = 0
-		const run = createCheckpointRun(async () => {
+		const run = new CheckpointRun(async () => {
 			creations += 1
 			return err(failure)
 		})
@@ -80,7 +80,7 @@ test("checkpoint failure is terminal for the run", async () => {
 })
 
 test("unexpected creator rejection becomes a typed terminal failure", async () => {
-	const run = createCheckpointRun(async () => {
+	const run = new CheckpointRun(async () => {
 		throw new Error("creator exploded")
 	})
 	const result = await run.ensureCheckpoint()
