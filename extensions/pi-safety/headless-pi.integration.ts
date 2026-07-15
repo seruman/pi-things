@@ -67,7 +67,11 @@ function stopNewWbDaemons(previous: ReadonlySet<number>): void {
 	}
 }
 
-function runHeadlessPi(fixture: HeadlessFixture, responses: readonly unknown[]) {
+function runHeadlessPi(
+	fixture: HeadlessFixture,
+	responses: readonly unknown[],
+	options: { readonly persistSession?: boolean } = {},
+) {
 	const piExecutable = resolveInstalledPi()
 	const extensionDirectory = path.dirname(fileURLToPath(import.meta.url))
 	const script = path.join(fixture.root, "script.json")
@@ -78,7 +82,7 @@ function runHeadlessPi(fixture: HeadlessFixture, responses: readonly unknown[]) 
 			"--mode",
 			"json",
 			"--print",
-			"--no-session",
+			...(options.persistSession ? [] : ["--no-session"]),
 			"--no-extensions",
 			"--no-skills",
 			"--no-prompt-templates",
@@ -413,7 +417,7 @@ test("sandboxed snapshot CLI cannot mutate history or read protected content", (
 			"printf after > ordinary.txt",
 			`${JSON.stringify(snapshotCli)} create`,
 			"create_status=$?",
-			`id=$(${JSON.stringify(snapshotCli)} list | head -n 1 | cut -f 1)`,
+			`id=$(${JSON.stringify(snapshotCli)} list | tail -n +2 | head -n 1 | awk '{print $1}')`,
 			`${JSON.stringify(snapshotCli)} show "$id" .env`,
 			"show_status=$?",
 			`${JSON.stringify(snapshotCli)} restore "$id" --apply`,
@@ -441,6 +445,50 @@ test("sandboxed snapshot CLI cannot mutate history or read protected content", (
 		const project = fs.readdirSync(snapshotRoot)[0]
 		const snapshots = fs.readdirSync(path.join(snapshotRoot, project)).filter((name) => !name.startsWith("."))
 		assert.equal(snapshots.length, 1)
+	})
+})
+
+test("persists one non-context checkpoint marker for each mutating agent run", () => {
+	withTestTempDirectory("headless-pi-checkpoint-entry-", (root) => {
+		const fixture = createFixture(root)
+		runHeadlessPi(
+			fixture,
+			[
+				{ kind: "tool", id: "write-1", name: "write", arguments: { path: "first.txt", content: "first" } },
+				{ kind: "tool", id: "write-2", name: "write", arguments: { path: "second.txt", content: "second" } },
+				{ kind: "text", text: "done" },
+			],
+			{ persistSession: true },
+		)
+
+		const sessionRoot = path.join(fixture.piConfig, "sessions")
+		const sessionFiles = fs
+			.readdirSync(sessionRoot, { recursive: true, encoding: "utf8" })
+			.filter((relativePath) => relativePath.endsWith(".jsonl"))
+			.map((relativePath) => path.join(sessionRoot, relativePath))
+		assert.equal(sessionFiles.length, 1)
+		const entries = fs
+			.readFileSync(sessionFiles[0], "utf8")
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line) as Record<string, unknown>)
+		const markers = entries.filter((entry) => entry.type === "custom" && entry.customType === "pi-safety-checkpoint")
+		assert.equal(markers.length, 1)
+		assert.equal(
+			entries.some((entry) => entry.type === "custom_message" && entry.customType === "pi-safety-checkpoint"),
+			false,
+		)
+		const marker = markers[0].data as Record<string, unknown>
+		assert.equal(marker.version, 1)
+		assert.match(String(marker.snapshotId), /^\d{17}-[0-9a-f]{16}$/)
+		assert.equal(typeof marker.createdAt, "string")
+		const snapshotRoot = path.join(fixture.stateHome, "pi-safety", "snapshots")
+		const project = fs.readdirSync(snapshotRoot)[0]
+		const snapshotDirectory = path.join(snapshotRoot, project, String(marker.snapshotId))
+		assert.equal(fs.existsSync(snapshotDirectory), true)
+		const sessionHeader = entries.find((entry) => entry.type === "session")
+		const manifest = JSON.parse(fs.readFileSync(path.join(snapshotDirectory, "manifest.json"), "utf8"))
+		assert.deepEqual(manifest.origin, { kind: "pi-session", sessionId: sessionHeader?.id })
 	})
 })
 

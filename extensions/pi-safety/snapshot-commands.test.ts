@@ -42,10 +42,10 @@ test("snapshot commands list, show, diff, verify, restore, export, and collect",
 		const fifo = spawnSync("/usr/bin/mkfifo", [path.join(value.workspace, "runtime.fifo")], { encoding: "utf8" })
 		assert.equal(fifo.status, 0, fifo.stderr)
 
-		assert.match(
-			unwrap(runSnapshotCommand(value.store, command(["list"]), { kind: "sandboxed" })),
-			new RegExp(value.snapshot.id),
-		)
+		const listed = unwrap(runSnapshotCommand(value.store, command(["list"]), { kind: "sandboxed" }))
+		assert.match(listed.split("\n")[0], /^ID +CREATED_AT +ENTRIES +RECLAIMABLE_BYTES +SESSION +WORKSPACE$/)
+		assert.match(listed, new RegExp(`^${value.snapshot.id} +[^\\n]+ +- +standalone +${value.workspace}$`, "m"))
+		assert.doesNotMatch(listed, /\t/)
 		assert.equal(
 			unwrap(runSnapshotCommand(value.store, command(["show", value.snapshot.id, "file.txt"]), { kind: "sandboxed" })),
 			"before",

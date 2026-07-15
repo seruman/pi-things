@@ -4,6 +4,7 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { unwrap } from "./result"
 import { createSafetySession } from "./safety-session"
+import { parseSnapshotSessionId } from "./snapshot"
 import { withTestTempDirectoryAsync } from "./test-temp-directory"
 
 function fixture(root: string) {
@@ -69,6 +70,20 @@ test("the first allowed mutation snapshots once and later mutations reuse it", a
 				.filter((entry) => !entry.name.startsWith(".")).length,
 			1,
 		)
+	})
+})
+
+test("records the Pi session that owns an automatic checkpoint", async () => {
+	await withTestTempDirectoryAsync("safety-session-origin-", async (root) => {
+		const session = fixture(root)
+		const sessionId = unwrap(parseSnapshotSessionId("019f6277-361d-7f97-9d5b-7db7e0618fe1"))
+		unwrap(session.beginAgentRun({ kind: "pi-session", sessionId }))
+		assert.equal((await session.authorize("write", { path: "new.txt", content: "x" })).kind, "allow")
+		const status = session.checkpointStatus()
+		assert.equal(status.kind, "ready")
+		if (status.kind !== "ready") return
+		const manifest = JSON.parse(fs.readFileSync(path.join(status.snapshot.directory, "manifest.json"), "utf8"))
+		assert.deepEqual(manifest.origin, { kind: "pi-session", sessionId })
 	})
 })
 

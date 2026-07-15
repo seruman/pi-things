@@ -1,15 +1,24 @@
 import * as fs from "node:fs"
 import * as path from "node:path"
+import { readApfsPrivateSize } from "./apfs-private-size"
 import { type CanonicalPath, appendCanonicalPath, isCanonicalPathWithin, parseCanonicalPath } from "./canonical-path"
+import { readJsonFile } from "./json-file"
 import { type Result, err, ok } from "./result"
 import {
 	type SnapshotId,
+	type SnapshotOrigin,
 	type SnapshotStore,
 	classifySnapshotStorage,
 	parseSnapshotId,
 	storedSnapshotPath,
 } from "./snapshot"
-import { type SnapshotManifest, type SnapshotManifestError, parseSnapshotManifest } from "./snapshot-manifest"
+import {
+	type SnapshotManifest,
+	type SnapshotManifestError,
+	parseSnapshotManifest,
+	snapshotManifestSchema,
+	snapshotManifestSchemaError,
+} from "./snapshot-manifest"
 
 const loadedSnapshotBrand: unique symbol = Symbol("LoadedSnapshot")
 
@@ -17,7 +26,9 @@ export interface SnapshotSummary {
 	readonly id: SnapshotId
 	readonly createdAt: string
 	readonly workspace: CanonicalPath
+	readonly origin: SnapshotOrigin
 	readonly entryCount: number
+	readonly reclaimableBytes: bigint | undefined
 }
 
 export interface LoadedSnapshot {
@@ -63,7 +74,9 @@ export function listSnapshots(
 				id: loaded.value.manifest.id,
 				createdAt: loaded.value.manifest.createdAt,
 				workspace: loaded.value.manifest.workspace,
+				origin: loaded.value.manifest.origin,
 				entryCount: loaded.value.manifest.entries.length,
+				reclaimableBytes: access.kind === "verify-policy" ? reclaimableSnapshotBytes(loaded.value) : undefined,
 			}),
 		)
 	}
@@ -83,13 +96,13 @@ export function loadSnapshot(
 		return ioError("resolve-snapshot", directoryPath, "snapshot resolves outside its project store")
 	}
 	const manifestPath = path.join(directory, "manifest.json")
-	let input: unknown
-	try {
-		input = JSON.parse(fs.readFileSync(manifestPath, "utf8"))
-	} catch (cause) {
-		return ioError("read-manifest", manifestPath, cause)
+	const input = readJsonFile(manifestPath, snapshotManifestSchema)
+	if (!input.ok) {
+		return input.error.kind === "json-file-schema"
+			? err({ kind: "manifest", path: manifestPath, cause: snapshotManifestSchemaError(input.error.cause) })
+			: ioError("read-manifest", manifestPath, input.error.message)
 	}
-	const manifest = parseSnapshotManifest(input, store.filePolicy)
+	const manifest = parseSnapshotManifest(input.value, store.filePolicy)
 	if (!manifest.ok) return err({ kind: "manifest", path: manifestPath, cause: manifest.error })
 	if (manifest.value.id !== id) {
 		return err({ kind: "snapshot-id-mismatch", expected: id, actual: manifest.value.id })
@@ -115,6 +128,25 @@ export function loadSnapshot(
 			return assertNever(access)
 	}
 	return ok(Object.freeze({ directory, manifest: manifest.value }) as LoadedSnapshot)
+}
+
+function reclaimableSnapshotBytes(snapshot: LoadedSnapshot): bigint | undefined {
+	const paths = new Set([
+		snapshot.directory,
+		path.join(snapshot.directory, "manifest.json"),
+		path.join(snapshot.directory, "tree"),
+		path.join(snapshot.directory, "protected"),
+	])
+	for (const entry of snapshot.manifest.entries) {
+		if (entry.kind !== "excluded") paths.add(storedSnapshotPath(snapshot.directory, entry))
+	}
+	let total = 0n
+	for (const pathname of paths) {
+		const size = readApfsPrivateSize(pathname)
+		if (!size.ok) return undefined
+		total += size.value
+	}
+	return total
 }
 
 export function verifySnapshot(snapshot: LoadedSnapshot): Result<undefined, SnapshotHistoryError> {

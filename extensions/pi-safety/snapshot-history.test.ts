@@ -31,6 +31,8 @@ test("lists, loads, and verifies published snapshots through parsed manifests", 
 		const listed = unwrap(listSnapshots(value.store))
 		assert.equal(listed.length, 1)
 		assert.equal(listed[0].id, value.published.id)
+		assert.deepEqual(listed[0].origin, { kind: "standalone" })
+		assert.ok(listed[0].reclaimableBytes !== undefined && listed[0].reclaimableBytes > 0n)
 		const loaded = unwrap(loadSnapshot(value.store, value.published.id))
 		assert.equal(loaded.manifest.workspace, value.store.workspaceRoot)
 		assert.deepEqual(verifySnapshot(loaded), { ok: true, value: undefined })

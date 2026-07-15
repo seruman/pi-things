@@ -1,23 +1,27 @@
 import * as path from "node:path"
+import { z } from "zod"
 import { type CanonicalPath, parseCanonicalPath } from "./canonical-path"
 import type { FilePolicy } from "./file-policy"
 import { type Result, err, ok } from "./result"
 import {
 	type RelativeSnapshotPath,
 	type SnapshotId,
+	type SnapshotOrigin,
 	type SnapshotPlanEntry,
 	isExcludedSnapshotPath,
-	parseRelativeSnapshotPath,
-	parseSnapshotId,
+	relativeSnapshotPathSchema,
+	snapshotIdSchema,
+	snapshotSessionIdSchema,
 } from "./snapshot"
 
 const snapshotManifestBrand: unique symbol = Symbol("SnapshotManifest")
 
 export interface SnapshotManifest {
-	readonly version: 1 | 2
+	readonly version: 1 | 2 | 3
 	readonly id: SnapshotId
 	readonly createdAt: string
 	readonly workspace: CanonicalPath
+	readonly origin: SnapshotOrigin
 	readonly entries: readonly SnapshotPlanEntry[]
 	readonly [snapshotManifestBrand]: true
 }
@@ -28,30 +32,104 @@ export type SnapshotManifestError =
 	| { readonly kind: "duplicate-path"; readonly path: RelativeSnapshotPath }
 	| { readonly kind: "path-conflict"; readonly path: RelativeSnapshotPath; readonly ancestor: RelativeSnapshotPath }
 
+const modeSchema = z.number().int().min(0).max(0o7777)
+const timeSchema = z.number().finite().nonnegative()
+const sizeSchema = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER)
+const storageSchema = z.discriminatedUnion("kind", [
+	z.object({ kind: z.literal("ordinary") }).strict(),
+	z.object({ kind: z.literal("protected") }).strict(),
+])
+
+const directoryEntrySchema = z
+	.object({ kind: z.literal("directory"), path: relativeSnapshotPathSchema, mode: modeSchema, mtimeMs: timeSchema })
+	.strict()
+const fileEntrySchema = z
+	.object({
+		kind: z.literal("file"),
+		path: relativeSnapshotPathSchema,
+		mode: modeSchema,
+		mtimeMs: timeSchema,
+		size: sizeSchema,
+		storage: storageSchema,
+	})
+	.strict()
+const symlinkEntrySchema = z
+	.object({
+		kind: z.literal("symlink"),
+		path: relativeSnapshotPathSchema,
+		target: z.string().regex(/^[^\0]*$/u, "target must not contain NUL"),
+	})
+	.strict()
+const legacyExcludedEntrySchema = z
+	.object({ kind: z.literal("excluded"), path: relativeSnapshotPathSchema, reason: z.literal("generated-component") })
+	.strict()
+const policyExcludedEntrySchema = z
+	.object({ kind: z.literal("excluded"), path: relativeSnapshotPathSchema, reason: z.literal("policy") })
+	.strict()
+const legacyEntrySchema = z.discriminatedUnion("kind", [
+	legacyExcludedEntrySchema,
+	directoryEntrySchema,
+	fileEntrySchema,
+	symlinkEntrySchema,
+])
+const currentEntrySchema = z.discriminatedUnion("kind", [
+	policyExcludedEntrySchema,
+	directoryEntrySchema,
+	fileEntrySchema,
+	symlinkEntrySchema,
+])
+const originSchema = z.discriminatedUnion("kind", [
+	z.object({ kind: z.literal("standalone") }).strict(),
+	z.object({ kind: z.literal("pi-session"), sessionId: snapshotSessionIdSchema }).strict(),
+])
+const manifestFields = {
+	id: snapshotIdSchema,
+	createdAt: z.string().datetime({ offset: false, precision: 3 }),
+	workspace: z.string(),
+}
+export const snapshotManifestSchema = z.discriminatedUnion("version", [
+	z
+		.object({
+			version: z.literal(1),
+			...manifestFields,
+			entries: z.array(legacyEntrySchema),
+		})
+		.strict(),
+	z
+		.object({
+			version: z.literal(2),
+			...manifestFields,
+			entries: z.array(currentEntrySchema),
+		})
+		.strict(),
+	z
+		.object({
+			version: z.literal(3),
+			...manifestFields,
+			origin: originSchema,
+			entries: z.array(currentEntrySchema),
+		})
+		.strict(),
+])
+
+export type RawSnapshotManifest = z.infer<typeof snapshotManifestSchema>
+type RawManifestEntry = RawSnapshotManifest["entries"][number]
+
 export function parseSnapshotManifest(
-	input: unknown,
+	raw: RawSnapshotManifest,
 	filePolicy: FilePolicy,
 ): Result<SnapshotManifest, SnapshotManifestError> {
-	if (!isRecord(input)) return invalidManifest("manifest", "expected an object")
-	if (input.version !== 1 && input.version !== 2) return invalidManifest("version", "expected version 1 or 2")
-	if (typeof input.id !== "string") return invalidManifest("id", "expected a string")
-	const id = parseSnapshotId(input.id)
-	if (!id.ok) return invalidManifest("id", "invalid snapshot identifier")
-	if (typeof input.createdAt !== "string" || !isCanonicalIsoTimestamp(input.createdAt)) {
-		return invalidManifest("createdAt", "expected a canonical ISO timestamp")
-	}
-	if (input.createdAt.replace(/[^0-9]/g, "") !== input.id.slice(0, 17)) {
+	if (raw.createdAt.replace(/[^0-9]/g, "") !== raw.id.slice(0, 17)) {
 		return invalidManifest("createdAt", "timestamp does not match snapshot identifier")
 	}
-	if (typeof input.workspace !== "string") return invalidManifest("workspace", "expected a string")
-	const workspace = parseCanonicalPath(input.workspace)
+	const workspace = parseCanonicalPath(raw.workspace)
 	if (!workspace.ok) return invalidManifest("workspace", JSON.stringify(workspace.error))
-	if (!Array.isArray(input.entries)) return invalidManifest("entries", "expected an array")
+	const origin: SnapshotOrigin = raw.version === 3 ? raw.origin : { kind: "legacy" }
 
 	const entries: SnapshotPlanEntry[] = []
 	const paths = new Map<string, SnapshotPlanEntry>()
-	for (const [index, rawEntry] of input.entries.entries()) {
-		const parsed = parseEntry(rawEntry, index, input.version, filePolicy, workspace.value)
+	for (const [index, rawEntry] of raw.entries.entries()) {
+		const parsed = parseEntry(rawEntry, index, filePolicy, workspace.value)
 		if (!parsed.ok) return parsed
 		if (paths.has(parsed.value.path)) return err({ kind: "duplicate-path", path: parsed.value.path })
 		paths.set(parsed.value.path, parsed.value)
@@ -62,118 +140,61 @@ export function parseSnapshotManifest(
 		while (ancestor !== ".") {
 			const ancestorEntry = paths.get(ancestor)
 			if (ancestorEntry && ancestorEntry.kind !== "directory") {
-				const parsedAncestor = parseRelativeSnapshotPath(ancestor)
-				if (!parsedAncestor.ok) return invalidManifest("entries", "failed to parse a normalized ancestor")
-				return err({ kind: "path-conflict", path: entry.path, ancestor: parsedAncestor.value })
+				return err({ kind: "path-conflict", path: entry.path, ancestor: ancestorEntry.path })
 			}
 			ancestor = path.dirname(ancestor)
 		}
 	}
 	return ok(
 		Object.freeze({
-			version: input.version,
-			id: id.value,
-			createdAt: input.createdAt,
+			version: raw.version,
+			id: raw.id,
+			createdAt: raw.createdAt,
 			workspace: workspace.value,
+			origin,
 			entries: Object.freeze(entries),
 		}) as SnapshotManifest,
 	)
 }
 
 function parseEntry(
-	input: unknown,
+	input: RawManifestEntry,
 	index: number,
-	version: 1 | 2,
 	filePolicy: FilePolicy,
 	workspace: CanonicalPath,
 ): Result<SnapshotPlanEntry, SnapshotManifestError> {
-	if (!isRecord(input) || typeof input.kind !== "string" || typeof input.path !== "string") {
-		return invalidEntry(index, "expected an entry object with kind and path")
-	}
-	const parsedPath = parseRelativeSnapshotPath(input.path)
-	if (!parsedPath.ok) return invalidEntry(index, "invalid relative path")
-	const relativePath = parsedPath.value
 	if (input.kind === "excluded") {
-		if (!hasExactKeys(input, ["kind", "path", "reason"])) return invalidEntry(index, "invalid excluded entry")
-		if (version === 1 && input.reason !== "generated-component") {
-			return invalidEntry(index, "version 1 excluded entries require generated-component")
-		}
-		if (version === 2 && input.reason !== "policy") {
-			return invalidEntry(index, "version 2 excluded entries require policy")
-		}
-		if (!isExcludedSnapshotPath(filePolicy, workspace, relativePath))
+		if (!isExcludedSnapshotPath(filePolicy, workspace, input.path)) {
 			return invalidEntry(index, "excluded path is not excluded by policy")
-		return ok({ kind: "excluded", path: relativePath, reason: "policy" })
-	}
-	if (isExcludedSnapshotPath(filePolicy, workspace, relativePath))
-		return invalidEntry(index, "non-excluded entry is excluded by policy")
-	if (input.kind === "directory") {
-		if (!hasExactKeys(input, ["kind", "path", "mode", "mtimeMs"]) || !isMode(input.mode) || !isTime(input.mtimeMs)) {
-			return invalidEntry(index, "invalid directory entry")
 		}
-		return ok({ kind: "directory", path: relativePath, mode: input.mode, mtimeMs: input.mtimeMs })
+		return ok({ kind: "excluded", path: input.path, reason: "policy" })
+	}
+	if (isExcludedSnapshotPath(filePolicy, workspace, input.path)) {
+		return invalidEntry(index, "non-excluded entry is excluded by policy")
+	}
+	if (input.kind === "directory") {
+		return ok({ kind: "directory", path: input.path, mode: input.mode, mtimeMs: input.mtimeMs })
 	}
 	if (input.kind === "file") {
-		if (
-			!hasExactKeys(input, ["kind", "path", "mode", "mtimeMs", "size", "storage"]) ||
-			!isMode(input.mode) ||
-			!isTime(input.mtimeMs) ||
-			!isNonnegativeSafeInteger(input.size) ||
-			!isStorage(input.storage)
-		) {
-			return invalidEntry(index, "invalid file entry")
-		}
 		return ok({
 			kind: "file",
-			path: relativePath,
+			path: input.path,
 			mode: input.mode,
 			mtimeMs: input.mtimeMs,
 			size: input.size,
-			storage: { kind: input.storage.kind },
+			storage: input.storage,
 		})
 	}
-	if (input.kind === "symlink") {
-		if (
-			!hasExactKeys(input, ["kind", "path", "target"]) ||
-			typeof input.target !== "string" ||
-			input.target.includes("\0")
-		) {
-			return invalidEntry(index, "invalid symlink entry")
-		}
-		return ok({ kind: "symlink", path: relativePath, target: input.target })
+	return ok({ kind: "symlink", path: input.path, target: input.target })
+}
+
+export function snapshotManifestSchemaError(error: z.ZodError): SnapshotManifestError {
+	const issue = error.issues[0]
+	if (!issue) return { kind: "invalid-manifest", field: "manifest", message: "invalid manifest" }
+	if (issue.path[0] === "entries" && typeof issue.path[1] === "number") {
+		return { kind: "invalid-entry", index: issue.path[1], message: issue.message }
 	}
-	return invalidEntry(index, `unknown entry kind ${input.kind}`)
-}
-
-function isRecord(input: unknown): input is Record<string, unknown> {
-	return typeof input === "object" && input !== null && !Array.isArray(input)
-}
-
-function hasExactKeys(input: Record<string, unknown>, keys: readonly string[]): boolean {
-	const actual = Object.keys(input).sort()
-	const expected = [...keys].sort()
-	return actual.length === expected.length && actual.every((key, index) => key === expected[index])
-}
-
-function isMode(input: unknown): input is number {
-	return typeof input === "number" && Number.isSafeInteger(input) && input >= 0 && input <= 0o7777
-}
-
-function isNonnegativeSafeInteger(input: unknown): input is number {
-	return typeof input === "number" && Number.isSafeInteger(input) && input >= 0
-}
-
-function isTime(input: unknown): input is number {
-	return typeof input === "number" && Number.isFinite(input) && input >= 0
-}
-
-function isStorage(input: unknown): input is { readonly kind: "ordinary" | "protected" } {
-	return isRecord(input) && hasExactKeys(input, ["kind"]) && (input.kind === "ordinary" || input.kind === "protected")
-}
-
-function isCanonicalIsoTimestamp(input: string): boolean {
-	const timestamp = Date.parse(input)
-	return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === input
+	return { kind: "invalid-manifest", field: issue.path.join(".") || "manifest", message: issue.message }
 }
 
 function invalidManifest(field: string, message: string): Result<never, SnapshotManifestError> {
