@@ -3,7 +3,7 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { z } from "zod"
 import { type CanonicalPath, appendCanonicalPath, isCanonicalPathWithin, parseCanonicalPath } from "./canonical-path"
-import { type FilePolicy, decideFileAccess, decideSnapshotDisposition } from "./file-policy"
+import { type Policy, evaluatePolicy } from "./policy"
 import { type Result, err, ok } from "./result"
 
 const snapshotPlanBrand: unique symbol = Symbol("SnapshotPlan")
@@ -44,12 +44,12 @@ export function parseSnapshotSessionId(input: string): Result<SnapshotSessionId,
 export type SnapshotFileStorage = { readonly kind: "ordinary" } | { readonly kind: "protected" }
 
 export function isExcludedSnapshotPath(
-	policy: FilePolicy,
+	policy: Policy,
 	workspaceRoot: CanonicalPath,
 	relativePath: RelativeSnapshotPath,
 ): boolean {
 	const absolute = appendCanonicalPath(workspaceRoot, relativePath.split(path.sep))
-	return absolute.ok && decideSnapshotDisposition(policy, absolute.value).value === "exclude"
+	return absolute.ok && evaluatePolicy(policy, { kind: "snapshot", path: absolute.value }).disposition === "exclude"
 }
 
 export type SnapshotPlanEntry =
@@ -102,14 +102,20 @@ export interface WorkspaceObservation {
 	readonly nonComparable: readonly NonComparableWorkspaceEntry[]
 }
 
-export function classifySnapshotStorage(policy: FilePolicy, path: CanonicalPath): SnapshotFileStorage {
-	return decideFileAccess(policy, path).value === "none" ? { kind: "protected" } : { kind: "ordinary" }
+export function classifySnapshotStorage(policy: Policy, path: CanonicalPath): SnapshotFileStorage {
+	const decision = evaluatePolicy(policy, {
+		kind: "file-access",
+		operation: "read",
+		subject: { kind: "snapshot" },
+		path,
+	})
+	return decision.access === "none" ? { kind: "protected" } : { kind: "ordinary" }
 }
 
 export interface SnapshotStore {
 	readonly workspaceRoot: CanonicalPath
 	readonly projectDirectory: CanonicalPath
-	readonly filePolicy: FilePolicy
+	readonly policy: Policy
 	readonly maxSnapshots: number
 	readonly [snapshotStoreBrand]: true
 }
@@ -190,7 +196,7 @@ function entryType(stat: fs.Stats): string {
 export function createSnapshotStore(input: {
 	readonly workspaceRoot: CanonicalPath
 	readonly stateRoot: CanonicalPath
-	readonly filePolicy: FilePolicy
+	readonly policy: Policy
 	readonly maxSnapshots?: number
 }): Result<SnapshotStore, SnapshotError> {
 	const maxSnapshots = input.maxSnapshots ?? 20
@@ -216,7 +222,7 @@ export function createSnapshotStore(input: {
 		Object.freeze({
 			workspaceRoot: input.workspaceRoot,
 			projectDirectory: projectDirectory.value,
-			filePolicy: input.filePolicy,
+			policy: input.policy,
 			maxSnapshots,
 		}) as SnapshotStore,
 	)
@@ -224,7 +230,7 @@ export function createSnapshotStore(input: {
 
 type WorkspaceObservationInput = {
 	readonly workspaceRoot: CanonicalPath
-	readonly filePolicy: FilePolicy
+	readonly policy: Policy
 }
 
 type WorkspaceObservationScope =
@@ -272,7 +278,7 @@ function observeWorkspaceScope(
 		relative: RelativeSnapshotPath,
 		presence: "optional" | "required",
 	): Result<undefined, SnapshotError> => {
-		if (isExcludedSnapshotPath(input.filePolicy, input.workspaceRoot, relative)) {
+		if (isExcludedSnapshotPath(input.policy, input.workspaceRoot, relative)) {
 			entries.push({ kind: "excluded", path: relative, reason: "policy" })
 			return ok(undefined)
 		}
@@ -302,7 +308,7 @@ function observeWorkspaceScope(
 				mode: stat.mode & 0o7777,
 				mtimeMs: stat.mtimeMs,
 				size: stat.size,
-				storage: classifySnapshotStorage(input.filePolicy, canonical.value),
+				storage: classifySnapshotStorage(input.policy, canonical.value),
 			})
 			return ok(undefined)
 		}
@@ -342,7 +348,7 @@ function observeWorkspaceScope(
 
 export function planSnapshot(input: {
 	readonly workspaceRoot: CanonicalPath
-	readonly filePolicy: FilePolicy
+	readonly policy: Policy
 }): Result<SnapshotPlan, SnapshotError> {
 	const observed = observeWorkspace(input)
 	if (!observed.ok) return observed
@@ -581,7 +587,7 @@ function createSnapshotTransaction(
 	store: SnapshotStore,
 	options: { readonly preserve?: SnapshotId; readonly origin?: SnapshotCreationOrigin },
 ): Result<PublishedSnapshotRef, SnapshotError> {
-	const plan = planSnapshot({ workspaceRoot: store.workspaceRoot, filePolicy: store.filePolicy })
+	const plan = planSnapshot({ workspaceRoot: store.workspaceRoot, policy: store.policy })
 	if (!plan.ok) return plan
 	const directory = ensureDirectory(store.projectDirectory)
 	if (!directory.ok) return directory

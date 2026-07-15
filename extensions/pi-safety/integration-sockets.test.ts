@@ -3,12 +3,39 @@ import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
 import * as fs from "node:fs"
 import * as path from "node:path"
-import { compileBashProfile } from "./bash-profile"
-import { createBashFilePolicy } from "./default-rules"
+import { createDefaultPolicy } from "./default-policy"
+import type { BashIntegrations } from "./integrations"
 import { unwrap } from "./result"
-import { canonicalExecutable, canonicalPath, testFilePolicy } from "./test-domain-values"
+import { emitSeatbelt } from "./seatbelt"
+import { canonicalExecutable, canonicalPath } from "./test-domain-values"
 import { runWithSeatbeltProfile } from "./test-seatbelt"
 import { withPrivateTmpDirectory } from "./test-temp-directory"
+
+function compilePolicy(
+	root: string,
+	workspace: string,
+	home: string,
+	privateTemp: string,
+	integrations: BashIntegrations,
+) {
+	const stateHome = path.join(root, "state")
+	const piConfigDirectory = path.join(root, "pi-agent")
+	for (const directory of [stateHome, piConfigDirectory]) fs.mkdirSync(directory)
+	return emitSeatbelt(
+		unwrap(
+			createDefaultPolicy({
+				paths: {
+					workspace: canonicalPath(workspace),
+					home: canonicalPath(home),
+					stateHome: canonicalPath(stateHome),
+					piConfigDirectory: canonicalPath(piConfigDirectory),
+				},
+				additionalNoAccessPatterns: [],
+				sandbox: { kind: "enabled", privateTemp: canonicalPath(privateTemp), integrations },
+			}),
+		),
+	)
+}
 
 test("explicit Docker Unix socket capability permits only the discovered endpoint", () => {
 	withPrivateTmpDirectory("pi-safety-docker-socket-", (root) => {
@@ -29,15 +56,13 @@ test("explicit Docker Unix socket capability permits only the discovered endpoin
 				if (Date.now() >= deadline) throw new Error("temporary Docker socket server did not start")
 				Bun.sleepSync(10)
 			}
-			const base = testFilePolicy(workspace, home)
 			const integrations = {
 				gitExecutable: canonicalExecutable("/usr/bin/git"),
 				sshAgent: { kind: "disabled" },
 				docker: { kind: "unix-socket", socket: canonicalPath(socket) },
 				wb: { kind: "disabled" },
 			} as const
-			const policy = unwrap(createBashFilePolicy({ base, privateTemp: canonicalPath(privateTemp), integrations }))
-			const compiled = compileBashProfile({ policy, integrations })
+			const compiled = compilePolicy(root, workspace, home, privateTemp, integrations)
 			const script = "import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); s.close()"
 			const result = runWithSeatbeltProfile(compiled, "/usr/bin/python3", ["-c", script, socket], workspace)
 			assert.equal(result.status, 0, result.stderr)
@@ -60,15 +85,13 @@ test("explicit SSH agent socket capability permits agent use without private-key
 		if (!pidMatch) throw new Error(`could not parse test ssh-agent pid: ${started.stdout}`)
 		const agentPid = Number(pidMatch[1])
 		try {
-			const base = testFilePolicy(workspace, home)
 			const integrations = {
 				gitExecutable: canonicalExecutable("/usr/bin/git"),
 				sshAgent: { kind: "unix-socket", socket: canonicalPath(socket) },
 				docker: { kind: "disabled" },
 				wb: { kind: "disabled" },
 			} as const
-			const policy = unwrap(createBashFilePolicy({ base, privateTemp: canonicalPath(privateTemp), integrations }))
-			const compiled = compileBashProfile({ policy, integrations })
+			const compiled = compilePolicy(root, workspace, home, privateTemp, integrations)
 			const result = runWithSeatbeltProfile(compiled, "/usr/bin/ssh-add", ["-l"], workspace, {
 				...process.env,
 				SSH_AUTH_SOCK: socket,

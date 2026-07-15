@@ -35,7 +35,7 @@ export default function piSafety(pi: ExtensionAPI): void {
 				if (initialization.kind !== "ready") {
 					throw new Error("pi-safety: Bash sandbox requested before session initialization")
 				}
-				return initialization.session.compileBashProfile()
+				return initialization.session.seatbeltProfile()
 			},
 			() => ({
 				PI_SAFETY_CHECKPOINT_READY: "1",
@@ -50,9 +50,18 @@ export default function piSafety(pi: ExtensionAPI): void {
 	})
 
 	pi.registerCommand("pi-safety", {
-		description: "Show Pi safety initialization and checkpoint status",
-		handler: async (_args, context) => {
+		description: "Show Pi safety status or the resolved ordered policy",
+		getArgumentCompletions: (prefix) =>
+			"policy".startsWith(prefix.trim())
+				? [{ value: "policy", label: "policy", description: "Show ordered rules" }]
+				: null,
+		handler: async (args, context) => {
 			if (!context.hasUI) return
+			const action = args.trim()
+			if (action !== "" && action !== "policy") {
+				context.ui.notify("Usage: /pi-safety [policy]", "warning")
+				return
+			}
 			switch (initialization.kind) {
 				case "not-started":
 					context.ui.notify("pi-safety: session initialization has not started", "warning")
@@ -64,6 +73,10 @@ export default function piSafety(pi: ExtensionAPI): void {
 					)
 					break
 				case "ready": {
+					if (action === "policy") {
+						context.ui.notify(initialization.session.policyDescription(), "info")
+						break
+					}
 					const status = initialization.session.checkpointStatus()
 					context.ui.notify(
 						[

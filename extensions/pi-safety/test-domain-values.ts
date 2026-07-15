@@ -4,19 +4,20 @@ import {
 	parseCanonicalExecutable,
 	parseCanonicalPath,
 } from "./canonical-path"
+import { type PathPattern, parsePathPattern } from "./path-pattern"
 import {
-	type FilePolicy,
-	type FilePolicyRule,
-	defineFilePolicy,
+	type Policy,
+	type PolicyRule,
+	definePolicy,
 	excludeFromSnapshots,
+	executable,
 	noAccess,
 	pattern,
 	readOnly,
 	readWrite,
-	readWriteForExecutable,
+	shared,
 	tree,
-} from "./file-policy"
-import { type PathPattern, parsePathPattern } from "./path-pattern"
+} from "./policy"
 import { unwrap } from "./result"
 
 export function canonicalPath(input: string): CanonicalPath {
@@ -31,7 +32,7 @@ export function pathPattern(input: string, relativeTo: CanonicalPath): PathPatte
 	return unwrap(parsePathPattern(input, relativeTo))
 }
 
-export function testFilePolicy(
+export function testPolicy(
 	workspace: string,
 	home: string,
 	options: {
@@ -42,20 +43,20 @@ export function testFilePolicy(
 			readonly patterns: readonly PathPattern[]
 		}[]
 		readonly snapshotExclusions?: readonly PathPattern[]
-		readonly additionalRules?: readonly FilePolicyRule[]
+		readonly additionalRules?: readonly PolicyRule[]
 	} = {},
-): FilePolicy {
+): Policy {
 	const workspaceRoot = canonicalPath(workspace)
-	const rules: FilePolicyRule[] = [
-		readOnly(tree(canonicalPath("/"))),
-		readWrite(tree(workspaceRoot)),
-		...(options.readOnlyPatterns ?? []).map((value) => readOnly(pattern(value))),
-		...(options.noAccessPatterns ?? []).map((value) => noAccess(pattern(value))),
+	const rules: PolicyRule[] = [
+		readOnly(shared(), tree(canonicalPath("/"))),
+		readWrite(shared(), tree(workspaceRoot)),
+		...(options.readOnlyPatterns ?? []).map((value) => readOnly(shared(), pattern(value))),
+		...(options.noAccessPatterns ?? []).map((value) => noAccess(shared(), pattern(value))),
 		...(options.executableWrites ?? []).flatMap((write) =>
-			write.patterns.map((value) => readWriteForExecutable(write.executable, pattern(value))),
+			write.patterns.map((value) => readWrite(executable(write.executable), pattern(value))),
 		),
 		...(options.snapshotExclusions ?? []).map((value) => excludeFromSnapshots(pattern(value))),
 		...(options.additionalRules ?? []),
 	]
-	return defineFilePolicy({ workspaceRoot, homeRoot: canonicalPath(home), rules })
+	return definePolicy({ workspaceRoot, homeRoot: canonicalPath(home), rules })
 }

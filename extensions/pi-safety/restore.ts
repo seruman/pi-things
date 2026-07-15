@@ -83,7 +83,7 @@ export function planRestore(
 ): Result<RestorePlan, RestoreError> {
 	if (scope.kind === "selected") {
 		const excluded = scope.paths.find((candidate) =>
-			isExcludedSnapshotPath(store.filePolicy, store.workspaceRoot, candidate),
+			isExcludedSnapshotPath(store.policy, store.workspaceRoot, candidate),
 		)
 		if (excluded !== undefined) return err({ kind: "excluded-selection", path: excluded })
 	}
@@ -93,10 +93,10 @@ export function planRestore(
 	if (!verified.ok) return err({ kind: "snapshot-verification", cause: verified.error })
 	const live =
 		scope.kind === "all"
-			? planSnapshot({ workspaceRoot: store.workspaceRoot, filePolicy: store.filePolicy })
+			? planSnapshot({ workspaceRoot: store.workspaceRoot, policy: store.policy })
 			: observeWorkspacePaths({
 					workspaceRoot: store.workspaceRoot,
-					filePolicy: store.filePolicy,
+					policy: store.policy,
 					paths: scope.paths,
 				})
 	if (!live.ok) return err({ kind: "live-tree", cause: live.error })

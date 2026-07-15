@@ -2,12 +2,12 @@ import { test } from "bun:test"
 import assert from "node:assert/strict"
 import * as fs from "node:fs"
 import * as path from "node:path"
-import { createSnapshotFilePolicy } from "./default-rules"
+import { createSnapshotPolicy } from "./default-policy"
 import { executeRestore, planRestore, selectedRestoreScope } from "./restore"
 import { unwrap } from "./result"
 import { createSnapshot, createSnapshotStore } from "./snapshot"
 import { loadSnapshot } from "./snapshot-history"
-import { canonicalPath, pathPattern, testFilePolicy } from "./test-domain-values"
+import { canonicalPath, pathPattern, testPolicy } from "./test-domain-values"
 import { withTestTempDirectory } from "./test-temp-directory"
 
 function fixture(root: string) {
@@ -27,7 +27,7 @@ function fixture(root: string) {
 		createSnapshotStore({
 			workspaceRoot,
 			stateRoot: canonicalPath(state),
-			filePolicy: unwrap(createSnapshotFilePolicy(workspaceRoot)),
+			policy: unwrap(createSnapshotPolicy(workspaceRoot)),
 		}),
 	)
 	const published = unwrap(createSnapshot(store))
@@ -84,7 +84,7 @@ test("selected ordinary restore verifies only required snapshot sources", () => 
 			createSnapshotStore({
 				workspaceRoot,
 				stateRoot: canonicalPath(state),
-				filePolicy: testFilePolicy(workspace, state, {
+				policy: testPolicy(workspace, state, {
 					noAccessPatterns: [pathPattern(path.join(workspace, ".env"), workspaceRoot)],
 				}),
 			}),

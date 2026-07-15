@@ -1,7 +1,7 @@
 import * as path from "node:path"
 import { z } from "zod"
 import { type CanonicalPath, parseCanonicalPath } from "./canonical-path"
-import type { FilePolicy } from "./file-policy"
+import type { Policy } from "./policy"
 import { type Result, err, ok } from "./result"
 import {
 	type RelativeSnapshotPath,
@@ -117,7 +117,7 @@ type RawManifestEntry = RawSnapshotManifest["entries"][number]
 
 export function parseSnapshotManifest(
 	raw: RawSnapshotManifest,
-	filePolicy: FilePolicy,
+	policy: Policy,
 ): Result<SnapshotManifest, SnapshotManifestError> {
 	if (raw.createdAt.replace(/[^0-9]/g, "") !== raw.id.slice(0, 17)) {
 		return invalidManifest("createdAt", "timestamp does not match snapshot identifier")
@@ -129,7 +129,7 @@ export function parseSnapshotManifest(
 	const entries: SnapshotPlanEntry[] = []
 	const paths = new Map<string, SnapshotPlanEntry>()
 	for (const [index, rawEntry] of raw.entries.entries()) {
-		const parsed = parseEntry(rawEntry, index, filePolicy, workspace.value)
+		const parsed = parseEntry(rawEntry, index, policy, workspace.value)
 		if (!parsed.ok) return parsed
 		if (paths.has(parsed.value.path)) return err({ kind: "duplicate-path", path: parsed.value.path })
 		paths.set(parsed.value.path, parsed.value)
@@ -160,16 +160,16 @@ export function parseSnapshotManifest(
 function parseEntry(
 	input: RawManifestEntry,
 	index: number,
-	filePolicy: FilePolicy,
+	policy: Policy,
 	workspace: CanonicalPath,
 ): Result<SnapshotPlanEntry, SnapshotManifestError> {
 	if (input.kind === "excluded") {
-		if (!isExcludedSnapshotPath(filePolicy, workspace, input.path)) {
+		if (!isExcludedSnapshotPath(policy, workspace, input.path)) {
 			return invalidEntry(index, "excluded path is not excluded by policy")
 		}
 		return ok({ kind: "excluded", path: input.path, reason: "policy" })
 	}
-	if (isExcludedSnapshotPath(filePolicy, workspace, input.path)) {
+	if (isExcludedSnapshotPath(policy, workspace, input.path)) {
 		return invalidEntry(index, "non-excluded entry is excluded by policy")
 	}
 	if (input.kind === "directory") {

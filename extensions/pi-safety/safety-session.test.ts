@@ -33,6 +33,18 @@ function fixture(root: string) {
 	)
 }
 
+test("exposes the session's resolved policy without changing checkpoint state", async () => {
+	await withTestTempDirectoryAsync("safety-session-policy-", async (root) => {
+		const session = fixture(root)
+		const description = session.policyDescription()
+		assert.match(description, /Pi Safety policy \(ordered;/)
+		assert.ok(description.includes(`workspace ${JSON.stringify(path.join(root, "workspace"))}`))
+		assert.match(description, /file shared none tree=.*\.cf/)
+		assert.match(description, /runtime operations allow/)
+		assert.deepEqual(session.checkpointStatus(), { kind: "run-not-started" })
+	})
+})
+
 test("reads and denied mutations do not create a lazy checkpoint", async () => {
 	await withTestTempDirectoryAsync("safety-session-read-", async (root) => {
 		const session = fixture(root)

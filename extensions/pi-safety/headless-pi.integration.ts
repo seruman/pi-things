@@ -259,7 +259,7 @@ test("headless Pi protects persistence configuration in built-in tools and Bash"
 		const toolEnds = events.filter((event) => event.type === "tool_execution_end")
 		assert.equal(toolEnds.length, 2)
 		assert.equal(toolEnds[0].isError, true)
-		assert.match(JSON.stringify(toolEnds[0].result), /write access denied.*MCP configuration/)
+		assert.match(JSON.stringify(toolEnds[0].result), /write access denied.*\.mcp\.json/)
 		assert.equal(toolEnds[1].isError, false)
 		assert.match(JSON.stringify(toolEnds[1].result), /hook:[1-9][0-9]* mcp:[1-9][0-9]*/)
 		assert.equal(fs.existsSync(path.join(fixture.workspace, ".git", "hooks", "post-commit")), false)
