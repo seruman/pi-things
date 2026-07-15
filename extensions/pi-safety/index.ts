@@ -4,10 +4,12 @@ import { type ExtensionAPI, createBashTool } from "@earendil-works/pi-coding-age
 import { createSandboxedBashOperations } from "./bash-launcher"
 import { type SafetyConfigurationError, loadProjectSafetyConfiguration } from "./configuration"
 import { type SafetySession, type SafetySessionError, createSafetySession } from "./safety-session"
+import { type SnapshotId, parseSnapshotSessionId } from "./snapshot"
 
 type SessionInitializationError =
 	| { readonly kind: "configuration"; readonly cause: SafetyConfigurationError }
 	| { readonly kind: "session-creation"; readonly cause: SafetySessionError }
+	| { readonly kind: "session-id" }
 	| { readonly kind: "run-start"; readonly cause: { readonly kind: "checkpoint-creation-in-progress" } }
 
 type SessionInitialization =
@@ -16,9 +18,17 @@ type SessionInitialization =
 	| { readonly kind: "failed"; readonly error: SessionInitializationError }
 
 const GUARDED_TOOLS = new Set(["bash", "read", "write", "edit"])
+const CHECKPOINT_ENTRY_TYPE = "pi-safety-checkpoint"
+
+interface CheckpointEntryData {
+	readonly version: 1
+	readonly snapshotId: SnapshotId
+	readonly createdAt: string
+}
 
 export default function piSafety(pi: ExtensionAPI): void {
 	let initialization: SessionInitialization = { kind: "not-started" }
+	let recordedCheckpointId: SnapshotId | undefined
 	const bashTool = createBashTool(process.cwd(), {
 		operations: createSandboxedBashOperations(
 			() => {
@@ -70,6 +80,7 @@ export default function piSafety(pi: ExtensionAPI): void {
 	})
 
 	pi.on("session_start", async (_event, context) => {
+		recordedCheckpointId = undefined
 		const projectConfiguration = loadProjectSafetyConfiguration(context.cwd)
 		if (!projectConfiguration.ok) {
 			initialization = { kind: "failed", error: { kind: "configuration", cause: projectConfiguration.error } }
@@ -95,9 +106,14 @@ export default function piSafety(pi: ExtensionAPI): void {
 			: { kind: "failed", error: { kind: "session-creation", cause: created.error } }
 	})
 
-	pi.on("before_agent_start", async () => {
+	pi.on("before_agent_start", async (_event, context) => {
 		if (initialization.kind !== "ready") return
-		const started = initialization.session.beginAgentRun()
+		const sessionId = parseSnapshotSessionId(context.sessionManager.getSessionId())
+		if (!sessionId.ok) {
+			initialization = { kind: "failed", error: { kind: "session-id" } }
+			return
+		}
+		const started = initialization.session.beginAgentRun({ kind: "pi-session", sessionId: sessionId.value })
 		if (!started.ok) {
 			initialization = { kind: "failed", error: { kind: "run-start", cause: started.error } }
 		}
@@ -109,7 +125,7 @@ export default function piSafety(pi: ExtensionAPI): void {
 		if (!cleaned.ok) throw new Error(`pi-safety: integration cleanup failed (${cleaned.error.kind})`)
 	})
 
-	pi.on("tool_call", async (event) => {
+	pi.on("tool_call", async (event, context) => {
 		if (!GUARDED_TOOLS.has(event.toolName)) return
 		if (initialization.kind === "not-started") {
 			return { block: true, reason: "pi-safety: session initialization has not completed" }
@@ -121,7 +137,26 @@ export default function piSafety(pi: ExtensionAPI): void {
 			}
 		}
 		const decision = await initialization.session.authorize(event.toolName, event.input)
-		return decision.kind === "allow" ? undefined : { block: true, reason: decision.reason }
+		if (decision.kind === "block") return { block: true, reason: decision.reason }
+		const checkpoint = initialization.session.checkpointStatus()
+		if (checkpoint.kind === "ready" && checkpoint.snapshot.id !== recordedCheckpointId) {
+			recordedCheckpointId = checkpoint.snapshot.id
+			try {
+				pi.appendEntry<CheckpointEntryData>(CHECKPOINT_ENTRY_TYPE, {
+					version: 1,
+					snapshotId: checkpoint.snapshot.id,
+					createdAt: checkpoint.snapshot.createdAt,
+				})
+			} catch (cause) {
+				if (context.hasUI) {
+					context.ui.notify(
+						`pi-safety: checkpoint created, but its session marker could not be saved: ${cause instanceof Error ? cause.message : String(cause)}`,
+						"warning",
+					)
+				}
+			}
+		}
+		return undefined
 	})
 }
 
@@ -131,6 +166,8 @@ function formatInitializationError(error: SessionInitializationError): string {
 			return `${error.cause.path}: ${error.cause.message}`
 		case "session-creation":
 			return JSON.stringify(error.cause)
+		case "session-id":
+			return "Pi returned an invalid session identifier"
 		case "run-start":
 			return "cannot start a new run while checkpoint creation is in progress"
 	}

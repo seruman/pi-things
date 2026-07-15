@@ -19,7 +19,7 @@ import {
 import { type Result, err, ok } from "./result"
 import { createConfiguredSnapshotStore } from "./safety-filesystem"
 import type { CompiledSbpl } from "./sbpl"
-import { type SnapshotError, type SnapshotStore, createSnapshot } from "./snapshot"
+import { type SnapshotCreationOrigin, type SnapshotError, type SnapshotStore, createSnapshot } from "./snapshot"
 import { type ToolAuthorizationError, authorizeBuiltinToolCall } from "./tool-authorization"
 
 export interface RawSafetySessionConfiguration extends RawInitialFilePolicy {
@@ -40,7 +40,9 @@ export type SafetySessionCheckpointStatus = CheckpointStatus | { readonly kind: 
 
 export interface SafetySession {
 	readonly snapshotStore: SnapshotStore
-	beginAgentRun(): Result<undefined, { readonly kind: "checkpoint-creation-in-progress" }>
+	beginAgentRun(
+		origin?: SnapshotCreationOrigin,
+	): Result<undefined, { readonly kind: "checkpoint-creation-in-progress" }>
 	checkpointStatus(): SafetySessionCheckpointStatus
 	compileBashProfile(): CompiledSbpl
 	bashEnvironment(): Readonly<NodeJS.ProcessEnv>
@@ -67,11 +69,13 @@ class ManagedSafetySession implements SafetySession {
 		this.snapshotStore = snapshotStore
 	}
 
-	beginAgentRun(): Result<undefined, { readonly kind: "checkpoint-creation-in-progress" }> {
+	beginAgentRun(
+		origin: SnapshotCreationOrigin = { kind: "standalone" },
+	): Result<undefined, { readonly kind: "checkpoint-creation-in-progress" }> {
 		if (this.#checkpointRun?.status().kind === "creating") {
 			return err({ kind: "checkpoint-creation-in-progress" })
 		}
-		this.#checkpointRun = new CheckpointRun(async () => createSnapshot(this.snapshotStore))
+		this.#checkpointRun = new CheckpointRun(async () => createSnapshot(this.snapshotStore, { origin }))
 		return ok(undefined)
 	}
 

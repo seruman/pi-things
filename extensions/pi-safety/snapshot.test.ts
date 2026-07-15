@@ -128,7 +128,8 @@ test("publishes clone-backed snapshots with a manifest and preserves excluded li
 		assert.equal(fs.existsSync(path.join(published.directory, "tree", "node_modules")), false)
 
 		const manifest = JSON.parse(fs.readFileSync(path.join(published.directory, "manifest.json"), "utf8"))
-		assert.equal(manifest.version, 2)
+		assert.equal(manifest.version, 3)
+		assert.deepEqual(manifest.origin, { kind: "standalone" })
 		assert.equal(manifest.workspace, fixture.workspaceRoot)
 		assert.ok(
 			manifest.entries.some(

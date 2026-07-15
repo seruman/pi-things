@@ -23,13 +23,16 @@ test("missing configuration is empty while malformed shapes fail closed", () => 
 	withTestTempDirectory("pi-safety-config-invalid-", (root) => {
 		assert.deepEqual(loadProjectSafetyConfiguration(root), { ok: true, value: { additionalNoAccessPatterns: [] } })
 		fs.mkdirSync(path.join(root, ".pi"))
+		const configurationPath = path.join(root, ".pi", "pi-safety.json")
 		for (const input of [
 			{ version: 2, protectedPaths: [] },
 			{ version: 1, protectedPaths: [false] },
 			{ version: 1, protectedPaths: [], extra: true },
 		]) {
-			fs.writeFileSync(path.join(root, ".pi", "pi-safety.json"), JSON.stringify(input))
+			fs.writeFileSync(configurationPath, JSON.stringify(input))
 			assert.equal(loadProjectSafetyConfiguration(root).ok, false)
 		}
+		fs.writeFileSync(configurationPath, "{")
+		assert.equal(loadProjectSafetyConfiguration(root).ok, false)
 	})
 })

@@ -1,12 +1,14 @@
 import { createHash, randomBytes } from "node:crypto"
 import * as fs from "node:fs"
 import * as path from "node:path"
+import { z } from "zod"
 import {
 	type CanonicalExecutable,
 	type CanonicalPath,
 	parseCanonicalExecutable,
 	parseCanonicalPath,
 } from "./canonical-path"
+import { readJsonFile } from "./json-file"
 import { type Result, err, ok } from "./result"
 
 export type SocketIntegration =
@@ -41,6 +43,18 @@ export interface RawIntegrationEnvironment {
 }
 
 type IntegrationName = "git" | "ssh-agent" | "docker" | "wb"
+
+const dockerConfigurationSchema = z.object({ currentContext: z.string().min(1).optional() }).passthrough()
+const dockerContextMetadataSchema = z
+	.object({
+		Name: z.string(),
+		Endpoints: z
+			.object({
+				docker: z.object({ Host: z.string() }).passthrough(),
+			})
+			.passthrough(),
+	})
+	.passthrough()
 
 export type IntegrationError =
 	| {
@@ -201,40 +215,21 @@ function parseDockerEndpoint(input: string): Result<SocketIntegration, Integrati
 function readCurrentDockerContext(home: CanonicalPath): Result<string | undefined, IntegrationError> {
 	const config = path.join(home, ".docker", "config.json")
 	if (!fs.existsSync(config)) return ok(undefined)
-	const parsed = readJsonObject(config)
-	if (!parsed.ok) return parsed
-	if (!("currentContext" in parsed.value)) return ok(undefined)
-	return typeof parsed.value.currentContext === "string" && parsed.value.currentContext.length > 0
-		? ok(parsed.value.currentContext)
-		: integrationError("docker", config, "currentContext must be a non-empty string")
+	const configuration = readJsonFile(config, dockerConfigurationSchema)
+	return configuration.ok
+		? ok(configuration.value.currentContext)
+		: integrationError("docker", config, configuration.error.message)
 }
 
 function readDockerContextEndpoint(home: CanonicalPath, contextName: string): Result<string, IntegrationError> {
 	const digest = createHash("sha256").update(contextName).digest("hex")
 	const metadata = path.join(home, ".docker", "contexts", "meta", digest, "meta.json")
-	const parsed = readJsonObject(metadata)
-	if (!parsed.ok) return parsed
-	const input = parsed.value
-	if (input.Name !== contextName || typeof input.Endpoints !== "object" || input.Endpoints === null) {
+	const context = readJsonFile(metadata, dockerContextMetadataSchema)
+	if (!context.ok) return integrationError("docker", metadata, context.error.message)
+	if (context.value.Name !== contextName) {
 		return integrationError("docker", metadata, "context metadata does not match the selected context")
 	}
-	const endpoints = input.Endpoints as Record<string, unknown>
-	const docker = endpoints.docker
-	if (typeof docker !== "object" || docker === null || !("Host" in docker) || typeof docker.Host !== "string") {
-		return integrationError("docker", metadata, "context is missing Endpoints.docker.Host")
-	}
-	return ok(docker.Host)
-}
-
-function readJsonObject(file: string): Result<Record<string, unknown>, IntegrationError> {
-	try {
-		const parsed: unknown = JSON.parse(fs.readFileSync(file, "utf8"))
-		return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
-			? ok(parsed as Record<string, unknown>)
-			: integrationError("docker", file, "expected a JSON object")
-	} catch (cause) {
-		return integrationError("docker", file, cause)
-	}
+	return ok(context.value.Endpoints.docker.Host)
 }
 
 function findExecutable(

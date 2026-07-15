@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto"
 import * as fs from "node:fs"
 import * as path from "node:path"
+import { z } from "zod"
 import { type CanonicalPath, appendCanonicalPath, isCanonicalPathWithin, parseCanonicalPath } from "./canonical-path"
 import { type FilePolicy, decideFileAccess, decideSnapshotDisposition } from "./file-policy"
 import { type Result, err, ok } from "./result"
@@ -9,11 +10,36 @@ const snapshotPlanBrand: unique symbol = Symbol("SnapshotPlan")
 const snapshotStoreBrand: unique symbol = Symbol("SnapshotStore")
 const stagedSnapshotBrand: unique symbol = Symbol("StagedSnapshot")
 const publishedSnapshotBrand: unique symbol = Symbol("PublishedSnapshotRef")
-const snapshotIdBrand: unique symbol = Symbol("SnapshotId")
-const relativeSnapshotPathBrand: unique symbol = Symbol("RelativeSnapshotPath")
 
-export type SnapshotId = string & { readonly [snapshotIdBrand]: true }
-export type RelativeSnapshotPath = string & { readonly [relativeSnapshotPathBrand]: true }
+export const snapshotIdSchema = z
+	.string()
+	.regex(/^\d{17}-[0-9a-f]{16}$/u, "invalid snapshot identifier")
+	.brand<"SnapshotId">()
+export const snapshotSessionIdSchema = z
+	.string()
+	.regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u, "invalid snapshot session ID")
+	.brand<"SnapshotSessionId">()
+export const relativeSnapshotPathSchema = z
+	.string()
+	.refine(isRelativeSnapshotPath, "snapshot path must be normalized and relative")
+	.brand<"RelativeSnapshotPath">()
+
+export type SnapshotId = z.infer<typeof snapshotIdSchema>
+export type SnapshotSessionId = z.infer<typeof snapshotSessionIdSchema>
+export type RelativeSnapshotPath = z.infer<typeof relativeSnapshotPathSchema>
+
+export type SnapshotCreationOrigin =
+	| { readonly kind: "standalone" }
+	| { readonly kind: "pi-session"; readonly sessionId: SnapshotSessionId }
+
+export type SnapshotOrigin = SnapshotCreationOrigin | { readonly kind: "legacy" }
+
+export type SnapshotSessionIdError = { readonly kind: "invalid-snapshot-session-id" }
+
+export function parseSnapshotSessionId(input: string): Result<SnapshotSessionId, SnapshotSessionIdError> {
+	const parsed = snapshotSessionIdSchema.safeParse(input)
+	return parsed.success ? ok(parsed.data) : err({ kind: "invalid-snapshot-session-id" })
+}
 
 export type SnapshotFileStorage = { readonly kind: "ordinary" } | { readonly kind: "protected" }
 
@@ -122,20 +148,22 @@ function errorCode(cause: unknown): string | undefined {
 	return typeof cause.code === "string" ? cause.code : undefined
 }
 
+function isRelativeSnapshotPath(input: string): boolean {
+	if (input.length === 0 || path.isAbsolute(input) || input.includes("\0")) return false
+	return input.split(path.sep).every((component) => component !== "" && component !== "." && component !== "..")
+}
+
 export function parseRelativeSnapshotPath(input: string): Result<RelativeSnapshotPath, SnapshotError> {
-	if (input.length === 0 || path.isAbsolute(input) || input.includes("\0")) {
-		return err({ kind: "path-resolution", path: input, message: "snapshot path must be non-empty and relative" })
-	}
-	const components = input.split(path.sep)
-	if (components.some((component) => component === "" || component === "." || component === "..")) {
-		return err({ kind: "path-resolution", path: input, message: "snapshot path contains an invalid component" })
-	}
-	return ok(input as RelativeSnapshotPath)
+	const parsed = relativeSnapshotPathSchema.safeParse(input)
+	return parsed.success
+		? ok(parsed.data)
+		: err({ kind: "path-resolution", path: input, message: "snapshot path must be normalized and relative" })
 }
 
 export function parseSnapshotId(input: string): Result<SnapshotId, SnapshotError> {
-	return /^\d{17}-[0-9a-f]{16}$/.test(input)
-		? ok(input as SnapshotId)
+	const parsed = snapshotIdSchema.safeParse(input)
+	return parsed.success
+		? ok(parsed.data)
 		: err({ kind: "path-resolution", path: input, message: "invalid snapshot identifier" })
 }
 
@@ -388,9 +416,10 @@ function checkedLiveStat(
 export function stageSnapshot(
 	plan: SnapshotPlan,
 	projectDirectory: CanonicalPath,
+	origin: SnapshotCreationOrigin = { kind: "standalone" },
 ): Result<StagedSnapshot, SnapshotError> {
 	try {
-		return stageSnapshotTransaction(plan, projectDirectory)
+		return stageSnapshotTransaction(plan, projectDirectory, origin)
 	} catch (cause) {
 		return err({
 			kind: "io",
@@ -404,6 +433,7 @@ export function stageSnapshot(
 function stageSnapshotTransaction(
 	plan: SnapshotPlan,
 	projectDirectory: CanonicalPath,
+	origin: SnapshotCreationOrigin,
 ): Result<StagedSnapshot, SnapshotError> {
 	const { id, createdAt } = generateSnapshotIdentity()
 	const stagingRaw = path.join(projectDirectory, `.staging-${id}`)
@@ -458,10 +488,11 @@ function stageSnapshotTransaction(
 			fs.utimesSync(directory.destination, directory.mtimeMs / 1000, directory.mtimeMs / 1000)
 		}
 		const manifest = {
-			version: 2,
+			version: 3,
 			id,
 			createdAt,
 			workspace: plan.workspaceRoot,
+			origin,
 			entries: plan.entries,
 		}
 		fs.writeFileSync(path.join(staging.value, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, {
@@ -532,7 +563,7 @@ function pruneSnapshots(store: SnapshotStore, preserved: ReadonlySet<string>): R
 
 export function createSnapshot(
 	store: SnapshotStore,
-	options: { readonly preserve?: SnapshotId } = {},
+	options: { readonly preserve?: SnapshotId; readonly origin?: SnapshotCreationOrigin } = {},
 ): Result<PublishedSnapshotRef, SnapshotError> {
 	try {
 		return createSnapshotTransaction(store, options)
@@ -548,7 +579,7 @@ export function createSnapshot(
 
 function createSnapshotTransaction(
 	store: SnapshotStore,
-	options: { readonly preserve?: SnapshotId },
+	options: { readonly preserve?: SnapshotId; readonly origin?: SnapshotCreationOrigin },
 ): Result<PublishedSnapshotRef, SnapshotError> {
 	const plan = planSnapshot({ workspaceRoot: store.workspaceRoot, filePolicy: store.filePolicy })
 	if (!plan.ok) return plan
@@ -566,7 +597,7 @@ function createSnapshotTransaction(
 		}
 		const cloneSupport = probeCloneSupport(store.projectDirectory)
 		if (!cloneSupport.ok) return cloneSupport
-		const staged = stageSnapshot(plan.value, store.projectDirectory)
+		const staged = stageSnapshot(plan.value, store.projectDirectory, options.origin ?? { kind: "standalone" })
 		if (!staged.ok) return staged
 		const published = publishSnapshot(staged.value)
 		if (!published.ok) {

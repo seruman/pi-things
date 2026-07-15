@@ -1,4 +1,3 @@
-import * as fs from "node:fs"
 import * as path from "node:path"
 import {
 	type AssistantMessage,
@@ -8,41 +7,21 @@ import {
 	createAssistantMessageEventStream,
 } from "@earendil-works/pi-ai"
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
+import { z } from "zod"
+import { readJsonFile } from "./json-file"
 
-type ScriptedResponse =
-	| { readonly kind: "text"; readonly text: string }
-	| {
-			readonly kind: "tool"
-			readonly id: string
-			readonly name: string
-			readonly arguments: Record<string, unknown>
-	  }
+const scriptedResponseSchema = z.discriminatedUnion("kind", [
+	z.object({ kind: z.literal("text"), text: z.string() }),
+	z.object({
+		kind: z.literal("tool"),
+		id: z.string(),
+		name: z.string(),
+		arguments: z.record(z.unknown()),
+	}),
+])
+const scriptSchema = z.array(scriptedResponseSchema).min(1)
 
-function parseScript(input: unknown): readonly ScriptedResponse[] {
-	if (!Array.isArray(input) || input.length === 0) throw new Error("script must be a non-empty array")
-	return input.map((item, index) => {
-		if (typeof item !== "object" || item === null || !("kind" in item)) {
-			throw new Error(`script response ${index} must be an object with a kind`)
-		}
-		if (item.kind === "text" && "text" in item && typeof item.text === "string") {
-			return { kind: "text", text: item.text }
-		}
-		if (
-			item.kind === "tool" &&
-			"id" in item &&
-			typeof item.id === "string" &&
-			"name" in item &&
-			typeof item.name === "string" &&
-			"arguments" in item &&
-			typeof item.arguments === "object" &&
-			item.arguments !== null &&
-			!Array.isArray(item.arguments)
-		) {
-			return { kind: "tool", id: item.id, name: item.name, arguments: { ...item.arguments } }
-		}
-		throw new Error(`script response ${index} has an invalid shape`)
-	})
-}
+type ScriptedResponse = z.infer<typeof scriptedResponseSchema>
 
 function emptyAssistantMessage(model: Model<string>): AssistantMessage {
 	return {
@@ -103,7 +82,9 @@ export default function scriptedProvider(pi: ExtensionAPI): void {
 	if (!scriptPath || !path.isAbsolute(scriptPath)) {
 		throw new Error("PI_SAFETY_TEST_SCRIPT must be an absolute path")
 	}
-	const script = parseScript(JSON.parse(fs.readFileSync(scriptPath, "utf8")))
+	const script = readJsonFile(scriptPath, scriptSchema)
+	if (!script.ok) throw new Error(`invalid script: ${script.error.message}`)
+	const responses = script.value
 	let responseIndex = 0
 
 	pi.registerProvider("pi-safety-scripted", {
@@ -123,7 +104,7 @@ export default function scriptedProvider(pi: ExtensionAPI): void {
 			},
 		],
 		streamSimple: (model: Model<string>, _context: unknown, _options?: SimpleStreamOptions) => {
-			const response = script[responseIndex]
+			const response = responses[responseIndex]
 			if (!response) throw new Error(`script exhausted after ${responseIndex} responses`)
 			responseIndex += 1
 			return streamResponse(model, response)

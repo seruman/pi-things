@@ -20,6 +20,7 @@ import {
 	type LoadedSnapshot,
 	type SnapshotHistoryAccess,
 	type SnapshotHistoryError,
+	type SnapshotSummary,
 	listSnapshots,
 	loadSnapshot,
 	verifySnapshot,
@@ -49,9 +50,17 @@ export function runSnapshotCommand(
 			const listed = listSnapshots(store, historyAccess)
 			if (!listed.ok) return err({ kind: "history", cause: listed.error })
 			return ok(
-				listed.value
-					.map((snapshot) => `${snapshot.id}\t${snapshot.createdAt}\t${snapshot.entryCount}\t${snapshot.workspace}`)
-					.join("\n"),
+				formatTable([
+					["ID", "CREATED_AT", "ENTRIES", "RECLAIMABLE_BYTES", "SESSION", "WORKSPACE"],
+					...listed.value.map((snapshot) => [
+						snapshot.id,
+						snapshot.createdAt,
+						String(snapshot.entryCount),
+						String(snapshot.reclaimableBytes ?? "-"),
+						formatSnapshotSession(snapshot.origin),
+						snapshot.workspace,
+					]),
+				]),
 			)
 		}
 		case "create": {
@@ -115,6 +124,25 @@ export function runSnapshotCommand(
 			return collected.ok ? ok("gc complete") : err({ kind: "snapshot", cause: collected.error })
 		}
 	}
+}
+
+function formatSnapshotSession(origin: SnapshotSummary["origin"]): string {
+	switch (origin.kind) {
+		case "pi-session":
+			return origin.sessionId
+		case "standalone":
+		case "legacy":
+			return origin.kind
+	}
+}
+
+function formatTable(rows: readonly (readonly string[])[]): string {
+	const widths = rows[0].map((_, column) => Math.max(...rows.map((row) => row[column].length)))
+	return rows
+		.map((row) =>
+			row.map((cell, column) => (column === row.length - 1 ? cell : cell.padEnd(widths[column]))).join("  "),
+		)
+		.join("\n")
 }
 
 function historyAccessFor(authority: SnapshotCommandAuthority): SnapshotHistoryAccess {

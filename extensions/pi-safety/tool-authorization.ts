@@ -1,3 +1,4 @@
+import { z } from "zod"
 import { type BuiltinToolPathError, resolveBuiltinToolPath } from "./builtin-tool-path"
 import type { CanonicalPath } from "./canonical-path"
 import { type FileAccess, type FilePolicy, decideFileAccess } from "./file-policy"
@@ -5,6 +6,9 @@ import { type Result, err, ok } from "./result"
 
 type MutatingBuiltinTool = "write" | "edit"
 type GuardedBuiltinTool = "read" | MutatingBuiltinTool
+
+const bashInputSchema = z.object({ command: z.string() }).passthrough()
+const pathInputSchema = z.object({ path: z.string() }).passthrough()
 
 export type GuardedToolCall =
 	| { readonly kind: "bash" }
@@ -35,7 +39,7 @@ export function authorizeBuiltinToolCall(
 	policy: FilePolicy,
 ): Result<GuardedToolCall, ToolAuthorizationError> {
 	if (toolName === "bash") {
-		if (typeof input !== "object" || input === null || !("command" in input) || typeof input.command !== "string") {
+		if (!bashInputSchema.safeParse(input).success) {
 			return err({ kind: "invalid-tool-input", tool: toolName, reason: "expected an object with a string command" })
 		}
 		return ok({ kind: "bash" })
@@ -82,8 +86,9 @@ function readPathArgument(
 	tool: string,
 	input: unknown,
 ): Result<string, Extract<ToolAuthorizationError, { kind: "invalid-tool-input" }>> {
-	if (typeof input !== "object" || input === null || !("path" in input) || typeof input.path !== "string") {
+	const decoded = pathInputSchema.safeParse(input)
+	if (!decoded.success) {
 		return err({ kind: "invalid-tool-input", tool, reason: "expected an object with a string path" })
 	}
-	return ok(input.path)
+	return ok(decoded.data.path)
 }
