@@ -5,6 +5,7 @@ import { parseSnapshotCommand, parseSnapshotInvocation } from "./snapshot-cli"
 import { withTestTempDirectory } from "./test-temp-directory"
 
 const id = "20260713213049840-206bc3b657fa7807"
+const secondId = "20260713213100840-316bc3b657fa7808"
 
 test("parses legal snapshot CLI command shapes", () => {
 	withTestTempDirectory("snapshot-cli-", (root) => {
@@ -16,6 +17,8 @@ test("parses legal snapshot CLI command shapes", () => {
 			[["create"], "create"],
 			[["diff", id], "diff"],
 			[["diff", id, "--", "src/file.ts"], "diff"],
+			[["diff", id, secondId], "diff"],
+			[["diff", id, secondId, "--", "src/file.ts"], "diff"],
 			[["show", id, "src/file.ts"], "show"],
 			[["restore", id], "restore"],
 			[["restore", id, "--dry-run"], "restore"],
@@ -49,14 +52,24 @@ test("parses an explicit project once and defaults restores to dry-run", () => {
 		if (apply.ok && apply.value.command.kind === "restore") {
 			assert.equal(apply.value.command.execution, "apply")
 		}
+
+		const compared = parseSnapshotInvocation(["--project", root, "diff", id, secondId, "--", "file.txt"])
+		assert.equal(compared.ok, true)
+		if (compared.ok && compared.value.command.kind === "diff") {
+			assert.deepEqual(compared.value.command.comparison, { kind: "snapshot", id: secondId })
+		}
 	})
 })
 
 test("rejects malformed IDs, paths, separators, and argument counts", () => {
 	for (const args of [
 		["create", "extra"],
+		["diff"],
 		["diff", "bad-id"],
+		["diff", id, "bad-second-id"],
+		["diff", id, secondId, "src/file.ts"],
 		["diff", id, "--"],
+		["diff", id, secondId, "--"],
 		["diff", id, "--", "../escape"],
 		["show", id, "../escape"],
 		["restore", id, "src/file.ts"],

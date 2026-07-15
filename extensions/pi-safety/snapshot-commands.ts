@@ -93,7 +93,7 @@ export function runSnapshotCommand(
 			}
 		}
 		case "diff":
-			return diffSnapshot(store, command.id, command.scope, historyAccess)
+			return diffSnapshot(store, command.id, command.comparison, command.scope, historyAccess)
 		case "restore": {
 			const loaded = loadSnapshot(store, command.id, historyAccess)
 			if (!loaded.ok) return err({ kind: "history", cause: loaded.error })
@@ -163,24 +163,37 @@ function assertNever(value: never): never {
 function diffSnapshot(
 	store: SnapshotStore,
 	id: Parameters<typeof loadSnapshot>[1],
+	comparison: Extract<SnapshotCommand, { kind: "diff" }>["comparison"],
 	scope: RestoreScope,
 	historyAccess: SnapshotHistoryAccess,
 ): Result<string, SnapshotCommandRunError> {
 	const loaded = loadSnapshot(store, id, historyAccess)
 	if (!loaded.ok) return err({ kind: "history", cause: loaded.error })
-	const live =
-		scope.kind === "all"
-			? observeWorkspace({ workspaceRoot: store.workspaceRoot, filePolicy: store.filePolicy })
-			: observeWorkspacePaths({
-					workspaceRoot: store.workspaceRoot,
-					filePolicy: store.filePolicy,
-					paths: scope.paths,
-				})
-	if (!live.ok) return err({ kind: "snapshot", cause: live.error })
+	let comparedSnapshot: LoadedSnapshot | undefined
+	let afterEntries: readonly SnapshotPlanEntry[]
+	let nonComparable: ReadonlyMap<RelativeSnapshotPath, { readonly entryType: string }>
+	if (comparison.kind === "snapshot") {
+		const compared = loadSnapshot(store, comparison.id, historyAccess)
+		if (!compared.ok) return err({ kind: "history", cause: compared.error })
+		comparedSnapshot = compared.value
+		afterEntries = compared.value.manifest.entries
+		nonComparable = new Map()
+	} else {
+		const live =
+			scope.kind === "all"
+				? observeWorkspace({ workspaceRoot: store.workspaceRoot, filePolicy: store.filePolicy })
+				: observeWorkspacePaths({
+						workspaceRoot: store.workspaceRoot,
+						filePolicy: store.filePolicy,
+						paths: scope.paths,
+					})
+		if (!live.ok) return err({ kind: "snapshot", cause: live.error })
+		afterEntries = live.value.entries
+		nonComparable = new Map(live.value.nonComparable.map((entry) => [entry.path, entry]))
+	}
 	const snapshotEntries = new Map(loaded.value.manifest.entries.map((entry) => [entry.path, entry]))
-	const liveEntries = new Map(live.value.entries.map((entry) => [entry.path, entry]))
-	const nonComparable = new Map(live.value.nonComparable.map((entry) => [entry.path, entry]))
-	const candidatePaths = [...new Set([...snapshotEntries.keys(), ...liveEntries.keys(), ...nonComparable.keys()])]
+	const comparedEntries = new Map(afterEntries.map((entry) => [entry.path, entry]))
+	const candidatePaths = [...new Set([...snapshotEntries.keys(), ...comparedEntries.keys(), ...nonComparable.keys()])]
 	const paths = candidatePaths
 		.filter(
 			(relativePath) =>
@@ -189,6 +202,7 @@ function diffSnapshot(
 		)
 		.sort()
 	const changes: string[] = []
+	const mutuallyExcluded: RelativeSnapshotPath[] = []
 	for (const relativePath of paths) {
 		const unsupported = nonComparable.get(relativePath)
 		if (unsupported !== undefined) {
@@ -196,19 +210,27 @@ function diffSnapshot(
 			continue
 		}
 		const before = snapshotEntries.get(relativePath)
-		const after = liveEntries.get(relativePath)
+		const after = comparedEntries.get(relativePath)
+		if (before?.kind === "excluded" && after?.kind === "excluded") {
+			mutuallyExcluded.push(relativePath)
+			continue
+		}
 		if (before?.kind === "excluded" || after?.kind === "excluded") {
-			changes.push(`excluded\t${relativePath}`)
+			const excludedSide =
+				before?.kind === "excluded" ? loaded.value.manifest.id : (comparedSnapshot?.manifest.id ?? "live")
+			changes.push(`not-compared\t${relativePath}\texcluded in ${excludedSide}`)
 			continue
 		}
 		if (!before) changes.push(`added\t${relativePath}`)
 		else if (!after) changes.push(`deleted\t${relativePath}`)
 		else if (entryChanged(before, after)) changes.push(`modified\t${relativePath}`)
 		else if (before.kind === "file" && after.kind === "file") {
-			const snapshotPath = storedSnapshotPath(loaded.value.directory, before)
-			const livePath = path.join(store.workspaceRoot, after.path)
+			const beforePath = storedSnapshotPath(loaded.value.directory, before)
+			const afterPath = comparedSnapshot
+				? storedSnapshotPath(comparedSnapshot.directory, after)
+				: path.join(store.workspaceRoot, after.path)
 			try {
-				if (!fs.readFileSync(snapshotPath).equals(fs.readFileSync(livePath))) {
+				if (!fs.readFileSync(beforePath).equals(fs.readFileSync(afterPath))) {
 					changes.push(`modified\t${relativePath}`)
 				}
 			} catch (cause) {
@@ -221,13 +243,18 @@ function diffSnapshot(
 			const patch = createSelectedTextPatch(
 				store,
 				loaded.value,
+				comparedSnapshot,
 				selected,
 				snapshotEntries.get(selected),
-				liveEntries.get(selected),
+				comparedEntries.get(selected),
 			)
 			if (!patch.ok) return patch
 			if (patch.value !== undefined) changes.push(patch.value)
 		}
+	}
+	if (changes.length === 0) changes.push("no differences in included paths")
+	if (mutuallyExcluded.length > 0) {
+		changes.push("", "not compared (excluded in both):", ...mutuallyExcluded.map((relativePath) => `  ${relativePath}`))
 	}
 	return ok(changes.join("\n"))
 }
@@ -235,6 +262,7 @@ function diffSnapshot(
 function createSelectedTextPatch(
 	store: SnapshotStore,
 	snapshot: LoadedSnapshot,
+	comparedSnapshot: LoadedSnapshot | undefined,
 	relativePath: RelativeSnapshotPath,
 	before: SnapshotPlanEntry | undefined,
 	after: SnapshotPlanEntry | undefined,
@@ -244,7 +272,13 @@ function createSelectedTextPatch(
 	let afterBytes = Buffer.alloc(0)
 	try {
 		if (before?.kind === "file") beforeBytes = fs.readFileSync(storedSnapshotPath(snapshot.directory, before))
-		if (after?.kind === "file") afterBytes = fs.readFileSync(path.join(store.workspaceRoot, relativePath))
+		if (after?.kind === "file") {
+			afterBytes = fs.readFileSync(
+				comparedSnapshot
+					? storedSnapshotPath(comparedSnapshot.directory, after)
+					: path.join(store.workspaceRoot, relativePath),
+			)
+		}
 	} catch (cause) {
 		return ioError("diff-text", relativePath, cause)
 	}
@@ -252,8 +286,17 @@ function createSelectedTextPatch(
 	const beforeText = decodeDiffText(beforeBytes)
 	const afterText = decodeDiffText(afterBytes)
 	if (beforeText === undefined || afterText === undefined) return ok(`binary-or-large\t${relativePath}`)
+	const beforeLabel = comparedSnapshot ? snapshot.manifest.id : "snapshot"
+	const afterLabel = comparedSnapshot?.manifest.id ?? "live"
 	return ok(
-		createTwoFilesPatch(`snapshot/${relativePath}`, `live/${relativePath}`, beforeText, afterText, "snapshot", "live"),
+		createTwoFilesPatch(
+			`${beforeLabel}/${relativePath}`,
+			`${afterLabel}/${relativePath}`,
+			beforeText,
+			afterText,
+			beforeLabel,
+			afterLabel,
+		),
 	)
 }
 

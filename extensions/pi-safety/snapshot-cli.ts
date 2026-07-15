@@ -7,7 +7,7 @@ import { type RelativeSnapshotPath, type SnapshotId, parseRelativeSnapshotPath, 
 export const SNAPSHOT_USAGE = `Usage:
   pi-snapshot [--project <absolute-project-root>] list
   pi-snapshot [--project <absolute-project-root>] create
-  pi-snapshot [--project <absolute-project-root>] diff <snapshot> [-- <path>...]
+  pi-snapshot [--project <absolute-project-root>] diff <snapshot> [<snapshot>] [-- <path>...]
   pi-snapshot [--project <absolute-project-root>] show <snapshot> <path>
   pi-snapshot [--project <absolute-project-root>] restore <snapshot> [--dry-run|--apply]
   pi-snapshot [--project <absolute-project-root>] restore <snapshot> [--dry-run|--apply] -- <path>...
@@ -21,7 +21,12 @@ export type SnapshotCommand =
 	| { readonly kind: "help" }
 	| { readonly kind: "list" }
 	| { readonly kind: "create" }
-	| { readonly kind: "diff"; readonly id: SnapshotId; readonly scope: RestoreScope }
+	| {
+			readonly kind: "diff"
+			readonly id: SnapshotId
+			readonly comparison: { readonly kind: "live" } | { readonly kind: "snapshot"; readonly id: SnapshotId }
+			readonly scope: RestoreScope
+	  }
 	| { readonly kind: "show"; readonly id: SnapshotId; readonly path: RelativeSnapshotPath }
 	| {
 			readonly kind: "restore"
@@ -71,18 +76,7 @@ export function parseSnapshotCommand(args: readonly string[]): Result<SnapshotCo
 	if (args.length === 0 || (args.length === 1 && args[0] === "list")) return ok({ kind: "list" })
 	if (args.length === 1 && args[0] === "create") return ok({ kind: "create" })
 	if (args.length === 1 && args[0] === "gc") return ok({ kind: "gc" })
-	if (args[0] === "diff" && args.length === 2) {
-		const id = commandId(args[1], args)
-		return id.ok ? ok({ kind: "diff", id: id.value, scope: { kind: "all" } }) : id
-	}
-	if (args[0] === "diff" && args.length >= 4 && args[2] === "--") {
-		const id = commandId(args[1], args)
-		if (!id.ok) return id
-		const scope = selectedRestoreScope(args.slice(3))
-		return scope.ok
-			? ok({ kind: "diff", id: id.value, scope: scope.value })
-			: invalid(args, `invalid diff selection: ${scope.error.kind}`)
-	}
+	if (args[0] === "diff") return parseDiffCommand(args)
 	if (args[0] === "verify" && args.length === 2) {
 		const id = commandId(args[1], args)
 		return id.ok ? ok({ kind: "verify", id: id.value }) : id
@@ -138,6 +132,26 @@ function isDirectory(pathname: CanonicalPath): boolean {
 	} catch {
 		return false
 	}
+}
+
+function parseDiffCommand(args: readonly string[]): Result<SnapshotCommand, SnapshotCommandError> {
+	if (args.length < 2) return invalid(args, "diff requires a snapshot identifier")
+	const id = commandId(args[1], args)
+	if (!id.ok) return id
+	let comparison: Extract<SnapshotCommand, { kind: "diff" }>["comparison"] = { kind: "live" }
+	let separatorOffset = 2
+	if (args[2] !== undefined && args[2] !== "--") {
+		const comparisonId = commandId(args[2], args)
+		if (!comparisonId.ok) return comparisonId
+		comparison = { kind: "snapshot", id: comparisonId.value }
+		separatorOffset = 3
+	}
+	if (args.length === separatorOffset) return ok({ kind: "diff", id: id.value, comparison, scope: { kind: "all" } })
+	if (args[separatorOffset] !== "--") return invalid(args, "diff paths must follow --")
+	const scope = selectedRestoreScope(args.slice(separatorOffset + 1))
+	return scope.ok
+		? ok({ kind: "diff", id: id.value, comparison, scope: scope.value })
+		: invalid(args, `invalid diff selection: ${scope.error.kind}`)
 }
 
 function selectedRestoreCommand(

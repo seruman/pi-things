@@ -8,9 +8,9 @@ Pi's built-in `read`, `write`, and `edit` tools still work normally. Pi Safety c
 
 The defaults are defined in `default-rules.ts` with simple `noAccess`, `readOnly`, `readWrite`, and snapshot-exclusion rules. Built-in tools, Bash, movement protection, snapshots, and diagnostics all use those same rules.
 
-Before the first command that can change files in a request, Pi Safety creates a fast APFS snapshot of the project. It creates only one snapshot per request and keeps up to 20 snapshots for each project. Generated folders such as `.git`, `.wb`, `node_modules`, `dist`, and `target` are not included.
+Before the first command that can change files in a request, Pi Safety creates a fast APFS snapshot of the project. It records the checkpoint as session metadata without sending it to the model. The snapshot manifest stores the Pi session ID, while snapshots created outside Pi are marked as standalone. It creates only one snapshot per request and keeps up to 20 snapshots for each project. Generated folders such as `.git`, `.wb`, `node_modules`, `dist`, and `target` are not included.
 
-The `pi-snapshot` command can list, inspect, compare, verify, export, and restore snapshots. Restore starts as a dry run. Use `--apply` when you want it to change files.
+The `pi-snapshot` command can list, inspect, verify, export, and restore snapshots. It can compare a snapshot with the live project or with another snapshot. Its list reports the sum of per-entry bytes APFS says would be freed immediately. Restore starts as a dry run. Use `--apply` when you want it to change files.
 
 Projects can list extra secret paths in `.pi/pi-safety.json`:
 

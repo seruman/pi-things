@@ -53,7 +53,7 @@ test("snapshot commands list, show, diff, verify, restore, export, and collect",
 		const diff = unwrap(runSnapshotCommand(value.store, command(["diff", value.snapshot.id]), { kind: "sandboxed" }))
 		assert.match(diff, /modified\tfile\.txt/)
 		assert.match(diff, /added\tadded\.txt/)
-		assert.match(diff, /excluded\tnode_modules/)
+		assert.match(diff, /not-compared\tnode_modules\texcluded in live/)
 		assert.match(diff, /non-comparable\truntime\.fifo\tfifo/)
 		const textDiff = unwrap(
 			runSnapshotCommand(value.store, command(["diff", value.snapshot.id, "--", "file.txt"]), {
@@ -89,6 +89,52 @@ test("snapshot commands list, show, diff, verify, restore, export, and collect",
 		unwrap(runSnapshotCommand(value.store, command(["export", value.snapshot.id, destination]), { kind: "sandboxed" }))
 		assert.equal(fs.readFileSync(path.join(destination, "file.txt"), "utf8"), "before")
 		assert.equal(unwrap(runSnapshotCommand(value.store, command(["gc"]), { kind: "sandboxed" })), "gc complete")
+	})
+})
+
+test("diff compares two snapshots without consulting the live workspace", () => {
+	withTestTempDirectory("snapshot-command-history-diff-", (root) => {
+		const value = fixture(root)
+		fs.writeFileSync(path.join(value.workspace, "file.txt"), "after")
+		fs.writeFileSync(path.join(value.workspace, "added.txt"), "added")
+		const second = unwrap(createSnapshot(value.store))
+		fs.writeFileSync(path.join(value.workspace, "file.txt"), "later-live-state")
+
+		const compared = unwrap(
+			runSnapshotCommand(value.store, command(["diff", value.snapshot.id, second.id]), { kind: "sandboxed" }),
+		)
+		assert.match(compared, /modified\tfile\.txt/)
+		assert.match(compared, /added\tadded\.txt/)
+
+		const selected = unwrap(
+			runSnapshotCommand(value.store, command(["diff", value.snapshot.id, second.id, "--", "file.txt"]), {
+				kind: "sandboxed",
+			}),
+		)
+		assert.match(selected, new RegExp(`--- ${value.snapshot.id}/file\\.txt`))
+		assert.match(selected, new RegExp(`\\+\\+\\+ ${second.id}/file\\.txt`))
+		assert.match(selected, /-before/)
+		assert.match(selected, /\+after/)
+		assert.doesNotMatch(selected, /later-live-state/)
+
+		const reversed = unwrap(
+			runSnapshotCommand(value.store, command(["diff", second.id, value.snapshot.id]), { kind: "sandboxed" }),
+		)
+		assert.match(reversed, /deleted\tadded\.txt/)
+	})
+})
+
+test("diff distinguishes identical included paths from mutually excluded paths", () => {
+	withTestTempDirectory("snapshot-command-excluded-diff-", (root) => {
+		const value = fixture(root)
+		fs.mkdirSync(path.join(value.workspace, "node_modules"))
+		const first = unwrap(createSnapshot(value.store))
+		const second = unwrap(createSnapshot(value.store))
+
+		const compared = unwrap(
+			runSnapshotCommand(value.store, command(["diff", first.id, second.id]), { kind: "sandboxed" }),
+		)
+		assert.equal(compared, "no differences in included paths\n\nnot compared (excluded in both):\n  node_modules")
 	})
 })
 
