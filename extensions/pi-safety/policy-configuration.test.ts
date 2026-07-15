@@ -2,13 +2,14 @@ import { test } from "bun:test"
 import assert from "node:assert/strict"
 import * as fs from "node:fs"
 import * as path from "node:path"
+import { createDefaultPolicy } from "./default-policy"
 import { parseInitialSafetyConfiguration } from "./policy-configuration"
 import { unwrap } from "./result"
 import { withTestTempDirectory } from "./test-temp-directory"
 import { authorizeBuiltinToolCall } from "./tool-authorization"
 
 test("initial policy protects ambient credentials, project secrets, snapshots, and Pi state", () => {
-	withTestTempDirectory("file-policy-configuration-", (root) => {
+	withTestTempDirectory("policy-configuration-", (root) => {
 		const workspace = path.join(root, "workspace")
 		const home = path.join(root, "home")
 		const stateHome = path.join(root, "state")
@@ -32,7 +33,7 @@ test("initial policy protects ambient credentials, project secrets, snapshots, a
 			fs.writeFileSync(file, "x")
 		}
 
-		const policy = unwrap(
+		const configuration = unwrap(
 			parseInitialSafetyConfiguration({
 				cwd: workspace,
 				home,
@@ -40,7 +41,14 @@ test("initial policy protects ambient credentials, project secrets, snapshots, a
 				piConfigDir,
 				additionalNoAccessPatterns: ["secrets/custom.txt"],
 			}),
-		).filePolicy
+		)
+		const policy = unwrap(
+			createDefaultPolicy({
+				paths: configuration.paths,
+				additionalNoAccessPatterns: configuration.additionalNoAccessPatterns,
+				sandbox: { kind: "disabled" },
+			}),
+		)
 
 		for (const secret of [privateKey, credentials, envFile, configuredSecret, piAuth]) {
 			const result = authorizeBuiltinToolCall("read", { path: secret }, policy)
@@ -78,8 +86,8 @@ test("initial policy protects ambient credentials, project secrets, snapshots, a
 	})
 })
 
-test("default rule path failures are returned instead of thrown", () => {
-	withTestTempDirectory("file-policy-path-error-", (root) => {
+test("default policy path failures are returned instead of thrown", () => {
+	withTestTempDirectory("policy-path-error-", (root) => {
 		const workspace = path.join(root, "workspace")
 		const home = path.join(root, "home")
 		const stateHome = path.join(root, "state")
@@ -87,17 +95,21 @@ test("default rule path failures are returned instead of thrown", () => {
 		for (const directory of [workspace, home, stateHome, piConfigDir]) fs.mkdirSync(directory)
 		fs.symlinkSync(path.join(root, "missing-ssh"), path.join(home, ".ssh"))
 
-		const parsed = parseInitialSafetyConfiguration({
-			cwd: workspace,
-			home,
-			stateHome,
-			piConfigDir,
-			additionalNoAccessPatterns: [],
+		const configuration = unwrap(
+			parseInitialSafetyConfiguration({
+				cwd: workspace,
+				home,
+				stateHome,
+				piConfigDir,
+				additionalNoAccessPatterns: [],
+			}),
+		)
+		const policy = createDefaultPolicy({
+			paths: configuration.paths,
+			additionalNoAccessPatterns: configuration.additionalNoAccessPatterns,
+			sandbox: { kind: "disabled" },
 		})
-		assert.equal(parsed.ok, false)
-		if (!parsed.ok) {
-			assert.equal(parsed.error.kind, "default-rules")
-			if (parsed.error.kind === "default-rules") assert.equal(parsed.error.cause.kind, "rule-path")
-		}
+		assert.equal(policy.ok, false)
+		if (!policy.ok) assert.equal(policy.error.kind, "rule-path")
 	})
 })

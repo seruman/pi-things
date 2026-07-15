@@ -3,7 +3,7 @@ import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
 import * as fs from "node:fs"
 import * as path from "node:path"
-import { createSnapshotFilePolicy } from "./default-rules"
+import { createSnapshotPolicy } from "./default-policy"
 import { unwrap } from "./result"
 import { createSnapshot, createSnapshotStore } from "./snapshot"
 import { parseSnapshotCommand } from "./snapshot-cli"
@@ -22,7 +22,7 @@ function fixture(root: string) {
 		createSnapshotStore({
 			workspaceRoot,
 			stateRoot: canonicalPath(state),
-			filePolicy: unwrap(createSnapshotFilePolicy(workspaceRoot)),
+			policy: unwrap(createSnapshotPolicy(workspaceRoot)),
 		}),
 	)
 	const snapshot = unwrap(createSnapshot(store))

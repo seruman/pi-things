@@ -1,8 +1,6 @@
-import { compileBashProfile } from "./bash-profile"
 import { parseCanonicalPath } from "./canonical-path"
 import { type CheckpointError, CheckpointRun, type CheckpointStatus } from "./checkpoint"
-import { type DefaultRulesError, createBashFilePolicy } from "./default-rules"
-import type { FilePolicy } from "./file-policy"
+import { type DefaultPolicyError, createDefaultPolicy } from "./default-policy"
 import {
 	type BashIntegrations,
 	type IntegrationError,
@@ -11,25 +9,28 @@ import {
 	parseBashIntegrations,
 	prepareBashIntegrations,
 } from "./integrations"
+import type { Policy } from "./policy"
 import {
-	type FilePolicyConfigurationError,
-	type RawInitialFilePolicy,
+	type PolicyConfigurationError,
+	type RawPolicyConfiguration,
 	parseInitialSafetyConfiguration,
 } from "./policy-configuration"
+import { describePolicy } from "./policy-description"
 import { type Result, err, ok } from "./result"
 import { createConfiguredSnapshotStore } from "./safety-filesystem"
 import type { CompiledSbpl } from "./sbpl"
+import { emitSeatbelt } from "./seatbelt"
 import { type SnapshotCreationOrigin, type SnapshotError, type SnapshotStore, createSnapshot } from "./snapshot"
 import { type ToolAuthorizationError, authorizeBuiltinToolCall } from "./tool-authorization"
 
-export interface RawSafetySessionConfiguration extends RawInitialFilePolicy {
+export interface RawSafetySessionConfiguration extends RawPolicyConfiguration {
 	readonly privateTemp: string
 	readonly integrationEnvironment: RawIntegrationEnvironment
 }
 
 export type SafetySessionError =
-	| { readonly kind: "file-policy"; readonly cause: FilePolicyConfigurationError }
-	| { readonly kind: "bash-file-policy"; readonly cause: DefaultRulesError }
+	| { readonly kind: "policy-configuration"; readonly cause: PolicyConfigurationError }
+	| { readonly kind: "policy"; readonly cause: DefaultPolicyError }
 	| { readonly kind: "private-temp"; readonly message: string }
 	| { readonly kind: "integration"; readonly cause: IntegrationError }
 	| { readonly kind: "snapshot-store"; readonly cause: SnapshotError }
@@ -44,7 +45,8 @@ export interface SafetySession {
 		origin?: SnapshotCreationOrigin,
 	): Result<undefined, { readonly kind: "checkpoint-creation-in-progress" }>
 	checkpointStatus(): SafetySessionCheckpointStatus
-	compileBashProfile(): CompiledSbpl
+	seatbeltProfile(): CompiledSbpl
+	policyDescription(): string
 	bashEnvironment(): Readonly<NodeJS.ProcessEnv>
 	cleanup(): Result<undefined, IntegrationError>
 	authorize(toolName: string, input: unknown): Promise<SafetyDecision>
@@ -52,19 +54,12 @@ export interface SafetySession {
 
 class ManagedSafetySession implements SafetySession {
 	readonly snapshotStore: SnapshotStore
-	readonly #filePolicy: FilePolicy
-	readonly #bashPolicy: FilePolicy
+	readonly #policy: Policy
 	readonly #integrations: BashIntegrations
 	#checkpointRun: CheckpointRun | undefined
 
-	constructor(
-		filePolicy: FilePolicy,
-		bashPolicy: FilePolicy,
-		integrations: BashIntegrations,
-		snapshotStore: SnapshotStore,
-	) {
-		this.#filePolicy = filePolicy
-		this.#bashPolicy = bashPolicy
+	constructor(policy: Policy, integrations: BashIntegrations, snapshotStore: SnapshotStore) {
+		this.#policy = policy
 		this.#integrations = integrations
 		this.snapshotStore = snapshotStore
 	}
@@ -83,8 +78,12 @@ class ManagedSafetySession implements SafetySession {
 		return this.#checkpointRun?.status() ?? { kind: "run-not-started" }
 	}
 
-	compileBashProfile(): CompiledSbpl {
-		return compileBashProfile({ policy: this.#bashPolicy, integrations: this.#integrations })
+	seatbeltProfile(): CompiledSbpl {
+		return emitSeatbelt(this.#policy)
+	}
+
+	policyDescription(): string {
+		return describePolicy(this.#policy)
 	}
 
 	bashEnvironment(): Readonly<NodeJS.ProcessEnv> {
@@ -98,7 +97,7 @@ class ManagedSafetySession implements SafetySession {
 	}
 
 	async authorize(toolName: string, input: unknown): Promise<SafetyDecision> {
-		const authorization = authorizeBuiltinToolCall(toolName, input, this.#filePolicy)
+		const authorization = authorizeBuiltinToolCall(toolName, input, this.#policy)
 		if (!authorization.ok) {
 			return { kind: "block", reason: formatAuthorizationError(authorization.error) }
 		}
@@ -119,37 +118,35 @@ class ManagedSafetySession implements SafetySession {
 
 export function createSafetySession(raw: RawSafetySessionConfiguration): Result<SafetySession, SafetySessionError> {
 	const configuration = parseInitialSafetyConfiguration(raw)
-	if (!configuration.ok) return err({ kind: "file-policy", cause: configuration.error })
+	if (!configuration.ok) return err({ kind: "policy-configuration", cause: configuration.error })
 	const privateTemp = parseCanonicalPath(raw.privateTemp)
 	if (!privateTemp.ok) return err({ kind: "private-temp", message: JSON.stringify(privateTemp.error) })
 	const integrations = parseBashIntegrations({
 		environment: raw.integrationEnvironment,
-		home: configuration.value.filePolicy.homeRoot,
+		home: configuration.value.paths.home,
 	})
 	if (!integrations.ok) return err({ kind: "integration", cause: integrations.error })
 	const preparedIntegrations = prepareBashIntegrations(integrations.value)
 	if (!preparedIntegrations.ok) return err({ kind: "integration", cause: preparedIntegrations.error })
-	const snapshotStore = createConfiguredSnapshotStore(configuration.value)
-	if (!snapshotStore.ok) {
-		const cleaned = cleanupBashIntegrations(integrations.value)
-		return cleaned.ok
-			? err({ kind: "snapshot-store", cause: snapshotStore.error })
-			: err({ kind: "integration", cause: cleaned.error })
-	}
-	const bashPolicy = createBashFilePolicy({
-		base: configuration.value.filePolicy,
-		privateTemp: privateTemp.value,
-		integrations: integrations.value,
+	const policy = createDefaultPolicy({
+		paths: configuration.value.paths,
+		additionalNoAccessPatterns: configuration.value.additionalNoAccessPatterns,
+		sandbox: { kind: "enabled", privateTemp: privateTemp.value, integrations: integrations.value },
 	})
-	if (!bashPolicy.ok) {
-		const cleaned = cleanupBashIntegrations(integrations.value)
-		return cleaned.ok
-			? err({ kind: "bash-file-policy", cause: bashPolicy.error })
-			: err({ kind: "integration", cause: cleaned.error })
+	if (!policy.ok) return cleanupAfterFailure(integrations.value, { kind: "policy", cause: policy.error })
+	const snapshotStore = createConfiguredSnapshotStore(configuration.value, policy.value)
+	if (!snapshotStore.ok) {
+		return cleanupAfterFailure(integrations.value, { kind: "snapshot-store", cause: snapshotStore.error })
 	}
-	return ok(
-		new ManagedSafetySession(configuration.value.filePolicy, bashPolicy.value, integrations.value, snapshotStore.value),
-	)
+	return ok(new ManagedSafetySession(policy.value, integrations.value, snapshotStore.value))
+}
+
+function cleanupAfterFailure(
+	integrations: BashIntegrations,
+	error: Extract<SafetySessionError, { readonly kind: "policy" | "snapshot-store" }>,
+): Result<never, SafetySessionError> {
+	const cleaned = cleanupBashIntegrations(integrations)
+	return cleaned.ok ? err(error) : err({ kind: "integration", cause: cleaned.error })
 }
 
 function formatAuthorizationError(error: ToolAuthorizationError): string {
@@ -159,7 +156,7 @@ function formatAuthorizationError(error: ToolAuthorizationError): string {
 		case "path-resolution":
 			return `pi-safety: blocked ${error.tool}: path resolution failed (${error.cause.kind})`
 		case "access-denied":
-			return `pi-safety: blocked ${error.tool}: ${error.required} access denied to ${error.path}${error.label ? ` (${error.label})` : ""}`
+			return `pi-safety: blocked ${error.tool}: ${error.required} access denied to ${error.path}`
 	}
 }
 

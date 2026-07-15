@@ -5,7 +5,7 @@ import * as path from "node:path"
 import { unwrap } from "./result"
 import { createSnapshot, createSnapshotStore } from "./snapshot"
 import { listSnapshots, loadSnapshot, verifySnapshot } from "./snapshot-history"
-import { canonicalPath, testFilePolicy } from "./test-domain-values"
+import { canonicalPath, testPolicy } from "./test-domain-values"
 import { withTestTempDirectory } from "./test-temp-directory"
 
 function fixture(root: string) {
@@ -18,7 +18,7 @@ function fixture(root: string) {
 		createSnapshotStore({
 			workspaceRoot: canonicalPath(workspace),
 			stateRoot: canonicalPath(state),
-			filePolicy: testFilePolicy(workspace, state),
+			policy: testPolicy(workspace, state),
 		}),
 	)
 	const published = unwrap(createSnapshot(store))

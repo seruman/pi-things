@@ -2,8 +2,8 @@ import { test } from "bun:test"
 import assert from "node:assert/strict"
 import * as fs from "node:fs"
 import * as path from "node:path"
-import { createSnapshotFilePolicy } from "./default-rules"
-import type { FilePolicy } from "./file-policy"
+import { createSnapshotPolicy } from "./default-policy"
+import type { Policy } from "./policy"
 import { type Result, err, unwrap } from "./result"
 import {
 	type SnapshotManifest,
@@ -12,10 +12,10 @@ import {
 	snapshotManifestSchema,
 	snapshotManifestSchemaError,
 } from "./snapshot-manifest"
-import { canonicalPath, testFilePolicy } from "./test-domain-values"
+import { canonicalPath, testPolicy } from "./test-domain-values"
 import { withTestTempDirectory } from "./test-temp-directory"
 
-function parseManifest(input: unknown, policy: FilePolicy): Result<SnapshotManifest, SnapshotManifestError> {
+function parseManifest(input: unknown, policy: Policy): Result<SnapshotManifest, SnapshotManifestError> {
 	const decoded = snapshotManifestSchema.safeParse(input)
 	return decoded.success ? parseSnapshotManifest(decoded.data, policy) : err(snapshotManifestSchemaError(decoded.error))
 }
@@ -46,7 +46,7 @@ test("parses a versioned snapshot manifest into precise entries", () => {
 	withTestTempDirectory("manifest-valid-", (root) => {
 		const workspace = path.join(root, "workspace")
 		fs.mkdirSync(workspace)
-		const policy = unwrap(createSnapshotFilePolicy(canonicalPath(workspace)))
+		const policy = unwrap(createSnapshotPolicy(canonicalPath(workspace)))
 		const parsed = parseManifest(validManifest(workspace), policy)
 		assert.equal(parsed.ok, true)
 		if (parsed.ok) {
@@ -91,7 +91,7 @@ test("hostile generated manifest values never escape parsed domain invariants", 
 				return next()
 		}
 	}
-	const policy = testFilePolicy("/tmp", "/tmp")
+	const policy = testPolicy("/tmp", "/tmp")
 	for (let index = 0; index < 500; index += 1) {
 		const parsed = parseManifest(generated(3), policy)
 		if (!parsed.ok) continue
@@ -111,7 +111,7 @@ test("rejects unknown versions, traversal, duplicates, invalid variants, and exc
 	withTestTempDirectory("manifest-invalid-", (root) => {
 		const workspace = path.join(root, "workspace")
 		fs.mkdirSync(workspace)
-		const policy = unwrap(createSnapshotFilePolicy(canonicalPath(workspace)))
+		const policy = unwrap(createSnapshotPolicy(canonicalPath(workspace)))
 		const cases = [
 			{ ...validManifest(workspace), version: 4 },
 			{ ...validManifest(workspace), version: 3 },

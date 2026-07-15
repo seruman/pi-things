@@ -181,10 +181,10 @@ function diffSnapshot(
 	} else {
 		const live =
 			scope.kind === "all"
-				? observeWorkspace({ workspaceRoot: store.workspaceRoot, filePolicy: store.filePolicy })
+				? observeWorkspace({ workspaceRoot: store.workspaceRoot, policy: store.policy })
 				: observeWorkspacePaths({
 						workspaceRoot: store.workspaceRoot,
-						filePolicy: store.filePolicy,
+						policy: store.policy,
 						paths: scope.paths,
 					})
 		if (!live.ok) return err({ kind: "snapshot", cause: live.error })

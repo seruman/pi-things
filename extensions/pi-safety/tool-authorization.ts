@@ -1,7 +1,7 @@
 import { z } from "zod"
 import { type BuiltinToolPathError, resolveBuiltinToolPath } from "./builtin-tool-path"
 import type { CanonicalPath } from "./canonical-path"
-import { type FileAccess, type FilePolicy, decideFileAccess } from "./file-policy"
+import { type FileAccess, type FileAccessDecision, type Policy, evaluatePolicy } from "./policy"
 import { type Result, err, ok } from "./result"
 
 type MutatingBuiltinTool = "write" | "edit"
@@ -30,13 +30,12 @@ export type ToolAuthorizationError =
 			readonly path: CanonicalPath
 			readonly required: "read" | "write"
 			readonly actual: FileAccess
-			readonly label: string | undefined
 	  }
 
 export function authorizeBuiltinToolCall(
 	toolName: string,
 	input: unknown,
-	policy: FilePolicy,
+	policy: Policy,
 ): Result<GuardedToolCall, ToolAuthorizationError> {
 	if (toolName === "bash") {
 		if (!bashInputSchema.safeParse(input).success) {
@@ -56,12 +55,16 @@ export function authorizeBuiltinToolCall(
 	)
 	if (!resolvedPath.ok) return err({ kind: "path-resolution", tool: toolName, cause: resolvedPath.error })
 
-	const decision = decideFileAccess(policy, resolvedPath.value)
-	if (toolName === "read") {
-		if (decision.value === "none") return denied(toolName, resolvedPath.value, "read", decision)
-		return ok({ kind: "read" })
+	const decision = evaluatePolicy(policy, {
+		kind: "file-access",
+		operation: toolName === "read" ? "read" : "write",
+		subject: { kind: "builtin" },
+		path: resolvedPath.value,
+	})
+	if (decision.effect === "deny") {
+		return denied(toolName, resolvedPath.value, toolName === "read" ? "read" : "write", decision)
 	}
-	if (decision.value !== "read-write") return denied(toolName, resolvedPath.value, "write", decision)
+	if (toolName === "read") return ok({ kind: "read" })
 
 	return ok({ kind: toolName })
 }
@@ -70,15 +73,14 @@ function denied(
 	tool: GuardedBuiltinTool,
 	path: CanonicalPath,
 	required: "read" | "write",
-	decision: ReturnType<typeof decideFileAccess>,
+	decision: FileAccessDecision,
 ): Result<never, ToolAuthorizationError> {
 	return err({
 		kind: "access-denied",
 		tool,
 		path,
 		required,
-		actual: decision.value,
-		label: decision.rule?.label,
+		actual: decision.access,
 	})
 }
 

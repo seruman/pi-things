@@ -3,10 +3,10 @@ import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
 import * as fs from "node:fs"
 import * as path from "node:path"
-import { noAccess, pattern, readOnly } from "./file-policy"
+import { noAccess, pattern, readOnly, shared } from "./policy"
 import { unwrap } from "./result"
 import { createSnapshot, createSnapshotStore, planSnapshot, stageSnapshot } from "./snapshot"
-import { canonicalPath, pathPattern, testFilePolicy } from "./test-domain-values"
+import { canonicalPath, pathPattern, testPolicy } from "./test-domain-values"
 import { withTestTempDirectory } from "./test-temp-directory"
 
 function snapshotFixture(root: string, maxSnapshots = 20) {
@@ -15,7 +15,7 @@ function snapshotFixture(root: string, maxSnapshots = 20) {
 	fs.mkdirSync(workspace)
 	fs.mkdirSync(state)
 	const workspaceRoot = canonicalPath(workspace)
-	const filePolicy = testFilePolicy(workspace, state, {
+	const policy = testPolicy(workspace, state, {
 		noAccessPatterns: [pathPattern(path.join(workspace, "**", ".env*"), workspaceRoot)],
 		snapshotExclusions: [
 			pathPattern(path.join(workspace, ".git"), workspaceRoot),
@@ -27,11 +27,11 @@ function snapshotFixture(root: string, maxSnapshots = 20) {
 		createSnapshotStore({
 			workspaceRoot,
 			stateRoot: canonicalPath(state),
-			filePolicy,
+			policy,
 			maxSnapshots,
 		}),
 	)
-	return { workspace, workspaceRoot, state, filePolicy, store }
+	return { workspace, workspaceRoot, state, policy, store }
 }
 
 test("plans supported entries without following symlinks and records exclusions", () => {
@@ -49,7 +49,7 @@ test("plans supported entries without following symlinks and records exclusions"
 		const plan = unwrap(
 			planSnapshot({
 				workspaceRoot: fixture.workspaceRoot,
-				filePolicy: fixture.filePolicy,
+				policy: fixture.policy,
 			}),
 		)
 		assert.deepEqual(
@@ -76,11 +76,11 @@ test("read-only paths can be excluded from snapshots independently", () => {
 		fs.writeFileSync(path.join(reference, "manual.txt"), "readable")
 		const workspaceRoot = canonicalPath(workspace)
 		const referencePattern = pathPattern(reference, workspaceRoot)
-		const filePolicy = testFilePolicy(workspace, state, {
+		const policy = testPolicy(workspace, state, {
 			readOnlyPatterns: [referencePattern],
 			snapshotExclusions: [referencePattern],
 		})
-		const plan = unwrap(planSnapshot({ workspaceRoot, filePolicy }))
+		const plan = unwrap(planSnapshot({ workspaceRoot, policy }))
 		assert.deepEqual(
 			plan.entries.map((entry) => [entry.kind, entry.path]),
 			[["excluded", "reference-data"]],
@@ -96,13 +96,13 @@ test("protected roots keep explicit public metadata exceptions ordinary", () => 
 		fs.writeFileSync(path.join(ssh, "custom-private-key"), "private")
 		fs.writeFileSync(path.join(ssh, "id_ed25519.pub"), "public")
 		const workspaceRoot = canonicalPath(workspace)
-		const filePolicy = testFilePolicy(workspace, workspace, {
+		const policy = testPolicy(workspace, workspace, {
 			additionalRules: [
-				noAccess(pattern(pathPattern(ssh, workspaceRoot))),
-				readOnly(pattern(pathPattern(path.join(ssh, "**", "*.pub"), workspaceRoot))),
+				noAccess(shared(), pattern(pathPattern(ssh, workspaceRoot))),
+				readOnly(shared(), pattern(pathPattern(path.join(ssh, "**", "*.pub"), workspaceRoot))),
 			],
 		})
-		const plan = unwrap(planSnapshot({ workspaceRoot, filePolicy }))
+		const plan = unwrap(planSnapshot({ workspaceRoot, policy }))
 		assert.deepEqual(
 			plan.entries.filter((entry) => entry.kind === "file").map((entry) => [entry.path, entry.storage.kind]),
 			[
@@ -150,7 +150,7 @@ test("rejects unsupported filesystem entries before creating staging output", ()
 
 		const planned = planSnapshot({
 			workspaceRoot: fixture.workspaceRoot,
-			filePolicy: fixture.filePolicy,
+			policy: fixture.policy,
 		})
 		assert.equal(planned.ok, false)
 		if (!planned.ok) assert.equal(planned.error.kind, "unsupported-entry")
@@ -166,7 +166,7 @@ test("rejects snapshot stores nested inside the workspace", () => {
 		const created = createSnapshotStore({
 			workspaceRoot,
 			stateRoot: canonicalPath(path.join(workspace, ".state")),
-			filePolicy: testFilePolicy(workspace, root),
+			policy: testPolicy(workspace, root),
 		})
 		assert.equal(created.ok, false)
 		if (!created.ok) assert.equal(created.error.kind, "invalid-store")
@@ -178,7 +178,7 @@ test("failed staging is removed and never appears as published history", () => {
 		const fixture = snapshotFixture(root)
 		const changing = path.join(fixture.workspace, "changing")
 		fs.writeFileSync(changing, "file")
-		const plan = unwrap(planSnapshot({ workspaceRoot: fixture.workspaceRoot, filePolicy: fixture.filePolicy }))
+		const plan = unwrap(planSnapshot({ workspaceRoot: fixture.workspaceRoot, policy: fixture.policy }))
 		fs.rmSync(changing)
 		fs.mkdirSync(changing)
 		fs.mkdirSync(fixture.store.projectDirectory, { recursive: true })

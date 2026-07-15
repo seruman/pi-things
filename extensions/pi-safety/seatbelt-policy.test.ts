@@ -2,56 +2,53 @@ import { test } from "bun:test"
 import assert from "node:assert/strict"
 import * as fs from "node:fs"
 import * as path from "node:path"
-import { compileBashProfile } from "./bash-profile"
-import { createBashFilePolicy } from "./default-rules"
-import { defineFilePolicy, readOnly, readWrite, tree } from "./file-policy"
+import { createDefaultPolicy } from "./default-policy"
+import { definePolicy, readOnly, readWrite, shared, tree } from "./policy"
 import { unwrap } from "./result"
-import { canonicalExecutable, canonicalPath, pathPattern, testFilePolicy } from "./test-domain-values"
+import { emitSeatbelt } from "./seatbelt"
+import { canonicalExecutable, canonicalPath } from "./test-domain-values"
 import { assertDenied, runWithSeatbeltProfile as runWithSeatbelt } from "./test-seatbelt"
 import { withTestTempDirectory } from "./test-temp-directory"
 
 function installedGit() {
 	const git = Bun.which("git")
-	if (!git) throw new Error("Git must be installed for Bash profile tests")
+	if (!git) throw new Error("Git must be installed for Seatbelt policy tests")
 	return canonicalExecutable(git)
+}
+
+function disabledIntegrations() {
+	return {
+		gitExecutable: installedGit(),
+		sshAgent: { kind: "disabled" },
+		docker: { kind: "disabled" },
+		wb: { kind: "disabled" },
+	} as const
 }
 
 function fixture(root: string) {
 	const workspace = path.join(root, "workspace")
 	const home = path.join(root, "home")
 	const privateTemp = path.join(root, "tmp")
-	const extensionState = path.join(root, "state")
-	for (const directory of [workspace, home, privateTemp, extensionState]) fs.mkdirSync(directory)
-	const canonicalWorkspace = canonicalPath(workspace)
-	const gitConfigurationPaths = [
-		pathPattern(path.join(workspace, ".git", "hooks"), canonicalWorkspace),
-		pathPattern(path.join(workspace, ".git", "config"), canonicalWorkspace),
-		pathPattern(path.join(workspace, ".git", "config.worktree"), canonicalWorkspace),
-	]
-	const gitExecutable = installedGit()
-	const base = testFilePolicy(workspace, home, {
-		noAccessPatterns: [pathPattern(path.join(workspace, "**", ".env*"), canonicalWorkspace)],
-		readOnlyPatterns: gitConfigurationPaths,
-		executableWrites: [{ executable: gitExecutable, patterns: gitConfigurationPaths }],
-	})
-	const integrations = {
-		gitExecutable,
-		sshAgent: { kind: "disabled" },
-		docker: { kind: "disabled" },
-		wb: { kind: "disabled" },
-	} as const
-	const policy = unwrap(createBashFilePolicy({ base, privateTemp: canonicalPath(privateTemp), integrations }))
-	return {
-		workspace,
-		home,
-		privateTemp,
-		extensionState,
-		compiled: compileBashProfile({ policy, integrations }),
-	}
+	const stateHome = path.join(root, "state")
+	const piConfigDirectory = path.join(root, "pi-agent")
+	for (const directory of [workspace, home, privateTemp, stateHome, piConfigDirectory]) fs.mkdirSync(directory)
+	const policy = unwrap(
+		createDefaultPolicy({
+			paths: {
+				workspace: canonicalPath(workspace),
+				home: canonicalPath(home),
+				stateHome: canonicalPath(stateHome),
+				piConfigDirectory: canonicalPath(piConfigDirectory),
+			},
+			additionalNoAccessPatterns: [],
+			sandbox: { kind: "enabled", privateTemp: canonicalPath(privateTemp), integrations: disabledIntegrations() },
+		}),
+	)
+	return { workspace, home, privateTemp, stateHome, compiled: emitSeatbelt(policy), policy }
 }
 
-test("Bash profile permits normal workspace workflows and private temporary files", () => {
-	withTestTempDirectory("bash-profile-workspace-", (root) => {
+test("Seatbelt permits workspace workflows and sandbox-only temporary files", () => {
+	withTestTempDirectory("seatbelt-policy-workspace-", (root) => {
 		const value = fixture(root)
 		const command = [
 			"printf workspace > ordinary.txt",
@@ -65,44 +62,38 @@ test("Bash profile permits normal workspace workflows and private temporary file
 	})
 })
 
-test("later path rules re-allow a writable subtree without weakening its read-only parent", () => {
-	withTestTempDirectory("bash-profile-rule-order-", (root) => {
-		const workspace = path.join(root, "workspace")
-		const home = path.join(root, "home")
-		const protectedDirectory = path.join(workspace, "protected")
+test("Seatbelt preserves later writable exceptions under read-only parents", () => {
+	withTestTempDirectory("seatbelt-policy-rule-order-", (root) => {
+		const value = fixture(root)
+		const protectedDirectory = path.join(value.workspace, "protected")
 		const writableChild = path.join(protectedDirectory, "generated")
-		for (const directory of [workspace, home, protectedDirectory, writableChild]) fs.mkdirSync(directory)
-		const workspaceRoot = canonicalPath(workspace)
-		const policy = defineFilePolicy({
-			workspaceRoot,
-			homeRoot: canonicalPath(home),
+		fs.mkdirSync(writableChild, { recursive: true })
+		const runtimeStart = value.policy.rules.findIndex((rule) => rule.kind !== "file-access" && rule.kind !== "snapshot")
+		assert.notEqual(runtimeStart, -1)
+		const policy = definePolicy({
+			workspaceRoot: value.policy.workspaceRoot,
+			homeRoot: value.policy.homeRoot,
 			rules: [
-				readOnly(tree(canonicalPath("/"))),
-				readWrite(tree(workspaceRoot)),
-				readOnly(tree(canonicalPath(protectedDirectory))),
-				readWrite(tree(canonicalPath(writableChild))),
+				...value.policy.rules.slice(0, runtimeStart),
+				readOnly(shared(), tree(canonicalPath(protectedDirectory))),
+				readWrite(shared(), tree(canonicalPath(writableChild))),
+				...value.policy.rules.slice(runtimeStart),
 			],
 		})
-		const integrations = {
-			gitExecutable: installedGit(),
-			sshAgent: { kind: "disabled" },
-			docker: { kind: "disabled" },
-			wb: { kind: "disabled" },
-		} as const
-		const compiled = compileBashProfile({ policy, integrations })
-		assertDenied(runWithSeatbelt(compiled, "/bin/bash", ["-c", "printf denied > protected/denied"], workspace))
+		const compiled = emitSeatbelt(policy)
+		assertDenied(runWithSeatbelt(compiled, "/bin/bash", ["-c", "printf denied > protected/denied"], value.workspace))
 		const allowed = runWithSeatbelt(
 			compiled,
 			"/bin/bash",
 			["-c", "printf allowed > protected/generated/file && mv protected/generated/file protected/generated/moved"],
-			workspace,
+			value.workspace,
 		)
 		assert.equal(allowed.status, 0, allowed.stderr)
 	})
 })
 
-test("Bash profile keeps HOME read-only and protects secrets and extension state", () => {
-	withTestTempDirectory("bash-profile-denials-", (root) => {
+test("Seatbelt keeps HOME read-only and protects secrets and safety state", () => {
+	withTestTempDirectory("seatbelt-policy-denials-", (root) => {
 		const value = fixture(root)
 		const secret = path.join(value.workspace, ".env")
 		fs.writeFileSync(secret, "TOKEN=secret")
@@ -116,35 +107,31 @@ test("Bash profile keeps HOME read-only and protects secrets and extension state
 			),
 		)
 		assert.equal(fs.readFileSync(secret, "utf8"), "TOKEN=secret")
-		assertDenied(
-			runWithSeatbelt(
-				value.compiled,
-				"/bin/bash",
-				["-c", `printf bad > ${JSON.stringify(path.join(value.home, "bad"))}`],
-				value.workspace,
-			),
-		)
-		assertDenied(
-			runWithSeatbelt(
-				value.compiled,
-				"/bin/bash",
-				["-c", `printf bad > ${JSON.stringify(path.join(value.extensionState, "bad"))}`],
-				value.workspace,
-			),
-		)
+		for (const deniedFile of [path.join(value.home, "bad"), path.join(value.stateHome, "bad")]) {
+			assertDenied(
+				runWithSeatbelt(
+					value.compiled,
+					"/bin/bash",
+					["-c", `printf bad > ${JSON.stringify(deniedFile)}`],
+					value.workspace,
+				),
+			)
+		}
 	})
 })
 
 test("native wb grants remain scoped to the wb executable", () => {
-	withTestTempDirectory("bash-profile-wb-scope-", (root) => {
+	withTestTempDirectory("seatbelt-policy-wb-scope-", (root) => {
 		const workspace = path.join(root, "workspace")
 		const home = path.join(root, "home")
 		const privateTemp = path.join(root, "tmp")
+		const stateHome = path.join(root, "state")
+		const piConfigDirectory = path.join(root, "pi-agent")
 		const webKitState = path.join(home, "Library", "WebKit", "wb")
 		const cacheState = path.join(home, "Library", "Caches", "wb")
-		for (const directory of [workspace, privateTemp, webKitState, cacheState])
+		for (const directory of [workspace, privateTemp, stateHome, piConfigDirectory, webKitState, cacheState]) {
 			fs.mkdirSync(directory, { recursive: true })
-		const base = testFilePolicy(workspace, home)
+		}
 		const integrations = {
 			gitExecutable: installedGit(),
 			sshAgent: { kind: "disabled" },
@@ -159,8 +146,19 @@ test("native wb grants remain scoped to the wb executable", () => {
 				cacheState: canonicalPath(cacheState),
 			},
 		} as const
-		const policy = unwrap(createBashFilePolicy({ base, privateTemp: canonicalPath(privateTemp), integrations }))
-		const compiled = compileBashProfile({ policy, integrations })
+		const policy = unwrap(
+			createDefaultPolicy({
+				paths: {
+					workspace: canonicalPath(workspace),
+					home: canonicalPath(home),
+					stateHome: canonicalPath(stateHome),
+					piConfigDirectory: canonicalPath(piConfigDirectory),
+				},
+				additionalNoAccessPatterns: [],
+				sandbox: { kind: "enabled", privateTemp: canonicalPath(privateTemp), integrations },
+			}),
+		)
+		const compiled = emitSeatbelt(policy)
 		const allowedFile = path.join(webKitState, "allowed")
 		const allowed = runWithSeatbelt(
 			compiled,
@@ -183,8 +181,8 @@ test("native wb grants remain scoped to the wb executable", () => {
 	})
 })
 
-test("Bash profile preserves ordinary Git working-tree operations", () => {
-	withTestTempDirectory("bash-profile-git-", (root) => {
+test("Seatbelt preserves ordinary Git working-tree operations", () => {
+	withTestTempDirectory("seatbelt-policy-git-", (root) => {
 		const value = fixture(root)
 		const command = [
 			"git init -q",
@@ -217,15 +215,15 @@ test("Bash profile preserves ordinary Git working-tree operations", () => {
 	})
 })
 
-test("Bash profile runs the installed language and developer toolchains", () => {
-	withTestTempDirectory("bash-profile-toolchains-", (root) => {
+test("Seatbelt runs installed language and developer toolchains", () => {
+	withTestTempDirectory("seatbelt-policy-toolchains-", (root) => {
 		const value = fixture(root)
 		const node = Bun.which("node")
 		const bun = Bun.which("bun")
 		const docker = Bun.which("docker")
 		const pi = Bun.which("pi")
 		if (!node || !bun || !docker || !pi) {
-			throw new Error("Node, Bun, Docker, and Pi must be installed for the toolchain profile test")
+			throw new Error("Node, Bun, Docker, and Pi must be installed for the toolchain policy test")
 		}
 		for (const command of [
 			["/usr/bin/git", "--version"],

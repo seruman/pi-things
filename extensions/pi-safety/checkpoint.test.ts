@@ -5,7 +5,7 @@ import * as path from "node:path"
 import { CheckpointRun } from "./checkpoint"
 import { err, ok, unwrap } from "./result"
 import { type PublishedSnapshotRef, createSnapshot, createSnapshotStore } from "./snapshot"
-import { canonicalPath, testFilePolicy } from "./test-domain-values"
+import { canonicalPath, testPolicy } from "./test-domain-values"
 import { withTestTempDirectoryAsync } from "./test-temp-directory"
 
 function deferred(): { readonly promise: Promise<void>; readonly release: () => void } {
@@ -28,7 +28,7 @@ async function publishedSnapshot(root: string): Promise<PublishedSnapshotRef> {
 		createSnapshotStore({
 			workspaceRoot: canonicalPath(workspace),
 			stateRoot: canonicalPath(state),
-			filePolicy: testFilePolicy(workspace, state),
+			policy: testPolicy(workspace, state),
 		}),
 	)
 	return unwrap(createSnapshot(store))

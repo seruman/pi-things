@@ -116,6 +116,16 @@ export function canonicalAncestors(input: CanonicalPath): readonly CanonicalPath
 	return Object.freeze(ancestors)
 }
 
+export function seatbeltPathAncestors(input: SeatbeltPath): readonly SeatbeltPath[] {
+	const ancestors: SeatbeltPath[] = []
+	let current = path.dirname(input)
+	while (current !== path.parse(current).root) {
+		ancestors.push(current as SeatbeltPath)
+		current = path.dirname(current)
+	}
+	return Object.freeze(ancestors)
+}
+
 export function parseLexicalAbsolutePath(input: string): Result<LexicalAbsolutePath, CanonicalPathError> {
 	if (!path.isAbsolute(input)) return err({ kind: "not-absolute", input })
 	if (input.includes("\0")) return err({ kind: "nul-byte", input })

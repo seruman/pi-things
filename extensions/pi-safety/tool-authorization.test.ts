@@ -2,7 +2,7 @@ import { test } from "bun:test"
 import assert from "node:assert/strict"
 import * as fs from "node:fs"
 import * as path from "node:path"
-import { canonicalPath, pathPattern, testFilePolicy } from "./test-domain-values"
+import { canonicalPath, pathPattern, testPolicy } from "./test-domain-values"
 import { withTestTempDirectory } from "./test-temp-directory"
 import { authorizeBuiltinToolCall } from "./tool-authorization"
 
@@ -18,7 +18,7 @@ function withWorkspace(run: (fixture: { root: string; workspace: string; home: s
 
 test("classifies Bash and rejects malformed guarded tool input", () => {
 	withWorkspace(({ workspace, home }) => {
-		const policy = testFilePolicy(workspace, home)
+		const policy = testPolicy(workspace, home)
 
 		assert.deepEqual(authorizeBuiltinToolCall("bash", { command: "true" }, policy), {
 			ok: true,
@@ -39,7 +39,7 @@ test("authorizes workspace writes and rejects writes outside the workspace", () 
 	withWorkspace(({ root, workspace, home }) => {
 		const outside = path.join(root, "outside.txt")
 
-		const policy = testFilePolicy(workspace, home)
+		const policy = testPolicy(workspace, home)
 
 		assert.deepEqual(authorizeBuiltinToolCall("write", { path: "inside.txt", content: "safe" }, policy), {
 			ok: true,
@@ -65,7 +65,7 @@ test("rejects edits that escape the workspace through a symlink", () => {
 		fs.writeFileSync(path.join(outside, "target.txt"), "original")
 		fs.symlinkSync(outside, path.join(workspace, "escape"))
 
-		const policy = testFilePolicy(workspace, home)
+		const policy = testPolicy(workspace, home)
 		const denied = authorizeBuiltinToolCall(
 			"edit",
 			{ path: "escape/target.txt", edits: [{ oldText: "original", newText: "changed" }] },
@@ -89,7 +89,7 @@ test("rejects no-access and read-only write targets inside the workspace", () =>
 		fs.mkdirSync(extensionState)
 		const canonicalWorkspace = canonicalPath(workspace)
 
-		const policy = testFilePolicy(workspace, home, {
+		const policy = testPolicy(workspace, home, {
 			noAccessPatterns: [pathPattern(path.join(workspace, "**", ".env"), canonicalWorkspace)],
 			readOnlyPatterns: [pathPattern(extensionState, canonicalWorkspace)],
 		})
@@ -116,7 +116,7 @@ test("allows ordinary reads but denies the no-access fallback path Pi would sele
 		fs.writeFileSync(protectedFile, "secret")
 		const canonicalWorkspace = canonicalPath(workspace)
 
-		const policy = testFilePolicy(workspace, home, {
+		const policy = testPolicy(workspace, home, {
 			noAccessPatterns: [pathPattern(protectedFile, canonicalWorkspace)],
 		})
 

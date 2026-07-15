@@ -1,9 +1,8 @@
 import { type CanonicalPath, type CanonicalPathError, parseCanonicalPath } from "./canonical-path"
-import { type DefaultRulePaths, type DefaultRulesError, createDefaultFilePolicy } from "./default-rules"
-import type { FilePolicy } from "./file-policy"
+import type { DefaultPolicyPaths } from "./default-policy"
 import { type Result, err, ok } from "./result"
 
-export interface RawInitialFilePolicy {
+export interface RawPolicyConfiguration {
 	readonly cwd: string
 	readonly home: string
 	readonly stateHome: string
@@ -11,22 +10,20 @@ export interface RawInitialFilePolicy {
 	readonly additionalNoAccessPatterns: readonly string[]
 }
 
-export type FilePolicyConfigurationError =
-	| {
-			readonly kind: "canonical-path"
-			readonly field: "cwd" | "home" | "stateHome" | "piConfigDir"
-			readonly cause: CanonicalPathError
-	  }
-	| { readonly kind: "default-rules"; readonly cause: DefaultRulesError }
+export type PolicyConfigurationError = {
+	readonly kind: "canonical-path"
+	readonly field: "cwd" | "home" | "stateHome" | "piConfigDir"
+	readonly cause: CanonicalPathError
+}
 
 export interface InitialSafetyConfiguration {
-	readonly filePolicy: FilePolicy
-	readonly stateHome: CanonicalPath
+	readonly paths: DefaultPolicyPaths
+	readonly additionalNoAccessPatterns: readonly string[]
 }
 
 export function parseInitialSafetyConfiguration(
-	raw: RawInitialFilePolicy,
-): Result<InitialSafetyConfiguration, FilePolicyConfigurationError> {
+	raw: RawPolicyConfiguration,
+): Result<InitialSafetyConfiguration, PolicyConfigurationError> {
 	const workspace = parsePolicyPath("cwd", raw.cwd)
 	if (!workspace.ok) return workspace
 	const home = parsePolicyPath("home", raw.home)
@@ -35,21 +32,23 @@ export function parseInitialSafetyConfiguration(
 	if (!stateHome.ok) return stateHome
 	const piConfigDirectory = parsePolicyPath("piConfigDir", raw.piConfigDir)
 	if (!piConfigDirectory.ok) return piConfigDirectory
-	const paths: DefaultRulePaths = Object.freeze({
-		workspace: workspace.value,
-		home: home.value,
-		stateHome: stateHome.value,
-		piConfigDirectory: piConfigDirectory.value,
-	})
-	const policy = createDefaultFilePolicy({ paths, additionalNoAccessPatterns: raw.additionalNoAccessPatterns })
-	if (!policy.ok) return err({ kind: "default-rules", cause: policy.error })
-	return ok(Object.freeze({ filePolicy: policy.value, stateHome: stateHome.value }))
+	return ok(
+		Object.freeze({
+			paths: Object.freeze({
+				workspace: workspace.value,
+				home: home.value,
+				stateHome: stateHome.value,
+				piConfigDirectory: piConfigDirectory.value,
+			}),
+			additionalNoAccessPatterns: Object.freeze([...raw.additionalNoAccessPatterns]),
+		}),
+	)
 }
 
 function parsePolicyPath(
-	field: Extract<FilePolicyConfigurationError, { kind: "canonical-path" }>["field"],
+	field: PolicyConfigurationError["field"],
 	input: string,
-): Result<CanonicalPath, FilePolicyConfigurationError> {
+): Result<CanonicalPath, PolicyConfigurationError> {
 	const parsed = parseCanonicalPath(input)
 	return parsed.ok ? parsed : err({ kind: "canonical-path", field, cause: parsed.error })
 }
