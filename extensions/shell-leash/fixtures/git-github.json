@@ -1,0 +1,58 @@
+[
+  {
+    "kind": "resolved-argv",
+    "name": "ordinary git push",
+    "argv": ["git", "push", "origin", "main"],
+    "cwd": "/workspace",
+    "expect": { "operations": ["git.push"], "observationKinds": [] }
+  },
+  {
+    "kind": "resolved-argv",
+    "name": "force-with-lease push",
+    "argv": ["git", "push", "--force-with-lease", "origin", "main"],
+    "cwd": "/workspace",
+    "expect": { "operations": ["git.push.force"], "observationKinds": [] }
+  },
+  {
+    "kind": "resolved-argv",
+    "name": "GitHub release deletion",
+    "argv": ["gh", "release", "delete", "v1.0.0"],
+    "cwd": "/workspace",
+    "expect": { "operations": ["gh.release.delete"], "observationKinds": [] }
+  },
+  {
+    "kind": "resolved-argv",
+    "name": "GitHub issue view",
+    "argv": ["gh", "issue", "view", "123"],
+    "cwd": "/workspace",
+    "expect": { "operations": [], "observationKinds": [] }
+  },
+  {
+    "kind": "raw-shell",
+    "name": "quoted command text is inert",
+    "source": "printf '%s\\n' 'git push origin main'",
+    "cwd": "/workspace",
+    "expect": { "operations": [], "observationKinds": [] }
+  },
+  {
+    "kind": "raw-shell",
+    "name": "dynamic executable is observed",
+    "source": "$command push origin main",
+    "cwd": "/workspace",
+    "expect": { "operations": [], "observationKinds": ["dynamic-executable"] }
+  },
+  {
+    "kind": "raw-shell",
+    "name": "ordinary push through shell syntax",
+    "source": "git push origin feature/my-branch",
+    "cwd": "/workspace",
+    "expect": { "operations": ["git.push"], "observationKinds": [] }
+  },
+  {
+    "kind": "raw-shell",
+    "name": "force push without an explicit destination",
+    "source": "git push --force-with-lease",
+    "cwd": "/workspace",
+    "expect": { "operations": ["git.push.force"], "observationKinds": [] }
+  }
+]

@@ -10,7 +10,7 @@ Me just prompting the shit out of LLMs to create things I want in pi.
 - `/split-fork`
 - `/goal`
 - `/comment`
-- [pi-safety](./extensions/pi-safety/README.md)
+- [pi-safety](./extensions/pi-safety/README.md), including [shell-leash](./extensions/shell-leash/README.md)
 - skills:
   - [ast-grep-refactor](./skills/ast-grep-refactor/SKILL.md)
   - [git-hunks](./skills/git-hunks/SKILL.md)

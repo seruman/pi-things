@@ -10,6 +10,8 @@ The complete default policy is listed in evaluation order in `default-policy.ts`
 
 Before the first command that can change files in a request, Pi Safety creates a fast APFS snapshot of the project. It records the checkpoint as session metadata without sending it to the model. The snapshot manifest stores the Pi session ID, while snapshots created outside Pi are marked as standalone. It creates only one snapshot per request and keeps up to 20 snapshots for each project. Generated folders such as `.git`, `.wb`, `node_modules`, `dist`, and `target` are not included.
 
+Shell Leash guards remote Git and GitHub mutations inside model Bash. It asks before a known mutation and supports one-call or request-scoped approval. Focused `git` and `gh` shims reject mutations that become visible only after shell expansion. Unknown cases are recorded as hidden session metadata and do not enter model context. Use `/shell-leash` to inspect request grants and observations.
+
 The `pi-snapshot` command can list, inspect, verify, export, and restore snapshots. It can compare a snapshot with the live project or with another snapshot. Its list reports the sum of per-entry bytes APFS says would be freed immediately. Restore starts as a dry run. Use `--apply` when you want it to change files.
 
 Projects can list extra secret paths in `.pi/pi-safety.json`:
