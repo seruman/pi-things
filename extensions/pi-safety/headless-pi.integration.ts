@@ -33,6 +33,16 @@ function createFixture(root: string): HeadlessFixture {
 	return fixture
 }
 
+function writeShellLeashFixtureExecutable(fixtureRoot: string, name: string, nonce: string, body: string): string {
+	const executable = path.join(fixtureRoot, name)
+	const relative = path.relative(fixtureRoot, executable)
+	if (relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("fixture executable escaped its root")
+	fs.writeFileSync(executable, `#!/bin/sh\n[ "$SHELL_LEASH_TEST_NONCE" = "${nonce}" ] || exit 97\n${body}`, {
+		mode: 0o700,
+	})
+	return executable
+}
+
 function resolveInstalledPi(): string {
 	const configured = process.env.PI_SAFETY_PI_BIN
 	if (configured) {
@@ -70,7 +80,11 @@ function stopNewWbDaemons(previous: ReadonlySet<number>): void {
 function runHeadlessPi(
 	fixture: HeadlessFixture,
 	responses: readonly unknown[],
-	options: { readonly persistSession?: boolean } = {},
+	options: {
+		readonly persistSession?: boolean
+		readonly path?: string
+		readonly environment?: Readonly<Record<string, string>>
+	} = {},
 ) {
 	const piExecutable = resolveInstalledPi()
 	const extensionDirectory = path.dirname(fileURLToPath(import.meta.url))
@@ -105,7 +119,7 @@ function runHeadlessPi(
 		{
 			cwd: fixture.workspace,
 			env: {
-				PATH: process.env.PATH,
+				PATH: options.path ?? process.env.PATH,
 				LANG: "en_US.UTF-8",
 				HOME: fixture.home,
 				CFFIXED_USER_HOME: fixture.home,
@@ -116,6 +130,7 @@ function runHeadlessPi(
 				PI_CODING_AGENT_DIR: fixture.piConfig,
 				PI_SAFETY_TEST_SCRIPT: script,
 				PI_OFFLINE: "1",
+				...options.environment,
 			},
 			encoding: "utf8",
 			timeout: 30_000,
@@ -147,6 +162,144 @@ test("headless Pi blocks denied calls before execution or checkpoint creation", 
 		assert.equal(toolEnds[0].toolName, "write")
 		assert.equal(toolEnds[0].isError, true)
 		assert.match(JSON.stringify(toolEnds[0].result), /pi-safety: blocked write: write access denied/)
+	})
+})
+
+test("headless Pi blocks an unapproved remote effect without executing even a fixture Git", () => {
+	withTestTempDirectory("headless-pi-shell-leash-", (root) => {
+		const fixture = createFixture(root)
+		const fixtureBin = path.join(root, "fixture-bin")
+		const marker = path.join(root, "fixture-git-executed")
+		fs.mkdirSync(fixtureBin)
+		const fakeGit = writeShellLeashFixtureExecutable(
+			fixtureBin,
+			"git",
+			"blocked-git",
+			`printf executed > '${marker}'\n`,
+		)
+		const events = runHeadlessPi(fixture, [
+			{ kind: "tool", id: "remote-effect-1", name: "bash", arguments: { command: `'${fakeGit}' push origin main` } },
+			{ kind: "text", text: "done" },
+		])
+
+		assert.equal(fs.existsSync(marker), false)
+		assert.equal(fs.existsSync(path.join(fixture.stateHome, "pi-safety", "snapshots")), false)
+		const toolEnd = events.find((event) => event.type === "tool_execution_end")
+		assert.equal(toolEnd?.isError, true)
+		assert.match(JSON.stringify(toolEnd?.result), /shell-leash: approval requires an interactive session/)
+	})
+})
+
+test("headless Pi runtime shim delegates read-only Git only to a fixture executable", () => {
+	withTestTempDirectory("headless-pi-shell-leash-shim-", (root) => {
+		const fixture = createFixture(root)
+		const fixtureBin = path.join(root, "fixture-bin")
+		const marker = path.join(fixture.temp, "fixture-git-argv")
+		fs.mkdirSync(fixtureBin)
+		const fakeGit = writeShellLeashFixtureExecutable(
+			fixtureBin,
+			"git",
+			"read-only-git",
+			`printf '%s\\n' "$@" > '${marker}'\n`,
+		)
+		const events = runHeadlessPi(
+			fixture,
+			[
+				{
+					kind: "tool",
+					id: "read-only-git-1",
+					name: "bash",
+					arguments: { command: "git status --short" },
+				},
+				{ kind: "text", text: "done" },
+			],
+			{
+				path: `${fixtureBin}${path.delimiter}${process.env.PATH ?? ""}`,
+				environment: { SHELL_LEASH_GIT_EXECUTABLE: fakeGit, SHELL_LEASH_TEST_NONCE: "read-only-git" },
+			},
+		)
+
+		assert.equal(fs.existsSync(marker), true, JSON.stringify(events))
+		assert.equal(fs.readFileSync(marker, "utf8"), "status\n--short\n")
+		const toolEnd = events.find((event) => event.type === "tool_execution_end")
+		assert.equal(toolEnd?.isError, false)
+	})
+})
+
+test("headless Pi runtime shim rejects a dynamically resolved mutation before the fixture Git runs", () => {
+	withTestTempDirectory("headless-pi-shell-leash-dynamic-", (root) => {
+		const fixture = createFixture(root)
+		const fixtureBin = path.join(root, "fixture-bin")
+		const marker = path.join(fixture.temp, "fixture-git-executed")
+		fs.mkdirSync(fixtureBin)
+		const fakeGit = writeShellLeashFixtureExecutable(
+			fixtureBin,
+			"git",
+			"dynamic-git",
+			`printf executed > '${marker}'\n`,
+		)
+		const events = runHeadlessPi(
+			fixture,
+			[
+				{
+					kind: "tool",
+					id: "dynamic-git-1",
+					name: "bash",
+					arguments: { command: 'tool=git; "$tool" push --force origin main' },
+				},
+				{ kind: "text", text: "done" },
+			],
+			{
+				path: `${fixtureBin}${path.delimiter}${process.env.PATH ?? ""}`,
+				environment: { SHELL_LEASH_GIT_EXECUTABLE: fakeGit, SHELL_LEASH_TEST_NONCE: "dynamic-git" },
+			},
+		)
+
+		assert.equal(fs.existsSync(marker), false)
+		const toolEnd = events.find((event) => event.type === "tool_execution_end")
+		assert.equal(toolEnd?.isError, true)
+		assert.match(JSON.stringify(toolEnd?.result), /runtime-discovered remote mutation/)
+		assert.match(JSON.stringify(toolEnd?.result), /git\.push\.force/)
+	})
+})
+
+test("headless Pi stores runtime unknowns as hidden custom entries after fixture delegation", () => {
+	withTestTempDirectory("headless-pi-shell-leash-observation-", (root) => {
+		const fixture = createFixture(root)
+		const fixtureBin = path.join(root, "fixture-bin")
+		const marker = path.join(fixture.temp, "fixture-git-argv")
+		fs.mkdirSync(fixtureBin)
+		const fakeGit = writeShellLeashFixtureExecutable(
+			fixtureBin,
+			"git",
+			"unknown-git",
+			`printf '%s\\n' "$@" > '${marker}'\n`,
+		)
+		const events = runHeadlessPi(
+			fixture,
+			[
+				{
+					kind: "tool",
+					id: "unknown-git-1",
+					name: "bash",
+					arguments: { command: 'tool=git; "$tool" frobnicate remote' },
+				},
+				{ kind: "text", text: "done" },
+			],
+			{
+				path: `${fixtureBin}${path.delimiter}${process.env.PATH ?? ""}`,
+				environment: { SHELL_LEASH_GIT_EXECUTABLE: fakeGit, SHELL_LEASH_TEST_NONCE: "unknown-git" },
+			},
+		)
+
+		assert.equal(fs.readFileSync(marker, "utf8"), "frobnicate\nremote\n")
+		const customEntries = events.filter(
+			(event) =>
+				event.type === "entry_appended" && JSON.stringify(event).includes('"customType":"shell-leash-observation"'),
+		)
+		assert.ok(customEntries.some((event) => JSON.stringify(event).includes('"kind":"unknown-git"')))
+		const agentEnd = events.find((event) => event.type === "agent_end")
+		assert.doesNotMatch(JSON.stringify(agentEnd), /\"kind\":\"unknown-git\"/)
 	})
 })
 

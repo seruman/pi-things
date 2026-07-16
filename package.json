@@ -15,14 +15,16 @@
     "check": "biome check .",
     "check:write": "biome check --write .",
     "test:pi-safety": "bun test ./extensions/pi-safety/*.integration.ts && bun test extensions/pi-safety/*.test.ts",
+    "test:shell-leash": "bun test extensions/shell-leash/*.test.ts",
     "typecheck:web-search": "bunx tsc -p extensions/web-search/tsconfig.json",
     "typecheck:web-fetch": "bunx tsc -p extensions/web-fetch/tsconfig.json",
     "typecheck:task-tools": "bunx tsc -p extensions/task-tools/tsconfig.json",
     "typecheck:subagent-tools": "bunx tsc -p extensions/subagent-tools/tsconfig.json",
     "typecheck:diff-review": "bunx tsc -p extensions/diff-review/tsconfig.json",
     "typecheck:pi-safety": "bunx tsc -p extensions/pi-safety/tsconfig.json",
+    "typecheck:shell-leash": "bunx tsc -p extensions/shell-leash/tsconfig.json",
     "typecheck:single-extensions": "bunx tsc -p extensions/tsconfig.json",
-    "typecheck": "bun run typecheck:web-search && bun run typecheck:web-fetch && bun run typecheck:task-tools && bun run typecheck:subagent-tools && bun run typecheck:diff-review && bun run typecheck:pi-safety && bun run typecheck:single-extensions"
+    "typecheck": "bun run typecheck:web-search && bun run typecheck:web-fetch && bun run typecheck:task-tools && bun run typecheck:subagent-tools && bun run typecheck:diff-review && bun run typecheck:pi-safety && bun run typecheck:shell-leash && bun run typecheck:single-extensions"
   },
   "pi": {
     "extensions": [
@@ -44,9 +46,10 @@
     "glimpseui": "^0.8.0",
     "glob-to-regexp": "0.4.1",
     "ignore": "^7.0.5",
-    "just-bash": "^2.14.2",
     "linkedom": "^0.18.12",
     "minimatch": "10.2.5",
+    "tree-sitter-bash": "0.25.1",
+    "web-tree-sitter": "0.26.8",
     "yaml": "^2.8.1",
     "zod": "^3.24.1"
   },
