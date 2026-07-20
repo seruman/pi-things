@@ -11,6 +11,7 @@ Me just prompting the shit out of LLMs to create things I want in pi.
 - `/goal`
 - `/comment`
 - [pi-safety](./extensions/pi-safety/README.md)
+- [shell-leash](./extensions/shell-leash/README.md)
 - skills:
   - [ast-grep-refactor](./skills/ast-grep-refactor/SKILL.md)
   - [git-hunks](./skills/git-hunks/SKILL.md)
