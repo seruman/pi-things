@@ -15,14 +15,16 @@
     "check": "biome check .",
     "check:write": "biome check --write .",
     "test:pi-safety": "bun test ./extensions/pi-safety/*.integration.ts && bun test extensions/pi-safety/*.test.ts",
+    "test:shell-leash": "bun test extensions/shell-leash/*.test.ts",
     "typecheck:web-search": "bunx tsc -p extensions/web-search/tsconfig.json",
     "typecheck:web-fetch": "bunx tsc -p extensions/web-fetch/tsconfig.json",
     "typecheck:task-tools": "bunx tsc -p extensions/task-tools/tsconfig.json",
     "typecheck:subagent-tools": "bunx tsc -p extensions/subagent-tools/tsconfig.json",
     "typecheck:diff-review": "bunx tsc -p extensions/diff-review/tsconfig.json",
     "typecheck:pi-safety": "bunx tsc -p extensions/pi-safety/tsconfig.json",
+    "typecheck:shell-leash": "bunx tsc -p extensions/shell-leash/tsconfig.json",
     "typecheck:single-extensions": "bunx tsc -p extensions/tsconfig.json",
-    "typecheck": "bun run typecheck:web-search && bun run typecheck:web-fetch && bun run typecheck:task-tools && bun run typecheck:subagent-tools && bun run typecheck:diff-review && bun run typecheck:pi-safety && bun run typecheck:single-extensions"
+    "typecheck": "bun run typecheck:web-search && bun run typecheck:web-fetch && bun run typecheck:task-tools && bun run typecheck:subagent-tools && bun run typecheck:diff-review && bun run typecheck:pi-safety && bun run typecheck:shell-leash && bun run typecheck:single-extensions"
   },
   "pi": {
     "extensions": [
@@ -34,7 +36,8 @@
       "./extensions/split-fork.ts",
       "./extensions/goal.ts",
       "./extensions/comment.ts",
-      "./extensions/pi-safety/index.ts"
+      "./extensions/pi-safety/index.ts",
+      "./extensions/shell-leash/index.ts"
     ],
     "skills": ["./skills", "./extensions/web-tools/skills"]
   },
