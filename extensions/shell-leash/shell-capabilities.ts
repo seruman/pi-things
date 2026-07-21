@@ -62,6 +62,15 @@ function commandRule(id: string, parts: string[], predicate?: (argv: Argv) => bo
 	}
 }
 
+function isDestructiveRm(argv: Argv): boolean {
+	for (const arg of argv.slice(1)) {
+		if (arg === "--") return false
+		if (arg === "--force" || arg === "--recursive") return true
+		if (/^-[^-]/u.test(arg) && /[fRr]/u.test(arg.slice(1))) return true
+	}
+	return false
+}
+
 function isShell(arg: string | undefined): boolean {
 	return arg === "sh" || arg === "bash"
 }
@@ -82,7 +91,7 @@ function unwrapShellWrapper(argv: Argv): Argv | null {
 }
 
 export const DEFAULT_CAPABILITIES: Capability[] = [
-	capability("fs.rm", "Run rm", [commandRule("fs.rm", ["rm"])]),
+	capability("fs.rm", "Run recursive or forced rm", [commandRule("fs.rm", ["rm"], isDestructiveRm)]),
 	capability("git.commit.amend", "Run git commit --amend", [
 		commandRule("git.commit.amend", ["git", "commit"], (argv) => argv.includes("--amend")),
 	]),

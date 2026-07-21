@@ -88,16 +88,19 @@ test("detects more git discard and force-push forms", () => {
 	}
 })
 
-test("detects more gh argv shapes and rm variants", () => {
+test("detects more gh argv shapes and destructive rm variants", () => {
 	for (const [input, capability] of [
 		["gh pr merge 123", "gh.pr.merge"],
 		["gh pr comment 123 --body x", "gh.pr.comment"],
 		["gh pr create --title x --body y", "gh.pr.create"],
 		["gh issue create --title x --body y", "gh.issue.create"],
 		["gh issue comment 123 --body x", "gh.issue.comment"],
-		["rm file.txt", "fs.rm"],
+		["rm -f file.txt", "fs.rm"],
 		["rm -r build", "fs.rm"],
+		["rm -R build", "fs.rm"],
 		["rm -rf build tmp", "fs.rm"],
+		["rm --force file.txt", "fs.rm"],
+		["rm --recursive build", "fs.rm"],
 	] as const) {
 		const result = analyseShellCommand(input)
 		assert.equal(result.hits[0]?.capability, capability, input)
@@ -128,21 +131,21 @@ test("detects double-quoted nested shell forms and mixed nesting contexts", () =
 })
 
 test("produces correct argv from glob, tilde, escaped, and brace word parts", () => {
-	const glob = analyseShellCommand("rm *.txt")
+	const glob = analyseShellCommand("rm -f *.txt")
 	assert.equal(glob.hits[0]?.capability, "fs.rm")
-	assert.equal(glob.hits[0]?.command, "rm *.txt")
+	assert.equal(glob.hits[0]?.command, "rm -f *.txt")
 
-	const tilde = analyseShellCommand("rm ~/tmp")
+	const tilde = analyseShellCommand("rm -f ~/tmp")
 	assert.equal(tilde.hits[0]?.capability, "fs.rm")
-	assert.equal(tilde.hits[0]?.command, "rm ~/tmp")
+	assert.equal(tilde.hits[0]?.command, "rm -f ~/tmp")
 
-	const escaped = analyseShellCommand("rm my\\ file.txt")
+	const escaped = analyseShellCommand("rm -f my\\ file.txt")
 	assert.equal(escaped.hits[0]?.capability, "fs.rm")
-	assert.equal(escaped.hits[0]?.command, "rm my file.txt")
+	assert.equal(escaped.hits[0]?.command, "rm -f my file.txt")
 
-	const braces = analyseShellCommand("rm {a,b}.txt")
+	const braces = analyseShellCommand("rm -f {a,b}.txt")
 	assert.equal(braces.hits[0]?.capability, "fs.rm")
-	assert.equal(braces.hits[0]?.command, "rm {...}.txt")
+	assert.equal(braces.hits[0]?.command, "rm -f {...}.txt")
 })
 
 test("unparsable or partially understood commands do not block execution", () => {
@@ -189,6 +192,8 @@ test("does not flag read-only git and gh commands or plain strings", () => {
 		"git config --local user.name Selman",
 		"gh pr view 123",
 		"gh issue view 123",
+		"rm file.txt",
+		"rm -- --force",
 		"echo git push",
 		"printf 'rm -rf build\n'",
 	]) {

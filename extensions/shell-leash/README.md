@@ -8,7 +8,7 @@ Not a sandbox, not a security boundary, just enough to stop me swearing to the s
 
 | Capability | What it catches |
 |---|---|
-| `fs.rm` | `rm` |
+| `fs.rm` | Recursive or forced `rm` (`-r`, `-R`, `-f`, and combined/long forms) |
 | `git.commit.amend` | `git commit --amend` |
 | `git.checkout` | `git checkout` (branch, path, ours/theirs) |
 | `git.switch` | `git switch` |
