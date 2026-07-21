@@ -36,8 +36,8 @@
       "./extensions/split-fork.ts",
       "./extensions/goal.ts",
       "./extensions/comment.ts",
-      "./extensions/pi-safety/index.ts",
-      "./extensions/shell-leash/index.ts"
+      "./extensions/shell-leash/index.ts",
+      "./extensions/pi-safety/index.ts"
     ],
     "skills": ["./skills", "./extensions/web-tools/skills"]
   },

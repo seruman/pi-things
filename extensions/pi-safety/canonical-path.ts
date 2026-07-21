@@ -37,6 +37,7 @@ export function parseCanonicalPath(input: string): Result<CanonicalPath, Canonic
 
 	let candidate = path.normalize(input)
 	const missingComponents: string[] = []
+	const visitedSymlinks = new Set<string>()
 
 	while (true) {
 		try {
@@ -54,6 +55,20 @@ export function parseCanonicalPath(input: string): Result<CanonicalPath, Canonic
 				if (unsupportedLeaf.isSocket()) {
 					missingComponents.unshift(path.basename(candidate))
 					candidate = path.dirname(candidate)
+					continue
+				}
+				if (unsupportedLeaf.isSymbolicLink()) {
+					if (visitedSymlinks.has(candidate)) {
+						return err({ kind: "filesystem", input, path: candidate, code: "ELOOP" })
+					}
+					visitedSymlinks.add(candidate)
+					let target: string
+					try {
+						target = fs.readlinkSync(candidate)
+					} catch (readlinkError) {
+						return err({ kind: "filesystem", input, path: candidate, code: errorCode(readlinkError) })
+					}
+					candidate = path.resolve(path.dirname(candidate), target)
 					continue
 				}
 			}

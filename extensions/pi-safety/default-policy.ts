@@ -45,6 +45,7 @@ import {
 	xpcMachService,
 } from "./policy"
 import { type Result, err, ok } from "./result"
+import type { SessionPathGrant } from "./session-paths"
 
 const SNAPSHOT_EXCLUDED_COMPONENTS = [
 	".git",
@@ -81,6 +82,7 @@ export type DefaultPolicyError =
 export function createDefaultPolicy(input: {
 	readonly paths: DefaultPolicyPaths
 	readonly additionalNoAccessPatterns: readonly string[]
+	readonly sessionPaths?: readonly SessionPathGrant[]
 	readonly sandbox:
 		| { readonly kind: "disabled" }
 		| { readonly kind: "enabled"; readonly privateTemp: CanonicalPath; readonly integrations: BashIntegrations }
@@ -100,6 +102,7 @@ export function createDefaultPolicy(input: {
 function createDefaultPolicyFromParsedRoots(input: {
 	readonly paths: DefaultPolicyPaths
 	readonly additionalNoAccessPatterns: readonly string[]
+	readonly sessionPaths?: readonly SessionPathGrant[]
 	readonly sandbox:
 		| { readonly kind: "disabled" }
 		| { readonly kind: "enabled"; readonly privateTemp: CanonicalPath; readonly integrations: BashIntegrations }
@@ -111,7 +114,17 @@ function createDefaultPolicyFromParsedRoots(input: {
 	const rules: PolicyRule[] = []
 
 	// Host and workspace.
-	rules.push(readOnly(shared(), tree(root.value)), readWrite(shared(), tree(input.paths.workspace)))
+	const sessionPaths = input.sessionPaths ?? []
+	rules.push(
+		readOnly(shared(), tree(root.value)),
+		...sessionPaths
+			.filter((grant) => grant.access === "read-only")
+			.map((grant) => readOnly(shared(), tree(grant.path))),
+		readWrite(shared(), tree(input.paths.workspace)),
+		...sessionPaths
+			.filter((grant) => grant.access === "read-write")
+			.map((grant) => readWrite(shared(), tree(grant.path))),
+	)
 
 	// Project configuration is readable but only its owning integration may change it.
 	rules.push(
@@ -147,6 +160,7 @@ function createDefaultPolicyFromParsedRoots(input: {
 		const integrations = input.sandbox.integrations
 		rules.push(
 			readWrite(sandbox(), tree(input.sandbox.privateTemp)),
+			readWrite(sandbox(), seatbeltTree(fixedPath("/private/tmp"))),
 			readWrite(sandbox(), seatbeltTree(fixedPath("/dev/fd"))),
 			...["/dev/stdout", "/dev/stderr", "/dev/null", "/dev/tty", "/dev/ptmx"].map((pathname) =>
 				readWrite(sandbox(), seatbeltFile(fixedPath(pathname))),
@@ -160,6 +174,9 @@ function createDefaultPolicyFromParsedRoots(input: {
 				tree(pathValue(input.paths.workspace, ".git", "config.worktree")),
 			),
 		)
+		if (integrations.nix.kind === "enabled") {
+			rules.push(readWrite(executable(integrations.nix.executable), tree(integrations.nix.cacheDirectory)))
+		}
 		if (integrations.wb.kind === "enabled") {
 			rules.push(
 				readWrite(executable(integrations.wb.executable), tree(integrations.wb.runtimeDirectory)),
@@ -281,6 +298,15 @@ function createDefaultPolicyFromParsedRoots(input: {
 			if (integration.kind === "unix-socket") {
 				rules.push(unixConnectRule({ effect: "allow", matchers: [unixSocketPath(integration.socket)] }))
 			}
+		}
+		if (integrations.nix.kind === "enabled" && integrations.nix.daemon.kind === "unix-socket") {
+			rules.push(
+				unixConnectRule({
+					effect: "allow",
+					matchers: [unixSocketPath(integrations.nix.daemon.socket)],
+					process: integrations.nix.executable,
+				}),
+			)
 		}
 
 		// Native wb and its WebKit children receive only wb-scoped capabilities.

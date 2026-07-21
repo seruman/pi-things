@@ -20,18 +20,27 @@ import { type Result, err, ok } from "./result"
 import { createConfiguredSnapshotStore } from "./safety-filesystem"
 import type { CompiledSbpl } from "./sbpl"
 import { emitSeatbelt } from "./seatbelt"
+import {
+	type SessionPathAccess,
+	type SessionPathError,
+	type SessionPathGrant,
+	parseSessionPathGrant,
+	parseSessionPathsEnvironment,
+} from "./session-paths"
 import { type SnapshotCreationOrigin, type SnapshotError, type SnapshotStore, createSnapshot } from "./snapshot"
 import { type ToolAuthorizationError, authorizeBuiltinToolCall } from "./tool-authorization"
 
 export interface RawSafetySessionConfiguration extends RawPolicyConfiguration {
 	readonly privateTemp: string
 	readonly integrationEnvironment: RawIntegrationEnvironment
+	readonly sessionPathsEnvironment?: string
 }
 
 export type SafetySessionError =
 	| { readonly kind: "policy-configuration"; readonly cause: PolicyConfigurationError }
 	| { readonly kind: "policy"; readonly cause: DefaultPolicyError }
 	| { readonly kind: "private-temp"; readonly message: string }
+	| { readonly kind: "session-path"; readonly cause: SessionPathError }
 	| { readonly kind: "integration"; readonly cause: IntegrationError }
 	| { readonly kind: "snapshot-store"; readonly cause: SnapshotError }
 
@@ -49,18 +58,34 @@ export interface SafetySession {
 	policyDescription(): string
 	bashEnvironment(): Readonly<NodeJS.ProcessEnv>
 	cleanup(): Result<undefined, IntegrationError>
+	sessionPaths(): readonly SessionPathGrant[]
+	addSessionPath(
+		path: string,
+		access: SessionPathAccess,
+	): Result<SessionPathGrant, SessionPathError | DefaultPolicyError>
+	removeSessionPath(path: string): Result<boolean, SessionPathError | DefaultPolicyError>
 	authorize(toolName: string, input: unknown): Promise<SafetyDecision>
 }
 
 class ManagedSafetySession implements SafetySession {
 	readonly snapshotStore: SnapshotStore
-	readonly #policy: Policy
+	#policy: Policy
 	readonly #integrations: BashIntegrations
+	readonly #policyInput: Omit<Parameters<typeof createDefaultPolicy>[0], "sessionPaths">
+	#sessionPaths: readonly SessionPathGrant[]
 	#checkpointRun: CheckpointRun | undefined
 
-	constructor(policy: Policy, integrations: BashIntegrations, snapshotStore: SnapshotStore) {
+	constructor(
+		policy: Policy,
+		integrations: BashIntegrations,
+		snapshotStore: SnapshotStore,
+		policyInput: Omit<Parameters<typeof createDefaultPolicy>[0], "sessionPaths">,
+		sessionPaths: readonly SessionPathGrant[],
+	) {
 		this.#policy = policy
 		this.#integrations = integrations
+		this.#policyInput = policyInput
+		this.#sessionPaths = sessionPaths
 		this.snapshotStore = snapshotStore
 	}
 
@@ -96,6 +121,49 @@ class ManagedSafetySession implements SafetySession {
 		return cleanupBashIntegrations(this.#integrations)
 	}
 
+	sessionPaths(): readonly SessionPathGrant[] {
+		return [...this.#sessionPaths]
+	}
+
+	addSessionPath(
+		pathname: string,
+		access: SessionPathAccess,
+	): Result<SessionPathGrant, SessionPathError | DefaultPolicyError> {
+		const parsed = parseSessionPathGrant({
+			path: pathname,
+			access,
+			home: this.#policyInput.paths.home,
+			allowTilde: true,
+		})
+		if (!parsed.ok) return parsed
+		const next = [...this.#sessionPaths.filter((grant) => grant.path !== parsed.value.path), parsed.value]
+		const updated = createDefaultPolicy({ ...this.#policyInput, sessionPaths: next })
+		if (!updated.ok) return updated
+		this.#sessionPaths = Object.freeze(next)
+		this.#policy = updated.value
+		return parsed
+	}
+
+	removeSessionPath(pathname: string): Result<boolean, SessionPathError | DefaultPolicyError> {
+		const existing = this.#sessionPaths.find((grant) => grant.path === pathname)
+		const parsed = existing
+			? ok(existing)
+			: parseSessionPathGrant({
+					path: pathname,
+					access: "read-only",
+					home: this.#policyInput.paths.home,
+					allowTilde: true,
+				})
+		if (!parsed.ok) return parsed
+		const next = this.#sessionPaths.filter((grant) => grant.path !== parsed.value.path)
+		if (next.length === this.#sessionPaths.length) return ok(false)
+		const updated = createDefaultPolicy({ ...this.#policyInput, sessionPaths: next })
+		if (!updated.ok) return updated
+		this.#sessionPaths = Object.freeze(next)
+		this.#policy = updated.value
+		return ok(true)
+	}
+
 	async authorize(toolName: string, input: unknown): Promise<SafetyDecision> {
 		const authorization = authorizeBuiltinToolCall(toolName, input, this.#policy)
 		if (!authorization.ok) {
@@ -121,6 +189,8 @@ export function createSafetySession(raw: RawSafetySessionConfiguration): Result<
 	if (!configuration.ok) return err({ kind: "policy-configuration", cause: configuration.error })
 	const privateTemp = parseCanonicalPath(raw.privateTemp)
 	if (!privateTemp.ok) return err({ kind: "private-temp", message: JSON.stringify(privateTemp.error) })
+	const sessionPaths = parseSessionPathsEnvironment(raw.sessionPathsEnvironment, configuration.value.paths.home)
+	if (!sessionPaths.ok) return err({ kind: "session-path", cause: sessionPaths.error })
 	const integrations = parseBashIntegrations({
 		environment: raw.integrationEnvironment,
 		home: configuration.value.paths.home,
@@ -128,17 +198,20 @@ export function createSafetySession(raw: RawSafetySessionConfiguration): Result<
 	if (!integrations.ok) return err({ kind: "integration", cause: integrations.error })
 	const preparedIntegrations = prepareBashIntegrations(integrations.value)
 	if (!preparedIntegrations.ok) return err({ kind: "integration", cause: preparedIntegrations.error })
-	const policy = createDefaultPolicy({
+	const policyInput = {
 		paths: configuration.value.paths,
 		additionalNoAccessPatterns: configuration.value.additionalNoAccessPatterns,
-		sandbox: { kind: "enabled", privateTemp: privateTemp.value, integrations: integrations.value },
-	})
+		sandbox: { kind: "enabled" as const, privateTemp: privateTemp.value, integrations: integrations.value },
+	}
+	const policy = createDefaultPolicy({ ...policyInput, sessionPaths: sessionPaths.value })
 	if (!policy.ok) return cleanupAfterFailure(integrations.value, { kind: "policy", cause: policy.error })
 	const snapshotStore = createConfiguredSnapshotStore(configuration.value, policy.value)
 	if (!snapshotStore.ok) {
 		return cleanupAfterFailure(integrations.value, { kind: "snapshot-store", cause: snapshotStore.error })
 	}
-	return ok(new ManagedSafetySession(policy.value, integrations.value, snapshotStore.value))
+	return ok(
+		new ManagedSafetySession(policy.value, integrations.value, snapshotStore.value, policyInput, sessionPaths.value),
+	)
 }
 
 function cleanupAfterFailure(

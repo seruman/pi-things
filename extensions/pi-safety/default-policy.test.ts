@@ -32,6 +32,7 @@ test("a final shared denial constrains sandbox runtime capabilities", () => {
 					privateTemp: canonicalPath(privateTemp),
 					integrations: {
 						gitExecutable: canonicalExecutable("/usr/bin/git"),
+						nix: { kind: "disabled" },
 						sshAgent: { kind: "disabled" },
 						docker: { kind: "disabled" },
 						wb: { kind: "disabled" },
@@ -52,6 +53,57 @@ test("a final shared denial constrains sandbox runtime capabilities", () => {
 		assertDenied(
 			runWithSeatbeltProfile(emitSeatbelt(policy), "/bin/bash", ["-c", "printf blocked > /dev/null"], workspace),
 		)
+	})
+})
+
+test("Nix daemon access is scoped to the canonical Nix executable", () => {
+	withTestTempDirectory("default-policy-nix-process-", (root) => {
+		const workspace = path.join(root, "workspace")
+		const home = path.join(root, "home")
+		const stateHome = path.join(root, "state")
+		const piConfigDirectory = path.join(root, "pi-agent")
+		const privateTemp = path.join(root, "tmp")
+		const cacheDirectory = path.join(home, ".cache", "nix")
+		for (const directory of [workspace, home, stateHome, piConfigDirectory, privateTemp, cacheDirectory]) {
+			fs.mkdirSync(directory, { recursive: true })
+		}
+		const nixExecutable = canonicalExecutable(process.execPath)
+		const daemonSocket = canonicalPath(path.join(root, "nix-daemon.sock"))
+		const policy = unwrap(
+			createDefaultPolicy({
+				paths: {
+					workspace: canonicalPath(workspace),
+					home: canonicalPath(home),
+					stateHome: canonicalPath(stateHome),
+					piConfigDirectory: canonicalPath(piConfigDirectory),
+				},
+				additionalNoAccessPatterns: [],
+				sandbox: {
+					kind: "enabled",
+					privateTemp: canonicalPath(privateTemp),
+					integrations: {
+						gitExecutable: canonicalExecutable("/usr/bin/git"),
+						nix: {
+							kind: "enabled",
+							executable: nixExecutable,
+							cacheDirectory: canonicalPath(cacheDirectory),
+							daemon: { kind: "unix-socket", socket: daemonSocket },
+						},
+						sshAgent: { kind: "disabled" },
+						docker: { kind: "disabled" },
+						wb: { kind: "disabled" },
+					},
+				},
+			}),
+		)
+		const daemonRule = policy.rules.find(
+			(rule) =>
+				rule.kind === "unix-connect" &&
+				rule.effect === "allow" &&
+				rule.matchers.some((matcher) => matcher.kind === "path" && matcher.path === daemonSocket),
+		)
+		assert.equal(daemonRule?.kind, "unix-connect")
+		if (daemonRule?.kind === "unix-connect") assert.equal(daemonRule.process, nixExecutable)
 	})
 })
 
@@ -78,6 +130,7 @@ test("every default access and snapshot declaration has an observable policy dec
 					privateTemp: canonicalPath(privateTemp),
 					integrations: {
 						gitExecutable: git,
+						nix: { kind: "disabled" },
 						sshAgent: { kind: "disabled" },
 						docker: { kind: "disabled" },
 						wb: { kind: "disabled" },
@@ -98,6 +151,8 @@ test("every default access and snapshot declaration has an observable policy dec
 		assert.equal(access(path.join(workspace, "src", "index.ts"), "write"), "allow")
 		assert.equal(access(path.join(privateTemp, "sandbox-file"), "write"), "deny")
 		assert.equal(access(path.join(privateTemp, "sandbox-file"), "write", { kind: "sandbox" }), "allow")
+		assert.equal(access("/private/tmp/pi-safety-file", "write"), "deny")
+		assert.equal(access("/private/tmp/pi-safety-file", "write", { kind: "sandbox" }), "allow")
 
 		const projectConfiguration = [
 			[".git", "hooks", "post-commit"],
@@ -251,6 +306,7 @@ test("the default policy expresses shared restrictions and sandbox capabilities 
 					privateTemp: canonicalPath(privateTemp),
 					integrations: {
 						gitExecutable: canonicalExecutable("/usr/bin/git"),
+						nix: { kind: "disabled" },
 						sshAgent: { kind: "disabled" },
 						docker: { kind: "disabled" },
 						wb: { kind: "disabled" },
