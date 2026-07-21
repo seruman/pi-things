@@ -34,7 +34,14 @@ export default function (pi: ExtensionAPI) {
 		const choice = await ctx.ui.select(prompt, options)
 
 		if (!choice || choice === "Deny") {
-			return { block: true, reason: `Blocked: ${capabilities.join(", ")}` }
+			return {
+				block: true,
+				reason: [
+					`shell-leash blocked this command because it requires approval for: ${capabilities.join(", ")}.`,
+					"The user denied or dismissed the request. Do not bypass the guard or retry an equivalent destructive command.",
+					"Use a safer approach, or explain why the operation is necessary and ask the user for approval.",
+				].join(" "),
+			}
 		}
 
 		if (choice !== "Allow once") {
