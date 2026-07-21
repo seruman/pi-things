@@ -28,8 +28,18 @@ export type WbIntegration =
 			readonly cacheState: CanonicalPath
 	  }
 
+export type NixIntegration =
+	| { readonly kind: "disabled" }
+	| {
+			readonly kind: "enabled"
+			readonly executable: CanonicalExecutable
+			readonly cacheDirectory: CanonicalPath
+			readonly daemon: SocketIntegration
+	  }
+
 export interface BashIntegrations {
 	readonly gitExecutable: CanonicalExecutable
+	readonly nix: NixIntegration
 	readonly sshAgent: SocketIntegration
 	readonly docker: SocketIntegration
 	readonly wb: WbIntegration
@@ -40,9 +50,11 @@ export interface RawIntegrationEnvironment {
 	readonly sshAuthSock: string | undefined
 	readonly dockerHost: string | undefined
 	readonly dockerContext: string | undefined
+	readonly xdgCacheHome?: string
+	readonly nixRemote?: string
 }
 
-type IntegrationName = "git" | "ssh-agent" | "docker" | "wb"
+type IntegrationName = "git" | "nix" | "ssh-agent" | "docker" | "wb"
 
 const dockerConfigurationSchema = z.object({ currentContext: z.string().min(1).optional() }).passthrough()
 const dockerContextMetadataSchema = z
@@ -82,6 +94,24 @@ export function parseBashIntegrations(input: {
 		if (!systemGit.ok) return integrationError("git", "/usr/bin/git", JSON.stringify(systemGit.error))
 		git = systemGit.value
 	}
+	const nixExecutable = findExecutable("nix", "nix", input.environment.path)
+	if (!nixExecutable.ok) return nixExecutable
+	let nix: NixIntegration = { kind: "disabled" }
+	if (nixExecutable.value) {
+		const cacheDirectory = parseIntegrationPath(
+			"nix",
+			path.join(input.environment.xdgCacheHome ?? path.join(input.home, ".cache"), "nix"),
+		)
+		if (!cacheDirectory.ok) return cacheDirectory
+		const daemon = parseNixDaemon(input.environment.nixRemote)
+		if (!daemon.ok) return daemon
+		nix = {
+			kind: "enabled",
+			executable: nixExecutable.value,
+			cacheDirectory: cacheDirectory.value,
+			daemon: daemon.value,
+		}
+	}
 	const sshAgent = parseOptionalSocket("ssh-agent", input.environment.sshAuthSock)
 	if (!sshAgent.ok) return sshAgent
 	const docker = parseDocker(input.environment.dockerHost, input.environment.dockerContext, input.home)
@@ -114,7 +144,7 @@ export function parseBashIntegrations(input: {
 			cacheState: cacheState.value,
 		}
 	}
-	return ok(Object.freeze({ gitExecutable: git, sshAgent: sshAgent.value, docker: docker.value, wb }))
+	return ok(Object.freeze({ gitExecutable: git, nix, sshAgent: sshAgent.value, docker: docker.value, wb }))
 }
 
 export function prepareBashIntegrations(integrations: BashIntegrations): Result<undefined, IntegrationError> {
@@ -157,6 +187,31 @@ export function cleanupBashIntegrations(integrations: BashIntegrations): Result<
 			message: cause instanceof Error ? cause.message : String(cause),
 		})
 	}
+}
+
+function parseNixDaemon(input: string | undefined): Result<SocketIntegration, IntegrationError> {
+	if (input === "local") return ok({ kind: "disabled" })
+	if (input === undefined || input === "" || input === "auto" || input === "daemon") {
+		const socket = parseIntegrationPath("nix", "/nix/var/nix/daemon-socket/socket")
+		return socket.ok ? ok({ kind: "unix-socket", socket: socket.value }) : socket
+	}
+	if (input.startsWith("unix://")) {
+		let url: URL
+		try {
+			url = new URL(input)
+		} catch (cause) {
+			return integrationError("nix", input, cause)
+		}
+		let socketPath: string
+		try {
+			socketPath = decodeURIComponent(url.pathname)
+		} catch (cause) {
+			return integrationError("nix", input, cause)
+		}
+		const socket = parseIntegrationPath("nix", socketPath)
+		return socket.ok ? ok({ kind: "unix-socket", socket: socket.value }) : socket
+	}
+	return ok({ kind: "network" })
 }
 
 function parseOptionalSocket(

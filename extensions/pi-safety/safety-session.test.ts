@@ -45,6 +45,32 @@ test("exposes the session's resolved policy without changing checkpoint state", 
 	})
 })
 
+test("session paths grant and revoke uncheckpointed external write authority", async () => {
+	await withTestTempDirectoryAsync("safety-session-paths-", async (root) => {
+		const session = fixture(root)
+		const external = path.join(root, "other-repo")
+		fs.mkdirSync(external)
+
+		assert.equal(
+			(await session.authorize("write", { path: path.join(external, "file.txt"), content: "x" })).kind,
+			"block",
+		)
+		assert.equal(session.addSessionPath(external, "read-write").ok, true)
+		assert.deepEqual(session.sessionPaths(), [{ path: external, access: "read-write" }])
+
+		session.beginAgentRun()
+		assert.equal(
+			(await session.authorize("write", { path: path.join(external, "file.txt"), content: "x" })).kind,
+			"allow",
+		)
+		assert.deepEqual(session.removeSessionPath(external), { ok: true, value: true })
+		assert.equal(
+			(await session.authorize("write", { path: path.join(external, "file.txt"), content: "x" })).kind,
+			"block",
+		)
+	})
+})
+
 test("reads and denied mutations do not create a lazy checkpoint", async () => {
 	await withTestTempDirectoryAsync("safety-session-read-", async (root) => {
 		const session = fixture(root)

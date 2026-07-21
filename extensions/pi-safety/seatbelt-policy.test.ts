@@ -19,13 +19,14 @@ function installedGit() {
 function disabledIntegrations() {
 	return {
 		gitExecutable: installedGit(),
+		nix: { kind: "disabled" },
 		sshAgent: { kind: "disabled" },
 		docker: { kind: "disabled" },
 		wb: { kind: "disabled" },
 	} as const
 }
 
-function fixture(root: string) {
+function fixture(root: string, sessionPaths: Parameters<typeof createDefaultPolicy>[0]["sessionPaths"] = []) {
 	const workspace = path.join(root, "workspace")
 	const home = path.join(root, "home")
 	const privateTemp = path.join(root, "tmp")
@@ -41,11 +42,25 @@ function fixture(root: string) {
 				piConfigDirectory: canonicalPath(piConfigDirectory),
 			},
 			additionalNoAccessPatterns: [],
+			sessionPaths,
 			sandbox: { kind: "enabled", privateTemp: canonicalPath(privateTemp), integrations: disabledIntegrations() },
 		}),
 	)
 	return { workspace, home, privateTemp, stateHome, compiled: emitSeatbelt(policy), policy }
 }
+
+test("Seatbelt grants confirmed session directories without changing the checkpoint workspace", () => {
+	withTestTempDirectory("seatbelt-policy-session-path-", (root) => {
+		const external = path.join(root, "other-repo")
+		fs.mkdirSync(external)
+		const value = fixture(root, [{ path: canonicalPath(external), access: "read-write" }])
+		const output = path.join(external, "created.txt")
+		const result = runWithSeatbelt(value.compiled, "/bin/bash", ["-c", `printf allowed > ${JSON.stringify(output)}`])
+		assert.equal(result.status, 0, result.stderr)
+		assert.equal(fs.readFileSync(output, "utf8"), "allowed")
+		assert.equal(value.policy.workspaceRoot, value.workspace)
+	})
+})
 
 test("Seatbelt permits workspace workflows and sandbox-only temporary files", () => {
 	withTestTempDirectory("seatbelt-policy-workspace-", (root) => {
@@ -134,6 +149,7 @@ test("native wb grants remain scoped to the wb executable", () => {
 		}
 		const integrations = {
 			gitExecutable: installedGit(),
+			nix: { kind: "disabled" },
 			sshAgent: { kind: "disabled" },
 			docker: { kind: "disabled" },
 			wb: {

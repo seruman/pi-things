@@ -44,6 +44,7 @@ test("describes every rule in a fully integrated default policy", () => {
 					privateTemp: canonicalPath(privateTemp),
 					integrations: {
 						gitExecutable: canonicalExecutable("/usr/bin/git"),
+						nix: { kind: "disabled" },
 						sshAgent: { kind: "unix-socket", socket: canonicalPath(path.join(root, "ssh.sock")) },
 						docker: { kind: "unix-socket", socket: canonicalPath(path.join(root, "docker.sock")) },
 						wb: {
