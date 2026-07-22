@@ -77,6 +77,66 @@ test("Seatbelt permits workspace workflows and sandbox-only temporary files", ()
 	})
 })
 
+test("Seatbelt supports a disposable login-style Keychain", () => {
+	withTestTempDirectory("seatbelt-policy-keychain-", (root) => {
+		const value = fixture(root)
+		const securityServer = value.compiled.parameters.find((parameter) => parameter.value === "com.apple.SecurityServer")
+		const securitydXpc = value.compiled.parameters.find((parameter) => parameter.value === "com.apple.securityd.xpc")
+		assert.ok(securityServer)
+		assert.ok(securitydXpc)
+		for (const parameter of [securityServer, securitydXpc]) {
+			const globalNameLine = value.compiled.source
+				.split("\n")
+				.find((line) => line.includes(`(param "${parameter.name}")`))
+			assert.match(globalNameLine ?? "", /^\s+\(global-name /)
+		}
+
+		const keychainDirectory = path.join(value.home, "Library", "Keychains")
+		const keychain = path.join(keychainDirectory, "pi-safety-test.keychain-db")
+		const environment = { ...process.env, HOME: value.home }
+		fs.mkdirSync(keychainDirectory, { recursive: true })
+		const created = Bun.spawnSync(["/usr/bin/security", "create-keychain", "-p", "pi-safety-test", keychain], {
+			env: environment,
+			stderr: "pipe",
+			stdout: "pipe",
+		})
+		assert.equal(created.exitCode, 0, created.stderr.toString())
+		try {
+			const unlocked = Bun.spawnSync(["/usr/bin/security", "unlock-keychain", "-p", "pi-safety-test", keychain], {
+				env: environment,
+				stderr: "pipe",
+				stdout: "pipe",
+			})
+			assert.equal(unlocked.exitCode, 0, unlocked.stderr.toString())
+
+			const runSecurity = (args: readonly string[]) =>
+				runWithSeatbelt(value.compiled, "/usr/bin/security", args, value.workspace, environment)
+			const added = runSecurity([
+				"add-generic-password",
+				"-a",
+				"pi-safety-test",
+				"-s",
+				"pi-safety-test",
+				"-w",
+				"temporary-test-value",
+				keychain,
+			])
+			assert.equal(added.status, 0, added.stderr)
+			const found = runSecurity(["find-generic-password", "-a", "pi-safety-test", "-s", "pi-safety-test", keychain])
+			assert.equal(found.status, 0, found.stderr)
+			assert.match(found.stdout, /"svce"<blob>="pi-safety-test"/)
+			const removed = runSecurity(["delete-generic-password", "-a", "pi-safety-test", "-s", "pi-safety-test", keychain])
+			assert.equal(removed.status, 0, removed.stderr)
+		} finally {
+			Bun.spawnSync(["/usr/bin/security", "delete-keychain", keychain], {
+				env: environment,
+				stderr: "ignore",
+				stdout: "ignore",
+			})
+		}
+	})
+})
+
 test("Seatbelt preserves later writable exceptions under read-only parents", () => {
 	withTestTempDirectory("seatbelt-policy-rule-order-", (root) => {
 		const value = fixture(root)

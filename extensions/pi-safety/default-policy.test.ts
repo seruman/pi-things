@@ -153,6 +153,9 @@ test("every default access and snapshot declaration has an observable policy dec
 		assert.equal(access(path.join(privateTemp, "sandbox-file"), "write", { kind: "sandbox" }), "allow")
 		assert.equal(access("/private/tmp/pi-safety-file", "write"), "deny")
 		assert.equal(access("/private/tmp/pi-safety-file", "write", { kind: "sandbox" }), "allow")
+		const loginKeychain = path.join(home, "Library", "Keychains", "login.keychain-db")
+		assert.equal(access(loginKeychain, "write"), "deny")
+		assert.equal(access(loginKeychain, "write", { kind: "sandbox" }), "allow")
 
 		const projectConfiguration = [
 			[".git", "hooks", "post-commit"],

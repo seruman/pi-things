@@ -160,6 +160,8 @@ function createDefaultPolicyFromParsedRoots(input: {
 		const integrations = input.sandbox.integrations
 		rules.push(
 			readWrite(sandbox(), tree(input.sandbox.privateTemp)),
+			// Preserve ordinary macOS Keychain workflows; item ACLs still authorize individual credentials.
+			readWrite(sandbox(), tree(pathValue(input.paths.home, "Library", "Keychains"))),
 			readWrite(sandbox(), seatbeltTree(fixedPath("/private/tmp"))),
 			readWrite(sandbox(), seatbeltTree(fixedPath("/dev/fd"))),
 			...["/dev/stdout", "/dev/stderr", "/dev/null", "/dev/tty", "/dev/ptmx"].map((pathname) =>
@@ -280,6 +282,8 @@ function createDefaultPolicyFromParsedRoots(input: {
 					fixedGlobalService("com.apple.FSEvents"),
 					fixedGlobalService("com.apple.SystemConfiguration.configd"),
 					fixedGlobalService("com.apple.SystemConfiguration.DNSConfiguration"),
+					fixedGlobalService("com.apple.SecurityServer"),
+					fixedGlobalService("com.apple.securityd.xpc"),
 					fixedGlobalService("com.apple.trustd.agent"),
 					fixedGlobalService("com.apple.diagnosticd"),
 					fixedGlobalService("com.apple.dnssd.service"),
