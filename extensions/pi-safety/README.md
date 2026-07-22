@@ -2,7 +2,9 @@
 
 Pi Safety is a macOS extension that makes Pi safer to use on local projects.
 
-Pi itself runs normally. By default, each model-issued Bash command runs in a new macOS sandbox. Bash can change files in the current project and `/tmp`, but it cannot change files elsewhere unless a supported tool needs a specific location. Supported integrations include Nix-executable-only access to the exact Nix daemon socket and `${XDG_CACHE_HOME:-$HOME/.cache}/nix`.
+Pi itself runs normally. By default, each model-issued Bash command runs in a new macOS sandbox. Bash can change files in the current project and `/tmp`, but it cannot change files elsewhere unless a supported workflow needs a specific location. Supported integrations include the macOS login Keychain and Nix-executable-only access to the exact Nix daemon socket and `${XDG_CACHE_HOME:-$HOME/.cache}/nix`.
+
+Sandboxed Bash can read and update login-Keychain items permitted by macOS Keychain ACLs. Pi Safety grants the required Security services and read-write access to `~/Library/Keychains`; Keychain changes are outside project checkpoints. This restores normal pre-sandbox Keychain behavior rather than adding item-level authorization—macOS remains responsible for deciding which credentials a program may access.
 
 Pi's built-in `read`, `write`, and `edit` tools still work normally. Pi Safety checks their file paths before they run. It blocks access to secrets such as `.env` files, private SSH keys, cloud credentials, and Pi authentication data. It also prevents changes to Git hooks, shell startup files, and other sensitive settings.
 
