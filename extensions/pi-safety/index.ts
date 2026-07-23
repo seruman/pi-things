@@ -1,6 +1,12 @@
 import * as os from "node:os"
 import * as path from "node:path"
-import { type ExtensionAPI, type ExtensionContext, createBashTool } from "@earendil-works/pi-coding-agent"
+import {
+	type ExtensionAPI,
+	type ExtensionContext,
+	FooterComponent,
+	createBashTool,
+} from "@earendil-works/pi-coding-agent"
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui"
 import { createSandboxedBashOperations } from "./bash-launcher"
 import { type SafetyConfigurationError, loadProjectSafetyConfiguration } from "./configuration"
 import { type SafetySession, type SafetySessionError, createSafetySession } from "./safety-session"
@@ -20,7 +26,6 @@ type SessionInitialization =
 
 const GUARDED_TOOLS = new Set(["bash", "read", "write", "edit"])
 const CHECKPOINT_ENTRY_TYPE = "pi-safety-checkpoint"
-const PROTECTION_STATUS_KEY = "pi-safety-protection"
 
 interface CheckpointEntryData {
 	readonly version: 1
@@ -101,20 +106,16 @@ export default function piSafety(pi: ExtensionAPI): void {
 						context.ui.notify(initialization.session.policyDescription(), "info")
 						break
 					}
-					const statusLines = piSafetyStatusLines(initialization.session, features.protection, features.checkpoints)
+					const session = initialization.session
 					if (action === "status") {
+						const statusLines = piSafetyStatusLines(session, features.protection, features.checkpoints)
 						context.ui.notify(`pi-safety: ${statusLines.join("\n")}`, "info")
 						break
 					}
-					const changed = await showPiSafetySettings(context, features.protection, features.checkpoints, statusLines)
-					if (!changed) break
-					features[changed.feature] = changed.enabled
-					if (changed.feature === "protection") updateProtectionStatus(context, changed.enabled)
-					const label = changed.feature === "protection" ? "filesystem protection" : "APFS checkpoints"
-					context.ui.notify(
-						`pi-safety: ${label} ${changed.enabled ? "enabled" : "disabled"}`,
-						changed.enabled ? "info" : "warning",
-					)
+					await showPiSafetySettings(context, features.protection, features.checkpoints, (feature, enabled) => {
+						features[feature] = enabled
+						if (feature === "protection") updateSeatbeltFooter(pi, context, enabled)
+					})
 					break
 				}
 			}
@@ -125,7 +126,7 @@ export default function piSafety(pi: ExtensionAPI): void {
 		recordedCheckpointId = undefined
 		features.protection = process.env.PI_SAFETY_PROTECTION === "1"
 		features.checkpoints = true
-		if (context.hasUI) updateProtectionStatus(context, features.protection)
+		if (context.hasUI) updateSeatbeltFooter(pi, context, features.protection)
 		const projectConfiguration = loadProjectSafetyConfiguration(context.cwd)
 		if (!projectConfiguration.ok) {
 			initialization = { kind: "failed", error: { kind: "configuration", cause: projectConfiguration.error } }
@@ -169,7 +170,7 @@ export default function piSafety(pi: ExtensionAPI): void {
 	})
 
 	pi.on("session_shutdown", async (_event, context) => {
-		if (context.hasUI) context.ui.setStatus(PROTECTION_STATUS_KEY, undefined)
+		if (context.hasUI) context.ui.setFooter(undefined)
 		if (initialization.kind !== "ready") return
 		const cleaned = initialization.session.cleanup()
 		if (!cleaned.ok) throw new Error(`pi-safety: integration cleanup failed (${cleaned.error.kind})`)
@@ -231,7 +232,7 @@ function formatInitializationError(error: SessionInitializationError): string {
 
 function piSafetyStatusLines(session: SafetySession, protection: boolean, checkpoints: boolean): readonly string[] {
 	return [
-		`protection=${protection ? "enabled" : "disabled"}`,
+		`seatbelt=${protection ? "enabled" : "disabled"}`,
 		`checkpoints=${checkpoints ? `enabled · ${formatCheckpointStatus(session.checkpointStatus())}` : "disabled"}`,
 		`workspace=${session.snapshotStore.workspaceRoot}`,
 		`store=${session.snapshotStore.projectDirectory}`,
@@ -291,11 +292,43 @@ async function removeSessionPath(context: ExtensionContext, session: SafetySessi
 	)
 }
 
-function updateProtectionStatus(context: ExtensionContext, enabled: boolean): void {
-	context.ui.setStatus(
-		PROTECTION_STATUS_KEY,
-		enabled ? context.ui.theme.fg("accent", "Filesystem protection enabled") : undefined,
-	)
+function updateSeatbeltFooter(pi: ExtensionAPI, context: ExtensionContext, enabled: boolean): void {
+	if (!enabled) {
+		context.ui.setFooter(undefined)
+		return
+	}
+	context.ui.setFooter((tui, theme, footerData) => {
+		const footer = new FooterComponent(
+			{
+				get state() {
+					return { model: context.model, thinkingLevel: pi.getThinkingLevel() }
+				},
+				sessionManager: context.sessionManager,
+				modelRegistry: context.modelRegistry,
+				getContextUsage: () => context.getContextUsage(),
+			} as never,
+			footerData,
+		)
+		const unsubscribe = footerData.onBranchChange(() => tui.requestRender())
+		return {
+			dispose: () => {
+				unsubscribe()
+				footer.dispose()
+			},
+			invalidate: () => footer.invalidate(),
+			render: (width: number) => {
+				const label = "Seatbelt enabled"
+				const separator = " · "
+				const compact = footer.render(Math.max(1, width - visibleWidth(label + separator)))
+				const full = footer.render(width)
+				return [
+					full[0] ?? "",
+					truncateToWidth(theme.fg("accent", label) + theme.fg("dim", separator) + (compact[1] ?? ""), width, ""),
+					...full.slice(2),
+				]
+			},
+		}
+	})
 }
 
 function formatCheckpointStatus(status: ReturnType<SafetySession["checkpointStatus"]>): string {
