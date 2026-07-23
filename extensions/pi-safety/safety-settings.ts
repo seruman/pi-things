@@ -1,45 +1,56 @@
 import { type ExtensionContext, getSettingsListTheme } from "@earendil-works/pi-coding-agent"
 import { Container, type SettingItem, SettingsList, Text } from "@earendil-works/pi-tui"
-import type { BashSandboxSession } from "./bash-sandbox-session"
 
 const ENABLED = "enabled"
-const DISABLED = "disabled for this session"
-type SettingsAction = "disable-bash-sandbox" | undefined
+const DISABLED = "disabled"
 
-export function buildBashSandboxSetting(session: BashSandboxSession): SettingItem {
-	const enabled = session.isEnabled()
-	return {
-		id: "bash-seatbelt",
-		label: "Bash Seatbelt",
-		currentValue: enabled ? ENABLED : DISABLED,
-		values: enabled ? [ENABLED, DISABLED] : [DISABLED],
-		description: enabled
-			? "Sandbox model-issued Bash with macOS Seatbelt. Disabling lasts until /reload or a new Pi session."
-			: "Model-issued Bash is unsandboxed. Use /reload or start a new Pi session to restore Seatbelt safely.",
-	}
+export type SafetyFeature = "protection" | "checkpoints"
+export interface SafetySettingsAction {
+	readonly feature: SafetyFeature
+	readonly enabled: boolean
+}
+
+export function buildSafetySettings(protection: boolean, checkpoints: boolean): SettingItem[] {
+	return [
+		{
+			id: "protection",
+			label: "Filesystem protection",
+			currentValue: protection ? ENABLED : DISABLED,
+			values: [DISABLED, ENABLED],
+			description: "Toggle Seatbelt for model-issued Bash and path guards for built-in read, write, and edit tools.",
+		},
+		{
+			id: "checkpoints",
+			label: "APFS checkpoints",
+			currentValue: checkpoints ? ENABLED : DISABLED,
+			values: [DISABLED, ENABLED],
+			description:
+				"Create one lazy project checkpoint per mutating agent turn, independently of filesystem protection.",
+		},
+	]
 }
 
 export async function showPiSafetySettings(
 	context: ExtensionContext,
-	session: BashSandboxSession,
-	onDisabled: () => void | Promise<void>,
+	protection: boolean,
+	checkpoints: boolean,
 	statusLines: readonly string[],
-): Promise<void> {
+): Promise<SafetySettingsAction | undefined> {
 	if (context.mode !== "tui") {
 		context.ui.notify("/pi-safety requires TUI mode", "error")
-		return
+		return undefined
 	}
 
-	const action = await context.ui.custom<SettingsAction>((tui, theme, _keybindings, done) => {
+	return context.ui.custom<SafetySettingsAction | undefined>((tui, theme, _keybindings, done) => {
 		const container = new Container()
 		container.addChild(new Text(theme.fg("accent", theme.bold("Pi Safety — session settings")), 1, 0))
 		container.addChild(new Text(theme.fg("dim", statusLines.join("\n")), 1, 1))
 		const settings = new SettingsList(
-			[buildBashSandboxSetting(session)],
+			buildSafetySettings(protection, checkpoints),
 			3,
 			getSettingsListTheme(),
 			(id, value) => {
-				if (id === "bash-seatbelt" && value === DISABLED) done("disable-bash-sandbox")
+				if (id === "protection" || id === "checkpoints") done({ feature: id, enabled: value === ENABLED })
 			},
 			() => done(undefined),
 		)
@@ -53,19 +64,4 @@ export async function showPiSafetySettings(
 			},
 		}
 	})
-	if (action !== "disable-bash-sandbox" || !session.isEnabled()) return
-
-	const confirmed = await context.ui.confirm(
-		"Disable Bash Seatbelt for this session?",
-		[
-			"Model-issued Bash will run with your full user permissions until /reload or a new Pi session.",
-			"It may access credentials and change files outside the project.",
-			"Checkpoints, built-in tool guards, and the standalone Shell Leash remain active.",
-		].join("\n\n"),
-	)
-	if (!confirmed) return
-
-	session.disableForSession()
-	await onDisabled()
-	context.ui.notify("pi-safety: Bash Seatbelt disabled until /reload or a new Pi session", "warning")
 }

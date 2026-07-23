@@ -80,16 +80,7 @@ test("Seatbelt permits workspace workflows and sandbox-only temporary files", ()
 test("Seatbelt supports a disposable login-style Keychain", () => {
 	withTestTempDirectory("seatbelt-policy-keychain-", (root) => {
 		const value = fixture(root)
-		const securityServer = value.compiled.parameters.find((parameter) => parameter.value === "com.apple.SecurityServer")
-		const securitydXpc = value.compiled.parameters.find((parameter) => parameter.value === "com.apple.securityd.xpc")
-		assert.ok(securityServer)
-		assert.ok(securitydXpc)
-		for (const parameter of [securityServer, securitydXpc]) {
-			const globalNameLine = value.compiled.source
-				.split("\n")
-				.find((line) => line.includes(`(param "${parameter.name}")`))
-			assert.match(globalNameLine ?? "", /^\s+\(global-name /)
-		}
+		assert.match(value.compiled.source, /^\(allow [^)]*\bmach-lookup\b[^)]*\)$/m)
 
 		const keychainDirectory = path.join(value.home, "Library", "Keychains")
 		const keychain = path.join(keychainDirectory, "pi-safety-test.keychain-db")
@@ -253,7 +244,7 @@ test("native wb grants remain scoped to the wb executable", () => {
 			),
 		)
 		assert.equal(fs.existsSync(deniedFile), false)
-		assert.ok(compiled.parameters.some((parameter) => parameter.value === "com.apple.nsurlsessiond"))
+		assert.match(compiled.source, /^\(allow [^)]*\bmach-lookup\b[^)]*\)$/m)
 	})
 })
 

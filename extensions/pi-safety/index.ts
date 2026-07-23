@@ -2,7 +2,6 @@ import * as os from "node:os"
 import * as path from "node:path"
 import { type ExtensionAPI, type ExtensionContext, createBashTool } from "@earendil-works/pi-coding-agent"
 import { createSandboxedBashOperations } from "./bash-launcher"
-import { BashSandboxSession } from "./bash-sandbox-session"
 import { type SafetyConfigurationError, loadProjectSafetyConfiguration } from "./configuration"
 import { type SafetySession, type SafetySessionError, createSafetySession } from "./safety-session"
 import { showPiSafetySettings } from "./safety-settings"
@@ -21,7 +20,7 @@ type SessionInitialization =
 
 const GUARDED_TOOLS = new Set(["bash", "read", "write", "edit"])
 const CHECKPOINT_ENTRY_TYPE = "pi-safety-checkpoint"
-const BASH_SANDBOX_STATUS_KEY = "pi-safety-bash-sandbox"
+const PROTECTION_STATUS_KEY = "pi-safety-protection"
 
 interface CheckpointEntryData {
 	readonly version: 1
@@ -32,7 +31,7 @@ interface CheckpointEntryData {
 export default function piSafety(pi: ExtensionAPI): void {
 	let initialization: SessionInitialization = { kind: "not-started" }
 	let recordedCheckpointId: SnapshotId | undefined
-	const bashSandbox = BashSandboxSession.create()
+	const features = { protection: false, checkpoints: true }
 	const bashTool = createBashTool(process.cwd())
 	pi.registerTool({
 		...bashTool,
@@ -42,7 +41,7 @@ export default function piSafety(pi: ExtensionAPI): void {
 				PI_SAFETY_CHECKPOINT_READY: "1",
 				...(initialization.kind === "ready" ? initialization.session.bashEnvironment() : {}),
 			})
-			const invocationTool = bashSandbox.isEnabled()
+			const invocationTool = features.protection
 				? createBashTool(process.cwd(), {
 						operations: createSandboxedBashOperations(() => {
 							if (initialization.kind !== "ready") {
@@ -102,16 +101,19 @@ export default function piSafety(pi: ExtensionAPI): void {
 						context.ui.notify(initialization.session.policyDescription(), "info")
 						break
 					}
-					const statusLines = piSafetyStatusLines(initialization.session, bashSandbox)
+					const statusLines = piSafetyStatusLines(initialization.session, features.protection, features.checkpoints)
 					if (action === "status") {
 						context.ui.notify(`pi-safety: ${statusLines.join("\n")}`, "info")
 						break
 					}
-					await showPiSafetySettings(
-						context,
-						bashSandbox,
-						() => updateBashSandboxStatus(context, bashSandbox),
-						statusLines,
+					const changed = await showPiSafetySettings(context, features.protection, features.checkpoints, statusLines)
+					if (!changed) break
+					features[changed.feature] = changed.enabled
+					if (changed.feature === "protection") updateProtectionStatus(context, changed.enabled)
+					const label = changed.feature === "protection" ? "filesystem protection" : "APFS checkpoints"
+					context.ui.notify(
+						`pi-safety: ${label} ${changed.enabled ? "enabled" : "disabled"}`,
+						changed.enabled ? "info" : "warning",
 					)
 					break
 				}
@@ -121,8 +123,9 @@ export default function piSafety(pi: ExtensionAPI): void {
 
 	pi.on("session_start", async (_event, context) => {
 		recordedCheckpointId = undefined
-		bashSandbox.reset()
-		if (context.hasUI) updateBashSandboxStatus(context, bashSandbox)
+		features.protection = process.env.PI_SAFETY_PROTECTION === "1"
+		features.checkpoints = true
+		if (context.hasUI) updateProtectionStatus(context, features.protection)
 		const projectConfiguration = loadProjectSafetyConfiguration(context.cwd)
 		if (!projectConfiguration.ok) {
 			initialization = { kind: "failed", error: { kind: "configuration", cause: projectConfiguration.error } }
@@ -135,6 +138,7 @@ export default function piSafety(pi: ExtensionAPI): void {
 			stateHome: process.env.XDG_STATE_HOME ?? path.join(home, ".local", "state"),
 			piConfigDir: process.env.PI_CODING_AGENT_DIR ?? path.join(home, ".pi", "agent"),
 			additionalNoAccessPatterns: projectConfiguration.value.additionalNoAccessPatterns,
+			gopath: process.env.GOPATH,
 			privateTemp: process.env.TMPDIR ?? os.tmpdir(),
 			sessionPathsEnvironment: process.env.PI_SAFETY_SESSION_PATHS,
 			integrationEnvironment: {
@@ -152,7 +156,7 @@ export default function piSafety(pi: ExtensionAPI): void {
 	})
 
 	pi.on("before_agent_start", async (_event, context) => {
-		if (initialization.kind !== "ready") return
+		if (initialization.kind !== "ready" || !features.checkpoints) return
 		const sessionId = parseSnapshotSessionId(context.sessionManager.getSessionId())
 		if (!sessionId.ok) {
 			initialization = { kind: "failed", error: { kind: "session-id" } }
@@ -165,7 +169,7 @@ export default function piSafety(pi: ExtensionAPI): void {
 	})
 
 	pi.on("session_shutdown", async (_event, context) => {
-		if (context.hasUI) context.ui.setStatus(BASH_SANDBOX_STATUS_KEY, undefined)
+		if (context.hasUI) context.ui.setStatus(PROTECTION_STATUS_KEY, undefined)
 		if (initialization.kind !== "ready") return
 		const cleaned = initialization.session.cleanup()
 		if (!cleaned.ok) throw new Error(`pi-safety: integration cleanup failed (${cleaned.error.kind})`)
@@ -182,8 +186,14 @@ export default function piSafety(pi: ExtensionAPI): void {
 				reason: `pi-safety: session initialization failed: ${formatInitializationError(initialization.error)}`,
 			}
 		}
-		const decision = await initialization.session.authorize(event.toolName, event.input)
-		if (decision.kind === "block") return { block: true, reason: decision.reason }
+		if (features.protection) {
+			const guard = initialization.session.guard(event.toolName, event.input)
+			if (guard.kind === "block") return { block: true, reason: guard.reason }
+		}
+		if (features.checkpoints) {
+			const checkpointDecision = await initialization.session.checkpoint(event.toolName)
+			if (checkpointDecision.kind === "block") return { block: true, reason: checkpointDecision.reason }
+		}
 		const checkpoint = initialization.session.checkpointStatus()
 		if (checkpoint.kind === "ready" && checkpoint.snapshot.id !== recordedCheckpointId) {
 			recordedCheckpointId = checkpoint.snapshot.id
@@ -219,10 +229,10 @@ function formatInitializationError(error: SessionInitializationError): string {
 	}
 }
 
-function piSafetyStatusLines(session: SafetySession, bashSandbox: BashSandboxSession): readonly string[] {
+function piSafetyStatusLines(session: SafetySession, protection: boolean, checkpoints: boolean): readonly string[] {
 	return [
-		`bash-seatbelt=${bashSandbox.isEnabled() ? "enabled" : "disabled-for-session"}`,
-		`checkpoint=${formatCheckpointStatus(session.checkpointStatus())}`,
+		`protection=${protection ? "enabled" : "disabled"}`,
+		`checkpoints=${checkpoints ? `enabled · ${formatCheckpointStatus(session.checkpointStatus())}` : "disabled"}`,
 		`workspace=${session.snapshotStore.workspaceRoot}`,
 		`store=${session.snapshotStore.projectDirectory}`,
 		...session
@@ -281,10 +291,10 @@ async function removeSessionPath(context: ExtensionContext, session: SafetySessi
 	)
 }
 
-function updateBashSandboxStatus(context: ExtensionContext, bashSandbox: BashSandboxSession): void {
+function updateProtectionStatus(context: ExtensionContext, enabled: boolean): void {
 	context.ui.setStatus(
-		BASH_SANDBOX_STATUS_KEY,
-		bashSandbox.isEnabled() ? undefined : context.ui.theme.fg("warning", "⚠ Bash Seatbelt disabled"),
+		PROTECTION_STATUS_KEY,
+		enabled ? context.ui.theme.fg("accent", "Filesystem protection enabled") : undefined,
 	)
 }
 

@@ -73,7 +73,7 @@ test("explicit Docker Unix socket capability permits only the discovered endpoin
 	})
 })
 
-test("Nix receives only its cache and exact daemon socket capabilities", () => {
+test("Nix receives its exact daemon socket while the shared cache remains writable", () => {
 	withPrivateTmpDirectory("pi-safety-nix-socket-", (root) => {
 		const workspace = path.join(root, "workspace")
 		const home = path.join(root, "home")
@@ -115,14 +115,13 @@ test("Nix receives only its cache and exact daemon socket capabilities", () => {
 				workspace,
 			)
 			assert.equal(cacheResult.status, 0, cacheResult.stderr)
-			assertDenied(
-				runWithSeatbeltProfile(
-					compiled,
-					"/bin/bash",
-					["-c", `printf denied > ${JSON.stringify(path.join(cacheDirectory, "other-process"))}`],
-					workspace,
-				),
+			const sharedCacheResult = runWithSeatbeltProfile(
+				compiled,
+				"/bin/bash",
+				["-c", `printf allowed > ${JSON.stringify(path.join(cacheDirectory, "other-process"))}`],
+				workspace,
 			)
+			assert.equal(sharedCacheResult.status, 0, sharedCacheResult.stderr)
 			const socketScript = "my $socket = IO::Socket::UNIX->new(Peer => $ARGV[0]) or die $!; close $socket"
 			const socketResult = runWithSeatbeltProfile(
 				compiled,

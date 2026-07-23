@@ -1,4 +1,5 @@
-import { parseCanonicalPath } from "./canonical-path"
+import * as path from "node:path"
+import { type CanonicalPath, parseCanonicalPath } from "./canonical-path"
 import { type CheckpointError, CheckpointRun, type CheckpointStatus } from "./checkpoint"
 import { type DefaultPolicyError, createDefaultPolicy } from "./default-policy"
 import {
@@ -31,6 +32,7 @@ import { type SnapshotCreationOrigin, type SnapshotError, type SnapshotStore, cr
 import { type ToolAuthorizationError, authorizeBuiltinToolCall } from "./tool-authorization"
 
 export interface RawSafetySessionConfiguration extends RawPolicyConfiguration {
+	readonly gopath?: string
 	readonly privateTemp: string
 	readonly integrationEnvironment: RawIntegrationEnvironment
 	readonly sessionPathsEnvironment?: string
@@ -40,6 +42,7 @@ export type SafetySessionError =
 	| { readonly kind: "policy-configuration"; readonly cause: PolicyConfigurationError }
 	| { readonly kind: "policy"; readonly cause: DefaultPolicyError }
 	| { readonly kind: "private-temp"; readonly message: string }
+	| { readonly kind: "go-path"; readonly path: string; readonly message: string }
 	| { readonly kind: "session-path"; readonly cause: SessionPathError }
 	| { readonly kind: "integration"; readonly cause: IntegrationError }
 	| { readonly kind: "snapshot-store"; readonly cause: SnapshotError }
@@ -64,7 +67,8 @@ export interface SafetySession {
 		access: SessionPathAccess,
 	): Result<SessionPathGrant, SessionPathError | DefaultPolicyError>
 	removeSessionPath(path: string): Result<boolean, SessionPathError | DefaultPolicyError>
-	authorize(toolName: string, input: unknown): Promise<SafetyDecision>
+	guard(toolName: string, input: unknown): SafetyDecision
+	checkpoint(toolName: string): Promise<SafetyDecision>
 }
 
 class ManagedSafetySession implements SafetySession {
@@ -164,12 +168,15 @@ class ManagedSafetySession implements SafetySession {
 		return ok(true)
 	}
 
-	async authorize(toolName: string, input: unknown): Promise<SafetyDecision> {
+	guard(toolName: string, input: unknown): SafetyDecision {
 		const authorization = authorizeBuiltinToolCall(toolName, input, this.#policy)
-		if (!authorization.ok) {
-			return { kind: "block", reason: formatAuthorizationError(authorization.error) }
-		}
-		if (authorization.value.kind === "read" || authorization.value.kind === "other") return { kind: "allow" }
+		return authorization.ok
+			? { kind: "allow" }
+			: { kind: "block", reason: formatAuthorizationError(authorization.error) }
+	}
+
+	async checkpoint(toolName: string): Promise<SafetyDecision> {
+		if (toolName !== "bash" && toolName !== "write" && toolName !== "edit") return { kind: "allow" }
 		if (!this.#checkpointRun) {
 			return { kind: "block", reason: "pi-safety: checkpoint run has not started" }
 		}
@@ -189,6 +196,8 @@ export function createSafetySession(raw: RawSafetySessionConfiguration): Result<
 	if (!configuration.ok) return err({ kind: "policy-configuration", cause: configuration.error })
 	const privateTemp = parseCanonicalPath(raw.privateTemp)
 	if (!privateTemp.ok) return err({ kind: "private-temp", message: JSON.stringify(privateTemp.error) })
+	const goPaths = parseGoPaths(raw.gopath, configuration.value.paths.home)
+	if (!goPaths.ok) return goPaths
 	const sessionPaths = parseSessionPathsEnvironment(raw.sessionPathsEnvironment, configuration.value.paths.home)
 	if (!sessionPaths.ok) return err({ kind: "session-path", cause: sessionPaths.error })
 	const integrations = parseBashIntegrations({
@@ -201,6 +210,7 @@ export function createSafetySession(raw: RawSafetySessionConfiguration): Result<
 	const policyInput = {
 		paths: configuration.value.paths,
 		additionalNoAccessPatterns: configuration.value.additionalNoAccessPatterns,
+		goPaths: goPaths.value,
 		sandbox: { kind: "enabled" as const, privateTemp: privateTemp.value, integrations: integrations.value },
 	}
 	const policy = createDefaultPolicy({ ...policyInput, sessionPaths: sessionPaths.value })
@@ -212,6 +222,20 @@ export function createSafetySession(raw: RawSafetySessionConfiguration): Result<
 	return ok(
 		new ManagedSafetySession(policy.value, integrations.value, snapshotStore.value, policyInput, sessionPaths.value),
 	)
+}
+
+function parseGoPaths(
+	input: string | undefined,
+	home: CanonicalPath,
+): Result<readonly CanonicalPath[], SafetySessionError> {
+	const values = input === undefined || input.length === 0 ? [path.join(home, "go")] : input.split(path.delimiter)
+	const parsed: CanonicalPath[] = []
+	for (const value of values) {
+		const goPath = parseCanonicalPath(value)
+		if (!goPath.ok) return err({ kind: "go-path", path: value, message: JSON.stringify(goPath.error) })
+		parsed.push(goPath.value)
+	}
+	return ok(Object.freeze(parsed))
 }
 
 function cleanupAfterFailure(

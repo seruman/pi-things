@@ -1,20 +1,32 @@
 # Pi Safety
 
-Pi Safety is a macOS extension that makes Pi safer to use on local projects.
+Pi Safety provides two independent session features on macOS:
 
-Pi itself runs normally. By default, each model-issued Bash command runs in a new macOS sandbox. Bash can change files in the current project and `/tmp`, but it cannot change files elsewhere unless a supported workflow needs a specific location. Supported integrations include the macOS login Keychain and Nix-executable-only access to the exact Nix daemon socket and `${XDG_CACHE_HOME:-$HOME/.cache}/nix`.
+- **Filesystem protection**, disabled by default, applies one ordered policy to model-issued Bash through Seatbelt and to Pi's built-in `read`, `write`, and `edit` tools.
+- **APFS checkpoints**, enabled by default, create one lazy project checkpoint before the first mutating tool call in each agent turn.
 
-Sandboxed Bash can read and update login-Keychain items permitted by macOS Keychain ACLs. Pi Safety grants the required Security services and read-write access to `~/Library/Keychains`; Keychain changes are outside project checkpoints. This restores normal pre-sandbox Keychain behavior rather than adding item-level authorization—macOS remains responsible for deciding which credentials a program may access.
+Use `/pi-safety` to toggle either feature immediately. Protection can also start enabled in a headless session with `PI_SAFETY_PROTECTION=1`.
 
-Pi's built-in `read`, `write`, and `edit` tools still work normally. Pi Safety checks their file paths before they run. It blocks access to secrets such as `.env` files, private SSH keys, cloud credentials, and Pi authentication data. It also prevents changes to Git hooks, shell startup files, and other sensitive settings.
+## Filesystem protection
 
-The complete default policy is listed in evaluation order in `default-policy.ts` with simple `noAccess`, `readOnly`, `readWrite`, and snapshot-exclusion rules. The policy is assembled once. Built-in tools interpret it, and the Seatbelt profile is emitted from the same rules. Movement protection, snapshots, and diagnostics use that policy too. Use `/pi-safety policy` to inspect the resolved ordered rules for the current session.
+When enabled, the host and HOME are read-only by default and the workspace is read-write. Standard writable tool locations include the macOS and XDG cache roots, npm and Bun caches, all of `~/.cargo`, default or configured GOPATH `pkg` directories, the configured temporary container, `/private/tmp`, `~/.xdg`, and `~/Library/Keychains`. Mach service lookup is unrestricted. Keychain item ACLs still determine which credentials a program may access.
 
-Before the first command that can change files in a request, Pi Safety creates a fast APFS snapshot of the project. It records the checkpoint as session metadata without sending it to the model. The snapshot manifest stores the Pi session ID, while snapshots created outside Pi are marked as standalone. It creates only one snapshot per request and keeps up to 20 snapshots for each project. Generated folders such as `.git`, `.wb`, `node_modules`, `dist`, and `target` are not included.
+Private SSH material, `~/.env`, `~/.netrc`, `~/.gitcookies`, `~/.config/opnix`, cloud credentials, Pi authentication data, project `.env` conventions, snapshot protected storage, and configured project secrets remain inaccessible. Public SSH keys and ordinary SSH client metadata remain readable.
 
-The `pi-snapshot` command can list, inspect, verify, export, and restore snapshots. It can compare a snapshot with the live project or with another snapshot. Its list reports the sum of per-entry bytes APFS says would be freed immediately. Restore starts as a dry run. Use `--apply` when you want it to change files.
+The complete policy is listed in evaluation order in `default-policy.ts`. Use `/pi-safety policy` to inspect the resolved rules for the current session. `/pi-safety add [path]` grants a confirmed read-only or read-write session directory; `/pi-safety remove [path]` revokes one. Read-write session paths are not checkpointed. Headless sessions can set `PI_SAFETY_SESSION_PATHS` to strict JSON such as `[{
+  "path": "/absolute/repo",
+  "access": "read-write"
+}]`.
 
-Projects can list extra secret paths in `.pi/pi-safety.json`:
+When protection is disabled, Bash and built-in file tools run with the user's ordinary permissions. Checkpoints remain independent and continue to classify policy-denied files as protected snapshot entries, but unsandboxed Bash can access user-owned state directly.
+
+## Checkpoints
+
+Before the first Bash, `write`, or `edit` call in a turn, Pi Safety creates a fast APFS snapshot when checkpoints are enabled. It records the checkpoint as session metadata without sending it to the model, keeps up to 20 snapshots per project, and excludes generated directories such as `.git`, `.pi`, `.wb`, `node_modules`, `dist`, and `target`.
+
+The `pi-snapshot` command can create, list, inspect, verify, compare, export, garbage-collect, and restore snapshots. Restore starts as a dry run; use `--apply` to mutate the project.
+
+Projects can tighten protected paths in `.pi/pi-safety.json`:
 
 ```json
 {
@@ -23,6 +35,4 @@ Projects can list extra secret paths in `.pi/pi-safety.json`:
 }
 ```
 
-Use `/pi-safety add [path]` to add a confirmed read-only or read-write directory for the current session; read-write directories are explicitly not checkpointed. `/pi-safety remove [path]` revokes one. Headless sessions can set `PI_SAFETY_SESSION_PATHS` to strict JSON such as `[{"path":"/absolute/repo","access":"read-write"}]`; project `.pi/pi-safety.json` remains tighten-only.
-
-Use `/pi-safety` in TUI mode to inspect session status and, after an explicit warning, disable Bash Seatbelt for the rest of the current Pi session. This human-only maintenance escape hatch leaves checkpoints, built-in tool guards, and the standalone Shell Leash active, but model-issued Bash receives the user's full permissions. The bypass cannot be switched back on inside the same extension instance because unsandboxed Bash could tamper with trusted runtime state; use `/reload` or start a new Pi session to restore Seatbelt safely. Use `/pi-safety status` for text status and `/pi-safety policy` for the resolved policy.
+Project configuration cannot grant additional filesystem authority.
