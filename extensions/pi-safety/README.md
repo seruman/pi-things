@@ -2,12 +2,12 @@
 
 Pi Safety provides two independent session features on macOS:
 
-- **Filesystem protection**, disabled by default, applies one ordered policy to model-issued Bash through Seatbelt and to Pi's built-in `read`, `write`, and `edit` tools.
+- **Seatbelt**, disabled by default, applies one ordered policy to model-issued Bash and Pi's built-in `read`, `write`, and `edit` tools.
 - **APFS checkpoints**, enabled by default, create one lazy project checkpoint before the first mutating tool call in each agent turn.
 
-Use `/pi-safety` to toggle either feature immediately. Protection can also start enabled in a headless session with `PI_SAFETY_PROTECTION=1`.
+Use `/pi-safety` to toggle either feature immediately. Seatbelt can also start enabled in a headless session with `PI_SAFETY_PROTECTION=1`.
 
-## Filesystem protection
+## Seatbelt
 
 When enabled, the host and HOME are read-only by default and the workspace is read-write. Standard writable tool locations include the macOS and XDG cache roots, npm and Bun caches, all of `~/.cargo`, default or configured GOPATH `pkg` directories, the configured temporary container, `/private/tmp`, `~/.xdg`, and `~/Library/Keychains`. Mach service lookup is unrestricted. Keychain item ACLs still determine which credentials a program may access.
 
@@ -18,7 +18,7 @@ The complete policy is listed in evaluation order in `default-policy.ts`. Use `/
   "access": "read-write"
 }]`.
 
-When protection is disabled, Bash and built-in file tools run with the user's ordinary permissions. Checkpoints remain independent and continue to classify policy-denied files as protected snapshot entries, but unsandboxed Bash can access user-owned state directly.
+When Seatbelt is disabled, Bash and built-in file tools run with the user's ordinary permissions. Checkpoints remain independent and continue to classify policy-denied files as protected snapshot entries, but unsandboxed Bash can access user-owned state directly.
 
 ## Checkpoints
 
