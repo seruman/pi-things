@@ -77,7 +77,6 @@ test("describes every rule in a fully integrated default policy", () => {
 			"runtime file allow",
 			"runtime network-outbound allow endpoint=remote",
 			"runtime network-outbound allow path=",
-			"runtime mach-lookup allow",
 			"runtime ipc-posix-shm-read-data allow",
 			"runtime unix-connect allow",
 			"runtime unix-bind deny",

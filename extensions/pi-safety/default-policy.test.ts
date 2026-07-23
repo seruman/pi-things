@@ -149,13 +149,23 @@ test("every default access and snapshot declaration has an observable policy dec
 		assert.equal(access(path.join(root, "host-file"), "read"), "allow")
 		assert.equal(access(path.join(root, "host-file"), "write"), "deny")
 		assert.equal(access(path.join(workspace, "src", "index.ts"), "write"), "allow")
-		assert.equal(access(path.join(privateTemp, "sandbox-file"), "write"), "deny")
+		assert.equal(access(path.join(privateTemp, "sandbox-file"), "write"), "allow")
 		assert.equal(access(path.join(privateTemp, "sandbox-file"), "write", { kind: "sandbox" }), "allow")
-		assert.equal(access("/private/tmp/pi-safety-file", "write"), "deny")
+		assert.equal(access("/private/tmp/pi-safety-file", "write"), "allow")
 		assert.equal(access("/private/tmp/pi-safety-file", "write", { kind: "sandbox" }), "allow")
-		const loginKeychain = path.join(home, "Library", "Keychains", "login.keychain-db")
-		assert.equal(access(loginKeychain, "write"), "deny")
-		assert.equal(access(loginKeychain, "write", { kind: "sandbox" }), "allow")
+		for (const writableToolPath of [
+			path.join(home, ".cache", "zig", "zls"),
+			path.join(home, "Library", "Caches", "go-build", "entry"),
+			path.join(home, ".npm", "_cacache", "entry"),
+			path.join(home, ".bun", "install", "cache", "entry"),
+			path.join(home, ".cargo", "registry", "entry"),
+			path.join(home, "go", "pkg", "mod", "entry"),
+			path.join(home, ".xdg", "runtime.sock"),
+			path.join(home, "Library", "Keychains", "login.keychain-db"),
+		]) {
+			assert.equal(access(writableToolPath, "write"), "allow", writableToolPath)
+			assert.equal(access(writableToolPath, "write", { kind: "sandbox" }), "allow", writableToolPath)
+		}
 
 		const projectConfiguration = [
 			[".git", "hooks", "post-commit"],
@@ -221,6 +231,10 @@ test("every default access and snapshot declaration has an observable policy dec
 		}
 		for (const pathname of [
 			path.join(sshDirectory, "id_ed25519"),
+			path.join(home, ".env"),
+			path.join(home, ".netrc"),
+			path.join(home, ".gitcookies"),
+			path.join(home, ".config", "opnix", "token"),
 			path.join(home, ".aws", "credentials"),
 			path.join(home, ".cf", "credentials"),
 			path.join(piConfigDirectory, "auth.json"),
@@ -325,7 +339,7 @@ test("the default policy expresses shared restrictions and sandbox capabilities 
 				subject: { kind: "builtin" },
 				path: canonicalPath(path.join(privateTemp, "builtin.txt")),
 			}).effect,
-			"deny",
+			"allow",
 		)
 		assert.equal(
 			evaluatePolicy(policy, {

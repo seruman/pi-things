@@ -22,9 +22,7 @@ import {
 	excludeFromSnapshots,
 	executable,
 	fileRule,
-	globalMachService,
 	literal,
-	machLookupRule,
 	noAccess,
 	pathPrefix,
 	pathRegex,
@@ -42,7 +40,6 @@ import {
 	unixConnectRule,
 	unixSocketPath,
 	unixSocketSubpath,
-	xpcMachService,
 } from "./policy"
 import { type Result, err, ok } from "./result"
 import type { SessionPathGrant } from "./session-paths"
@@ -82,6 +79,7 @@ export type DefaultPolicyError =
 export function createDefaultPolicy(input: {
 	readonly paths: DefaultPolicyPaths
 	readonly additionalNoAccessPatterns: readonly string[]
+	readonly goPaths?: readonly CanonicalPath[]
 	readonly sessionPaths?: readonly SessionPathGrant[]
 	readonly sandbox:
 		| { readonly kind: "disabled" }
@@ -102,6 +100,7 @@ export function createDefaultPolicy(input: {
 function createDefaultPolicyFromParsedRoots(input: {
 	readonly paths: DefaultPolicyPaths
 	readonly additionalNoAccessPatterns: readonly string[]
+	readonly goPaths?: readonly CanonicalPath[]
 	readonly sessionPaths?: readonly SessionPathGrant[]
 	readonly sandbox:
 		| { readonly kind: "disabled" }
@@ -155,14 +154,27 @@ function createDefaultPolicyFromParsedRoots(input: {
 		readOnly(shared(), tree(pathValue(input.paths.home, ".config", "fish", "config.fish"))),
 	)
 
+	// Standard tool caches and runtime state are writable for both Bash and built-in tools.
+	rules.push(
+		readWrite(shared(), tree(pathValue(input.paths.home, ".cache"))),
+		readWrite(shared(), tree(pathValue(input.paths.home, "Library", "Caches"))),
+		readWrite(shared(), tree(pathValue(input.paths.home, ".npm"))),
+		readWrite(shared(), tree(pathValue(input.paths.home, ".bun", "install", "cache"))),
+		readWrite(shared(), tree(pathValue(input.paths.home, ".cargo"))),
+		...(input.goPaths ?? [pathValue(input.paths.home, "go")]).map((goPath) =>
+			readWrite(shared(), tree(pathValue(goPath, "pkg"))),
+		),
+		readWrite(shared(), tree(pathValue(input.paths.home, ".xdg"))),
+		// Preserve ordinary macOS Keychain workflows; item ACLs still authorize individual credentials.
+		readWrite(shared(), tree(pathValue(input.paths.home, "Library", "Keychains"))),
+	)
+
 	// Sandbox and executable-specific filesystem capabilities.
 	if (input.sandbox.kind === "enabled") {
 		const integrations = input.sandbox.integrations
 		rules.push(
-			readWrite(sandbox(), tree(input.sandbox.privateTemp)),
-			// Preserve ordinary macOS Keychain workflows; item ACLs still authorize individual credentials.
-			readWrite(sandbox(), tree(pathValue(input.paths.home, "Library", "Keychains"))),
-			readWrite(sandbox(), seatbeltTree(fixedPath("/private/tmp"))),
+			readWrite(shared(), tree(temporaryContainer(input.sandbox.privateTemp))),
+			readWrite(shared(), seatbeltTree(fixedPath("/private/tmp"))),
 			readWrite(sandbox(), seatbeltTree(fixedPath("/dev/fd"))),
 			...["/dev/stdout", "/dev/stderr", "/dev/null", "/dev/tty", "/dev/ptmx"].map((pathname) =>
 				readWrite(sandbox(), seatbeltFile(fixedPath(pathname))),
@@ -207,6 +219,10 @@ function createDefaultPolicyFromParsedRoots(input: {
 	if (!sshReadable.ok) return sshReadable
 	rules.push(
 		...sshReadable.value.map((selector) => readOnly(shared(), pattern(selector))),
+		noAccess(shared(), tree(pathValue(input.paths.home, ".env"))),
+		noAccess(shared(), tree(pathValue(input.paths.home, ".netrc"))),
+		noAccess(shared(), tree(pathValue(input.paths.home, ".gitcookies"))),
+		noAccess(shared(), tree(pathValue(input.paths.home, ".config", "opnix"))),
 		noAccess(shared(), tree(pathValue(input.paths.home, ".aws"))),
 		noAccess(shared(), tree(pathValue(input.paths.home, ".cf"))),
 		noAccess(shared(), tree(pathValue(input.paths.piConfigDirectory, "auth.json"))),
@@ -255,6 +271,7 @@ function createDefaultPolicyFromParsedRoots(input: {
 				"system-socket",
 				"appleevent-send",
 				"lsopen",
+				"mach-lookup",
 			]),
 			allowSameSandbox(["process-info*", "signal", "mach-priv-task-port"]),
 			fileRule({
@@ -271,29 +288,6 @@ function createDefaultPolicyFromParsedRoots(input: {
 			allowNetworkPath(fixedPath("/private/var/run/mDNSResponder")),
 			allowIpNetwork({ operation: "network-bind", endpoint: "local" }),
 			allowIpNetwork({ operation: "network-inbound", endpoint: "local" }),
-			machLookupRule({
-				effect: "allow",
-				services: [
-					fixedGlobalService("com.apple.system.notification_center"),
-					fixedGlobalService("com.apple.system.opendirectoryd.libinfo"),
-					fixedGlobalService("com.apple.system.opendirectoryd.membership"),
-					fixedGlobalService("com.apple.logd"),
-					fixedGlobalService("com.apple.logd.events"),
-					fixedGlobalService("com.apple.FSEvents"),
-					fixedGlobalService("com.apple.SystemConfiguration.configd"),
-					fixedGlobalService("com.apple.SystemConfiguration.DNSConfiguration"),
-					fixedGlobalService("com.apple.SecurityServer"),
-					fixedGlobalService("com.apple.securityd.xpc"),
-					fixedGlobalService("com.apple.trustd.agent"),
-					fixedGlobalService("com.apple.diagnosticd"),
-					fixedGlobalService("com.apple.dnssd.service"),
-					fixedGlobalService("com.apple.CoreServices.coreservicesd"),
-					fixedGlobalService("com.apple.coreservices.launchservicesd"),
-					fixedGlobalService("com.apple.lsd.mapdb"),
-					fixedGlobalService("com.apple.lsd.modifydb"),
-					fixedGlobalService("com.apple.coreservices.quarantine-resolver"),
-				],
-			}),
 			fixedPosixSharedMemoryRule("apple.shm.notification_center"),
 		)
 
@@ -331,17 +325,6 @@ function createDefaultPolicyFromParsedRoots(input: {
 				fixedPath("/Library"),
 			] as const
 			rules.push(
-				machLookupRule({
-					effect: "allow",
-					services: [
-						fixedXpcService("com.apple.WebKit.GPU"),
-						fixedXpcService("com.apple.WebKit.Networking"),
-						fixedXpcService("com.apple.WebKit.WebContent"),
-						fixedXpcService("com.apple.WebKit.WebContent.EnhancedSecurity"),
-						fixedGlobalService("com.apple.nsurlsessiond"),
-					],
-					process,
-				}),
 				allowWebKitBrokerExtension("generic", process),
 				allowWebKitBrokerExtension("iokit", process),
 				allowWebKitBrokerExtension("mach", process),
@@ -484,18 +467,6 @@ function fixedPath(input: string): SeatbeltPath {
 	return parsed.value
 }
 
-function fixedXpcService(input: string) {
-	const parsed = xpcMachService(input)
-	if (!parsed.ok) throw new TypeError(`failed to parse fixed XPC service: ${input}`)
-	return parsed.value
-}
-
-function fixedGlobalService(input: string) {
-	const parsed = globalMachService(input)
-	if (!parsed.ok) throw new TypeError(`failed to parse fixed Mach service: ${input}`)
-	return parsed.value
-}
-
 function fixedPosixSharedMemoryRule(input: string): RuntimePolicyRule {
 	const parsed = allowPosixSharedMemoryRead(input)
 	if (!parsed.ok) throw new TypeError(`failed to parse fixed POSIX shared memory name: ${input}`)
@@ -509,6 +480,14 @@ class DefaultPolicyPathFailure extends Error {
 		super(`failed to construct default rule path: ${pathname}`)
 		this.error = { kind: "rule-path", path: pathname, cause }
 	}
+}
+
+function temporaryContainer(privateTemp: CanonicalPath): CanonicalPath {
+	if (path.basename(privateTemp) !== "T") return privateTemp
+	const container = path.dirname(privateTemp)
+	const parsed = parseCanonicalPath(container)
+	if (!parsed.ok) throw new DefaultPolicyPathFailure(container, parsed.error)
+	return parsed.value
 }
 
 function pathValue(root: CanonicalPath, ...components: string[]): CanonicalPath {

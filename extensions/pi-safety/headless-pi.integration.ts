@@ -70,7 +70,7 @@ function stopNewWbDaemons(previous: ReadonlySet<number>): void {
 function runHeadlessPi(
 	fixture: HeadlessFixture,
 	responses: readonly unknown[],
-	options: { readonly persistSession?: boolean } = {},
+	options: { readonly persistSession?: boolean; readonly protection?: boolean } = {},
 ) {
 	const piExecutable = resolveInstalledPi()
 	const extensionDirectory = path.dirname(fileURLToPath(import.meta.url))
@@ -114,6 +114,7 @@ function runHeadlessPi(
 				XDG_CONFIG_HOME: fixture.configHome,
 				XDG_CACHE_HOME: fixture.cacheHome,
 				PI_CODING_AGENT_DIR: fixture.piConfig,
+				...(options.protection === false ? {} : { PI_SAFETY_PROTECTION: "1" }),
 				PI_SAFETY_TEST_SCRIPT: script,
 				PI_OFFLINE: "1",
 			},
@@ -130,6 +131,23 @@ function runHeadlessPi(
 		.filter((line) => line.length > 0)
 		.map((line) => JSON.parse(line) as Record<string, unknown>)
 }
+
+test("headless Pi defaults protection off while retaining checkpoints", () => {
+	withTestTempDirectory("headless-pi-protection-default-", (root) => {
+		const fixture = createFixture(root)
+		const outside = path.join(fixture.home, "outside.txt")
+		runHeadlessPi(
+			fixture,
+			[
+				{ kind: "tool", id: "write-outside", name: "write", arguments: { path: outside, content: "allowed" } },
+				{ kind: "text", text: "done" },
+			],
+			{ protection: false },
+		)
+		assert.equal(fs.readFileSync(outside, "utf8"), "allowed")
+		assert.equal(fs.existsSync(path.join(fixture.stateHome, "pi-safety", "snapshots")), true)
+	})
+})
 
 test("headless Pi blocks denied calls before execution or checkpoint creation", () => {
 	withTestTempDirectory("headless-pi-denied-", (root) => {
@@ -338,7 +356,7 @@ test("headless Pi supports native wb with source-derived process-scoped permissi
 			stopNewWbDaemons(existingWbDaemons)
 		}
 	})
-})
+}, 15_000)
 
 test("native wb cannot attach to an unsandboxed daemon on an alternate socket", () => {
 	withTestTempDirectory("headless-pi-wb-alt-", (root) => {

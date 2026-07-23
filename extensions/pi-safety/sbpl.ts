@@ -21,6 +21,7 @@ export type WebKitBrokerExtension = "generic" | "iokit" | "mach"
 export type RuntimeOperation =
 	| "appleevent-send"
 	| "lsopen"
+	| "mach-lookup"
 	| "process-exec"
 	| "process-fork"
 	| "pseudo-tty"

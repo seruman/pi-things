@@ -1,68 +1,26 @@
 import { describe, expect, test } from "bun:test"
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent"
-import { BashSandboxSession } from "./bash-sandbox-session"
-import { buildBashSandboxSetting, showPiSafetySettings } from "./safety-settings"
+import { type SafetySettingsAction, buildSafetySettings, showPiSafetySettings } from "./safety-settings"
 
-function settingsContext(input: {
-	readonly confirm: boolean
-	readonly notifications: string[]
-}): ExtensionContext {
+function settingsContext(action: SafetySettingsAction): ExtensionContext {
 	return {
 		mode: "tui",
-		ui: {
-			custom: async () => "disable-bash-sandbox",
-			confirm: async () => input.confirm,
-			notify: (message: string) => input.notifications.push(message),
-		},
+		ui: { custom: async () => action },
 	} as unknown as ExtensionContext
 }
 
 describe("Pi Safety settings", () => {
-	test("offers a one-way session-scoped Seatbelt bypass", () => {
-		const session = BashSandboxSession.create()
-		expect(buildBashSandboxSetting(session)).toMatchObject({
-			id: "bash-seatbelt",
-			currentValue: "enabled",
-			values: ["enabled", "disabled for this session"],
-		})
-
-		session.disableForSession()
-		expect(buildBashSandboxSetting(session)).toMatchObject({
-			currentValue: "disabled for this session",
-			values: ["disabled for this session"],
-		})
+	test("offers disabled-by-default protection and enabled-by-default checkpoints", () => {
+		expect(buildSafetySettings(false, true)).toMatchObject([
+			{ id: "protection", currentValue: "disabled", values: ["disabled", "enabled"] },
+			{ id: "checkpoints", currentValue: "enabled", values: ["disabled", "enabled"] },
+		])
 	})
 
-	test("disables only after explicit confirmation", async () => {
-		const notifications: string[] = []
-		const session = BashSandboxSession.create()
-		let disabled = false
-
-		await showPiSafetySettings(
-			settingsContext({ confirm: true, notifications }),
-			session,
-			async () => {
-				await Promise.resolve()
-				disabled = true
-			},
-			["checkpoint=not-started"],
-		)
-
-		expect(session.mode()).toBe("disabled-for-session")
-		expect(disabled).toBe(true)
-		expect(notifications).toEqual(["pi-safety: Bash Seatbelt disabled until /reload or a new Pi session"])
-	})
-
-	test("keeps Seatbelt enabled when confirmation is declined", async () => {
-		const session = BashSandboxSession.create()
-		await showPiSafetySettings(
-			settingsContext({ confirm: false, notifications: [] }),
-			session,
-			() => {
-				throw new Error("unexpected disable callback")
-			},
-			[],
-		)
-		expect(session.mode()).toBe("enabled")
+	test("returns independent protection and checkpoint changes", async () => {
+		const protection = { feature: "protection", enabled: true } as const
+		const checkpoints = { feature: "checkpoints", enabled: false } as const
+		expect(await showPiSafetySettings(settingsContext(protection), false, true, [])).toEqual(protection)
+		expect(await showPiSafetySettings(settingsContext(checkpoints), true, true, [])).toEqual(checkpoints)
 	})
 })
