@@ -16,7 +16,7 @@ import {
 	type RawPolicyConfiguration,
 	parseInitialSafetyConfiguration,
 } from "./policy-configuration"
-import { describePolicy } from "./policy-description"
+import { type PolicyDisplayEntry, describePolicy, describeSeatbeltPolicy } from "./policy-description"
 import { type Result, err, ok } from "./result"
 import { createConfiguredSnapshotStore } from "./safety-filesystem"
 import type { CompiledSbpl } from "./sbpl"
@@ -59,6 +59,7 @@ export interface SafetySession {
 	checkpointStatus(): SafetySessionCheckpointStatus
 	seatbeltProfile(): CompiledSbpl
 	policyDescription(): string
+	seatbeltPolicy(): readonly PolicyDisplayEntry[]
 	bashEnvironment(): Readonly<NodeJS.ProcessEnv>
 	cleanup(): Result<undefined, IntegrationError>
 	sessionPaths(): readonly SessionPathGrant[]
@@ -113,6 +114,10 @@ class ManagedSafetySession implements SafetySession {
 
 	policyDescription(): string {
 		return describePolicy(this.#policy)
+	}
+
+	seatbeltPolicy(): readonly PolicyDisplayEntry[] {
+		return describeSeatbeltPolicy(this.#policy)
 	}
 
 	bashEnvironment(): Readonly<NodeJS.ProcessEnv> {

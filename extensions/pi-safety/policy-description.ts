@@ -1,6 +1,22 @@
 import type { Policy, PolicyRule, RuleSubject } from "./policy"
 import type { PathMatcher, UnixSocketMatcher } from "./sbpl"
 
+export interface PolicyDisplayEntry {
+	readonly number: number
+	readonly label: string
+	readonly value: string
+	readonly summary: string
+	readonly dsl: string
+}
+
+export function describeSeatbeltPolicy(policy: Policy): readonly PolicyDisplayEntry[] {
+	return policy.rules.flatMap((rule, index) => {
+		if (rule.kind === "snapshot") return []
+		const readable = describeReadableRule(rule, policy)
+		return [{ number: index + 1, ...readable, dsl: describeRule(rule) }]
+	})
+}
+
 export function describePolicy(policy: Policy): string {
 	const lines = [
 		"Pi Safety policy (ordered; file and snapshot rules are last-match-wins)",
@@ -12,6 +28,57 @@ export function describePolicy(policy: Policy): string {
 		lines.push(`${String(index + 1).padStart(3, "0")} ${describeRule(rule)}`)
 	}
 	return lines.join("\n")
+}
+
+function describeReadableRule(
+	rule: Exclude<PolicyRule, { readonly kind: "snapshot" }>,
+	policy: Policy,
+): Omit<PolicyDisplayEntry, "number" | "dsl"> {
+	switch (rule.kind) {
+		case "file-access":
+			return {
+				label: describeReadableSelector(rule.selector, policy),
+				value: rule.access === "none" ? "denied" : rule.access,
+				summary: `${describeReadableSubject(rule.subject)} · ${describeAccess(rule.access)}`,
+			}
+		case "file":
+			return {
+				label: "Runtime files",
+				value: rule.effect,
+				summary: `${rule.operations.join(", ")} · ${rule.matchers.map(describePathMatcher).join(", ")}${rule.process ? ` · ${rule.process}` : ""}`,
+			}
+		case "file-except-processes":
+			return {
+				label: "Runtime files",
+				value: rule.effect,
+				summary: `${rule.operations.join(", ")} · except ${rule.processes.join(", ")}`,
+			}
+		case "mach-lookup":
+			return { label: "Mach services", value: rule.effect, summary: rule.services.map((s) => s.name).join(", ") }
+		case "unix-bind":
+		case "unix-connect":
+			return {
+				label: rule.kind === "unix-bind" ? "Unix socket bind" : "Unix socket connect",
+				value: rule.effect,
+				summary: rule.matchers.map(describeUnixSocketMatcher).join(", "),
+			}
+		case "file-extension-issue":
+			return { label: "File extensions", value: rule.effect, summary: `process ${rule.process}` }
+		case "broker-extension-issue":
+			return { label: "Broker extension", value: "allow", summary: `${rule.extension} · ${rule.process}` }
+		case "runtime-operation":
+			return { label: "Runtime operations", value: rule.effect, summary: rule.operations.join(", ") }
+		case "same-sandbox":
+			return { label: "Same-sandbox operations", value: rule.effect, summary: rule.operations.join(", ") }
+		case "ip-network":
+			return { label: "IP network", value: rule.effect, summary: `${rule.operation} · ${rule.endpoint}` }
+		case "network-path":
+			return { label: "Network socket", value: rule.effect, summary: `${rule.operation} · ${rule.path}` }
+		case "posix-ipc":
+			return { label: "POSIX shared memory", value: rule.effect, summary: `${rule.operation} · ${rule.name}` }
+		default:
+			return rule satisfies never
+	}
 }
 
 function describeRule(rule: PolicyRule): string {
@@ -50,6 +117,61 @@ function describeRule(rule: PolicyRule): string {
 		default:
 			return rule satisfies never
 	}
+}
+
+function describeAccess(access: Extract<PolicyRule, { readonly kind: "file-access" }>["access"]): string {
+	switch (access) {
+		case "none":
+			return "No access"
+		case "read-only":
+			return "Read only"
+		case "read-write":
+			return "Read and write"
+	}
+}
+
+function describeReadableSubject(subject: RuleSubject): string {
+	switch (subject.kind) {
+		case "shared":
+			return "Bash and built-ins"
+		case "sandbox":
+			return "Bash only"
+		case "executable":
+			return `Executable ${subject.executable}`
+	}
+}
+
+function describeReadableSelector(
+	selector: Extract<PolicyRule, { readonly kind: "file-access" }>["selector"],
+	policy: Policy,
+): string {
+	const value = selector.kind === "glob" ? selector.pattern.pattern : selector.path
+	const aliased = aliasPolicyPath(value, policy)
+	switch (selector.kind) {
+		case "file":
+		case "seatbelt-file":
+			return aliased
+		case "tree":
+		case "seatbelt-tree":
+			return aliased === "/" ? "/**" : `${aliased}/**`
+		case "seatbelt-prefix":
+			return `${aliased}*`
+		case "glob":
+			return aliased
+		default:
+			return selector satisfies never
+	}
+}
+
+function aliasPolicyPath(value: string, policy: Policy): string {
+	for (const [root, alias] of [
+		[policy.workspaceRoot, "$WORKSPACE"],
+		[policy.homeRoot, "$HOME"],
+	] as const) {
+		if (value === root) return alias
+		if (value.startsWith(`${root}/`)) return `${alias}${value.slice(root.length)}`
+	}
+	return value
 }
 
 function describeSubject(subject: RuleSubject): string {

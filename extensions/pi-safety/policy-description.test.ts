@@ -3,7 +3,7 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { createDefaultPolicy } from "./default-policy"
 import { allowRuntimeOperations, noAccess, shared, tree } from "./policy"
-import { describePolicy } from "./policy-description"
+import { describePolicy, describeSeatbeltPolicy } from "./policy-description"
 import { unwrap } from "./result"
 import { canonicalExecutable, canonicalPath, testPolicy } from "./test-domain-values"
 import { withTestTempDirectory } from "./test-temp-directory"
@@ -62,6 +62,19 @@ test("describes every rule in a fully integrated default policy", () => {
 		)
 
 		const description = describePolicy(policy)
+		const display = describeSeatbeltPolicy(policy)
+		expect(display).toHaveLength(policy.rules.filter((rule) => rule.kind !== "snapshot").length)
+		expect(display).toContainEqual(
+			expect.objectContaining({
+				label: "$WORKSPACE/**",
+				value: "read-write",
+				summary: "Bash and built-ins · Read and write",
+				dsl: `file shared read-write tree=${JSON.stringify(workspace)}`,
+			}),
+		)
+		expect(
+			display.some((entry) => entry.label === "Runtime operations" && entry.dsl.startsWith("runtime operations")),
+		).toBe(true)
 		const lines = description.split("\n")
 		expect(lines).toHaveLength(policy.rules.length + 4)
 		for (const [index] of policy.rules.entries()) {
