@@ -13,7 +13,7 @@ When enabled, the host and HOME are read-only by default and the workspace is re
 
 Private SSH material, `~/.env`, `~/.netrc`, `~/.gitcookies`, `~/.config/opnix`, cloud credentials, Pi authentication data, project `.env` conventions, snapshot protected storage, and configured project secrets remain inaccessible. Public SSH keys and ordinary SSH client metadata remain readable.
 
-The complete policy is listed in evaluation order in `default-policy.ts`. Use `/pi-safety policy` to inspect the resolved rules for the current session. `/pi-safety add [path]` grants a confirmed read-only or read-write session directory; `/pi-safety remove [path]` revokes one. Read-write session paths are not checkpointed. Headless sessions can set `PI_SAFETY_SESSION_PATHS` to strict JSON such as `[{
+The complete policy is listed in evaluation order in `default-policy.ts`. In `/pi-safety`, press `p` to browse the resolved Seatbelt ACL read-only, or use `/pi-safety policy` for its text form. `/pi-safety add [path]` grants a confirmed read-only or read-write session directory; `/pi-safety remove [path]` revokes one. Read-write session paths are not checkpointed. Headless sessions can set `PI_SAFETY_SESSION_PATHS` to strict JSON such as `[{
   "path": "/absolute/repo",
   "access": "read-write"
 }]`.

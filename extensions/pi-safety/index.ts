@@ -112,10 +112,16 @@ export default function piSafety(pi: ExtensionAPI): void {
 						context.ui.notify(`pi-safety: ${statusLines.join("\n")}`, "info")
 						break
 					}
-					await showPiSafetySettings(context, features.protection, features.checkpoints, (feature, enabled) => {
-						features[feature] = enabled
-						if (feature === "protection") updateSeatbeltFooter(pi, context, enabled)
-					})
+					await showPiSafetySettings(
+						context,
+						features.protection,
+						features.checkpoints,
+						session.seatbeltPolicy(),
+						(feature, enabled) => {
+							features[feature] = enabled
+							if (feature === "protection") updateSeatbeltFooter(pi, context, enabled)
+						},
+					)
 					break
 				}
 			}
