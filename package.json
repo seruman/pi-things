@@ -23,13 +23,15 @@
     "typecheck:diff-review": "bunx tsc -p extensions/diff-review/tsconfig.json",
     "typecheck:pi-safety": "bunx tsc -p extensions/pi-safety/tsconfig.json",
     "typecheck:shell-leash": "bunx tsc -p extensions/shell-leash/tsconfig.json",
+    "typecheck:code-mode": "bunx tsc -p extensions/code-mode/tsconfig.json",
     "typecheck:single-extensions": "bunx tsc -p extensions/tsconfig.json",
-    "typecheck": "bun run typecheck:web-search && bun run typecheck:web-fetch && bun run typecheck:task-tools && bun run typecheck:subagent-tools && bun run typecheck:diff-review && bun run typecheck:pi-safety && bun run typecheck:shell-leash && bun run typecheck:single-extensions"
+    "typecheck": "bun run typecheck:web-search && bun run typecheck:web-fetch && bun run typecheck:task-tools && bun run typecheck:subagent-tools && bun run typecheck:diff-review && bun run typecheck:pi-safety && bun run typecheck:shell-leash && bun run typecheck:code-mode && bun run typecheck:single-extensions"
   },
   "pi": {
     "extensions": [
       "./extensions/web-search/index.ts",
       "./extensions/web-fetch/index.ts",
+      "./extensions/code-mode/index.ts",
       "./extensions/task-tools/index.ts",
       "./extensions/subagent-tools/index.ts",
       "./extensions/diff-review/src/index.ts",
@@ -42,6 +44,7 @@
     "skills": ["./skills", "./extensions/web-tools/skills"]
   },
   "dependencies": {
+    "@jitl/quickjs-singlefile-mjs-release-sync": "^0.32.0",
     "defuddle": "^0.15.0",
     "diff": "8.0.4",
     "glimpseui": "^0.8.0",
@@ -50,6 +53,8 @@
     "just-bash": "^2.14.2",
     "linkedom": "^0.18.12",
     "minimatch": "10.2.5",
+    "quickjs-emscripten-core": "^0.32.0",
+    "typescript": "^6.0.0-dev.20260416",
     "yaml": "^2.8.1",
     "zod": "^3.24.1"
   },
@@ -69,7 +74,6 @@
     "@types/bun": "1.3.13",
     "@types/glob-to-regexp": "0.4.4",
     "@types/node": "^24.4.0",
-    "typebox": "^1.0.55",
-    "typescript": "^6.0.0-dev.20260416"
+    "typebox": "^1.0.55"
   }
 }
