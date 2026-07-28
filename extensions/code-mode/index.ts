@@ -9,8 +9,10 @@ import {
 	type ExtensionRunner,
 	ExtensionRunner as ImportedExtensionRunner,
 	type RegisteredTool,
+	SessionManager,
 	type Theme,
 	type ToolDefinition,
+	createAgentSession,
 	createBashToolDefinition,
 	createEditToolDefinition,
 	createFindToolDefinition,
@@ -45,6 +47,7 @@ const TOOL_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls"] as co
 
 type BuiltinToolName = (typeof TOOL_NAMES)[number]
 type PiToolRef = `${"pi" | "extensions"}.${string}`
+type CodeModeCallRef = PiToolRef | "agents.spawn"
 type QuickJsModule = Awaited<ReturnType<typeof newQuickJSWASMModuleFromVariant>>
 type ToolContent = AgentToolResult<unknown>["content"]
 // biome-ignore lint/suspicious/noExplicitAny: Pi exposes heterogeneous tool definitions; this alias keeps that boundary contained.
@@ -68,7 +71,16 @@ const codeExecSchema = Type.Object({
 	memoryLimitBytes: Type.Optional(Type.Number({ minimum: 1024 * 1024, maximum: 512 * 1024 * 1024 })),
 })
 
+const agentSpawnSchema = Type.Object({
+	prompt: Type.String({ minLength: 1 }),
+	cwd: Type.Optional(Type.String()),
+	tools: Type.Optional(Type.Array(Type.String())),
+	excludeTools: Type.Optional(Type.Array(Type.String())),
+	noTools: Type.Optional(Type.Union([Type.Literal("all"), Type.Literal("builtin")])),
+})
+
 type CodeExecInput = Static<typeof codeExecSchema>
+type AgentSpawnInput = Static<typeof agentSpawnSchema>
 
 const toolTextContentPartSchema = Type.Object({
 	type: Type.Literal("text"),
@@ -92,18 +104,20 @@ type ToolImageContentPart = Static<typeof toolImageContentPartSchema>
 type PiToolResult = Static<typeof toolResultSchema>
 
 type HostCall = {
-	readonly ref: PiToolRef
+	readonly ref: CodeModeCallRef
 	readonly args: Record<string, unknown>
 }
 
+type PiHostCall = HostCall & { readonly ref: PiToolRef }
+
 type HostOkResponse = {
-	readonly ref: PiToolRef
+	readonly ref: CodeModeCallRef
 	readonly status: "ok"
 	readonly value: PiToolResult
 }
 
 type HostErrorResponse = {
-	readonly ref: PiToolRef | "unknown"
+	readonly ref: CodeModeCallRef | "unknown"
 	readonly status: "error"
 	readonly stage: FailureStage
 	readonly error: string
@@ -128,7 +142,7 @@ type TraceOperation =
 			readonly endedAt: string
 			readonly outcome: "error"
 			readonly stage: FailureStage
-			readonly ref: PiToolRef | "unknown"
+			readonly ref: CodeModeCallRef | "unknown"
 			readonly error: string
 			readonly response: HostErrorResponse
 			readonly call?: HostCall
@@ -487,7 +501,7 @@ const hostErrorResponseSchema = Type.Object({
 
 const hostResponseSchema = Type.Union([hostOkResponseSchema, hostErrorResponseSchema])
 
-const decodeHostCall = (rawEnvelope: string, cwd: string, catalog: ToolCatalog): HostCall => {
+const decodeHostCall = (rawEnvelope: string, cwd: string, catalog: ToolCatalog): PiHostCall => {
 	let decoded: unknown
 	try {
 		decoded = JSON.parse(rawEnvelope)
@@ -521,12 +535,12 @@ const toolResultValue = (result: AgentToolResult<unknown>): PiToolResult => {
 	return assertTypeBox<PiToolResult>(toolResultSchema, value, "Invalid Pi tool result")
 }
 
-const okResponseFromToolResult = (ref: PiToolRef, result: AgentToolResult<unknown>): HostOkResponse => {
+const okResponseFromToolResult = (ref: CodeModeCallRef, result: AgentToolResult<unknown>): HostOkResponse => {
 	const response: HostOkResponse = { ref, status: "ok", value: toolResultValue(result) }
 	return assertTypeBox<HostOkResponse>(hostOkResponseSchema, response, "Invalid host response")
 }
 
-const errorResponse = (ref: PiToolRef | "unknown", stage: FailureStage, error: string): HostErrorResponse =>
+const errorResponse = (ref: CodeModeCallRef | "unknown", stage: FailureStage, error: string): HostErrorResponse =>
 	assertTypeBox<HostErrorResponse>(
 		hostErrorResponseSchema,
 		{ ref, status: "error", stage, error },
@@ -537,7 +551,7 @@ const validateHostResponse = (response: HostResponse): HostResponse =>
 	assertTypeBox<HostResponse>(hostResponseSchema, response, "Invalid host response")
 
 const invokePiTool = async (input: {
-	call: HostCall
+	call: PiHostCall
 	outerToolCallId: string
 	sequence: number
 	context: ExtensionContext
@@ -829,9 +843,28 @@ interface ToolsApi {
   call<Ref extends PiRequiredArgToolRef>(request: { ref: Ref; args: PiToolArgsByRef[Ref] }): Promise<PiToolResult>;
 }
 
+interface AgentSpawnRequest {
+  /** Prompt to send to the spawned Pi AgentSession. */
+  prompt: string;
+  /** Working directory for project-local discovery. Defaults to the current Code Mode cwd. */
+  cwd?: string;
+  /** Optional allowlist of active tool names for the spawned session. */
+  tools?: string[];
+  /** Optional denylist of active tool names for the spawned session. */
+  excludeTools?: string[];
+  /** Optional default tool suppression mode when tools is omitted. */
+  noTools?: "all" | "builtin";
+}
+
+interface AgentsApi {
+  /** Create an isolated Pi AgentSession, send prompt, and return the final assistant text as a PiToolResult. */
+  spawn(request: string | AgentSpawnRequest): Promise<PiToolResult>;
+}
+
 declare const pi: Readonly<PiApi>;
 declare const extensions: Readonly<ExtensionsApi>;
 declare const tools: Readonly<ToolsApi>;
+declare const agents: Readonly<AgentsApi>;
 declare function print(...values: unknown[]): void;
 declare const console: Readonly<{
   log(...values: unknown[]): void;
@@ -957,6 +990,14 @@ const __bashTemplate = (strings, ...values) => {
   }
   return __codeModeCall("pi.bash", { command });
 };
+const __agentSpawn = async (request) => {
+  const input = typeof request === "string" ? { prompt: request } : request;
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("agents.spawn request must be a string or object");
+  if (typeof input.prompt !== "string" || input.prompt.length === 0) throw new Error("agents.spawn prompt must be a non-empty string");
+  const response = JSON.parse(await __pi_agent_spawn(JSON.stringify(input)));
+  if (response.status === "ok") return response.value;
+  throw new Error(response.ref + " failed during " + response.stage + ": " + response.error);
+};
 const __formatPrintValue = (value) => {
   if (typeof value === "string") return value;
   try { return JSON.stringify(value); } catch (_) { return String(value); }
@@ -976,6 +1017,7 @@ globalThis.pi = Object.freeze({
   $: __bashTemplate,
 });
 globalThis.extensions = __toolNamespace("extensions");
+globalThis.agents = Object.freeze({ spawn: __agentSpawn });
 globalThis.tools = Object.freeze({
   providers: () => __clone(__metadata.providers),
   list: __listTools,
@@ -994,7 +1036,7 @@ __piCodeModeMain();
 
 const stageOf = (error: unknown): FailureStage => (error instanceof CodeModeBoundaryError ? error.stage : "invoke")
 
-const refOf = (call: HostCall | undefined): PiToolRef | "unknown" => call?.ref ?? "unknown"
+const refOf = (call: HostCall | undefined): CodeModeCallRef | "unknown" => call?.ref ?? "unknown"
 
 const refFromRawEnvelope = (rawEnvelope: string): PiToolRef | "unknown" => {
 	try {
@@ -1003,6 +1045,70 @@ const refFromRawEnvelope = (rawEnvelope: string): PiToolRef | "unknown" => {
 		return decoded.ref as PiToolRef
 	} catch {
 		return "unknown"
+	}
+}
+
+const decodeAgentSpawnRequest = (rawEnvelope: string): AgentSpawnInput => {
+	let decoded: unknown
+	try {
+		decoded = JSON.parse(rawEnvelope)
+	} catch (error) {
+		throw new CodeModeBoundaryError(
+			"decode",
+			`Invalid agents.spawn JSON: ${error instanceof Error ? error.message : String(error)}`,
+		)
+	}
+	try {
+		return assertTypeBox<AgentSpawnInput>(agentSpawnSchema, decoded, "Invalid agents.spawn request")
+	} catch (error) {
+		throw new CodeModeBoundaryError("validate", error instanceof Error ? error.message : String(error))
+	}
+}
+
+const spawnPiAgent = async (input: {
+	request: AgentSpawnInput
+	context: ExtensionContext
+	signal: AbortSignal | undefined
+	onUpdate?: (partialResult: AgentToolResult<unknown>) => void
+}): Promise<AgentToolResult<unknown>> => {
+	const cwd = input.request.cwd ?? input.context.cwd
+	const { session } = await createAgentSession({
+		cwd,
+		model: input.context.model,
+		modelRegistry: input.context.modelRegistry,
+		sessionManager: SessionManager.inMemory(cwd),
+		...(input.request.tools ? { tools: input.request.tools } : {}),
+		...(input.request.excludeTools ? { excludeTools: input.request.excludeTools } : {}),
+		...(input.request.noTools ? { noTools: input.request.noTools } : {}),
+	})
+	let streamedText = ""
+	const unsubscribe = session.subscribe((event: unknown) => {
+		if (!event || typeof event !== "object") return
+		const item = event as { type?: unknown; assistantMessageEvent?: { type?: unknown; delta?: unknown } }
+		if (item.type === "message_update" && item.assistantMessageEvent?.type === "text_delta") {
+			const delta = typeof item.assistantMessageEvent.delta === "string" ? item.assistantMessageEvent.delta : ""
+			streamedText += delta
+			input.onUpdate?.({ content: [{ type: "text", text: streamedText }], details: undefined })
+		}
+	})
+	const abort = (): void => void session.abort()
+	input.signal?.addEventListener("abort", abort, { once: true })
+	try {
+		await session.prompt(input.request.prompt)
+		const finalText = session.getLastAssistantText() ?? streamedText
+		return {
+			content: [{ type: "text", text: finalText || "(no response)" }],
+			details: {
+				kind: "pi-code-mode.agent-result",
+				version: TRACE_VERSION,
+				sessionId: session.sessionId,
+				cwd,
+			},
+		}
+	} finally {
+		input.signal?.removeEventListener("abort", abort)
+		unsubscribe()
+		session.dispose()
 	}
 }
 
@@ -1079,7 +1185,7 @@ const runInQuickJs = async (input: {
 			const promise = vm.newPromise()
 			const opSequence = sequence++
 			const opStartedAt = new Date().toISOString()
-			let call: HostCall | undefined
+			let call: PiHostCall | undefined
 			let toolCallId = `${input.toolCallId}:code:${opSequence}:unknown`
 			setRenderOperation({
 				sequence: opSequence,
@@ -1180,6 +1286,107 @@ const runInQuickJs = async (input: {
 			return promise.handle
 		})
 		callHandle.consume((handle) => vm.setProp(vm.global, "__pi_call", handle))
+
+		const agentSpawnHandle = vm.newFunction("__pi_agent_spawn", (rawEnvelopeHandle) => {
+			const rawEnvelope = vm.getString(rawEnvelopeHandle)
+			const promise = vm.newPromise()
+			const opSequence = sequence++
+			const opStartedAt = new Date().toISOString()
+			let request: AgentSpawnInput | undefined
+			const toolCallId = `${input.toolCallId}:code:${opSequence}:agents.spawn`
+			setRenderOperation({
+				sequence: opSequence,
+				toolCallId,
+				ref: "agents.spawn",
+				outcome: "running",
+				startedAt: opStartedAt,
+				rawEnvelope: rawEnvelopeForUi(rawEnvelope),
+			})
+			const task = (async () => {
+				try {
+					request = decodeAgentSpawnRequest(rawEnvelope)
+					setRenderOperation({
+						sequence: opSequence,
+						toolCallId,
+						ref: "agents.spawn",
+						outcome: "running",
+						startedAt: opStartedAt,
+						args: sanitizeForUi(sanitizeTraceValue(request, { remaining: MAX_TRACE_INPUT_CHARS })),
+					})
+					const value = toolResultValue(
+						await spawnPiAgent({
+							request,
+							context: input.context,
+							signal: input.context.signal,
+							onUpdate: (partialResult) => {
+								try {
+									const partialValue = assertTypeBox<PiToolResult>(
+										toolResultSchema,
+										sanitizeForUi(boundPiToolResultForTrace(toolResultValue(partialResult), 0).result),
+										"Invalid agent partial result",
+									)
+									setRenderOperation({
+										sequence: opSequence,
+										toolCallId,
+										ref: "agents.spawn",
+										outcome: "running",
+										startedAt: opStartedAt,
+										args: sanitizeForUi(sanitizeTraceValue(request, { remaining: MAX_TRACE_INPUT_CHARS })),
+										result: partialValue,
+									})
+								} catch {
+									// Ignore malformed agent partials; the final result still gets validated.
+								}
+							},
+						}),
+					)
+					const response = validateHostResponse({ ref: "agents.spawn", status: "ok", value }) as HostOkResponse
+					const operation: TraceOperation = {
+						sequence: opSequence,
+						toolCallId,
+						startedAt: opStartedAt,
+						endedAt: new Date().toISOString(),
+						outcome: "ok",
+						call: { ref: "agents.spawn", args: request as Record<string, unknown> },
+						response,
+					}
+					const storedOperation = pushOperation(operation)
+					setRenderOperation(renderOperationFromTrace(storedOperation))
+					const responseHandle = vm.newString(JSON.stringify(response))
+					promise.resolve(responseHandle)
+					responseHandle.dispose()
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error)
+					const stage = stageOf(error)
+					const failure = errorResponse("agents.spawn", stage, message)
+					const operation: TraceOperation = {
+						sequence: opSequence,
+						toolCallId,
+						startedAt: opStartedAt,
+						endedAt: new Date().toISOString(),
+						outcome: "error",
+						stage,
+						ref: "agents.spawn",
+						error: message,
+						response: failure,
+						...(request
+							? { call: { ref: "agents.spawn", args: request as Record<string, unknown> } }
+							: { rawEnvelope }),
+					}
+					const storedOperation = pushOperation(operation)
+					setRenderOperation(renderOperationFromTrace(storedOperation))
+					const responseHandle = vm.newString(JSON.stringify(failure))
+					promise.resolve(responseHandle)
+					responseHandle.dispose()
+				} finally {
+					runtime.executePendingJobs()
+				}
+			})()
+			hostTasks.add(task)
+			void task.finally(() => hostTasks.delete(task))
+			return promise.handle
+		})
+		agentSpawnHandle.consume((handle) => vm.setProp(vm.global, "__pi_agent_spawn", handle))
 
 		const printHandle = vm.newFunction("__print", (textHandle) => {
 			const text = vm.getString(textHandle)
@@ -1908,13 +2115,14 @@ const codeModeTool = (pi: ExtensionAPI, catalog: ToolCatalog) =>
 		description:
 			"Run a small TypeScript/JavaScript program in a QuickJS sandbox. The program can call exposed Pi builtins and registered extension tools through the code-mode API.",
 		promptSnippet:
-			"Run a small TypeScript/JavaScript program. API: pi.* for built-in tools, extensions.* for registered extension tools, tools.* for discovery/schema/help/dynamic calls.",
+			"Run a small TypeScript/JavaScript program. API: pi.* for built-in tools, extensions.* for registered extension tools, tools.* for discovery/schema/help/dynamic calls, agents.spawn(...) for Pi subagents when available.",
 		promptGuidelines: [
 			"Use code_exec for multi-step mechanical tool workflows; await every tool call.",
 			"Inside code_exec, use pi.read/pi.bash/pi.edit/pi.write/pi.grep/pi.find/pi.ls for Pi built-in coding tools only.",
 			"Use extensions.<toolName>(args) for registered extension tools, e.g. extensions.web_search({ query: '...' }) or extensions.task({ action: 'list' }).",
 			"Use tools.list({ provider: 'extensions' }), tools.help('extensions.<toolName>'), and tools.schema('extensions.<toolName>') to discover extension tools and their TypeBox argument schemas.",
 			"Use tools.call({ ref: 'extensions.<toolName>', args }) or tools.call({ ref: 'pi.read', args }) only when the ref is computed dynamically.",
+			"Use agents.spawn({ prompt: '...', cwd?: '.', tools?: ['read', 'bash'] }) to create isolated Pi AgentSessions; parallel composition is plain Promise.all.",
 			"Tool refs are explicit strings like 'pi.read' and 'extensions.web_search'; there is no pi.tool, pi.call, pi.schema, or pi.help API.",
 			"All tool calls return PiToolResult: { content: [{ type: 'text', text } | { type: 'image', data, mimeType }], details? }. Do not assume stdout/stderr/exitCode/output fields for bash.",
 			"Prefer result.content for program logic. result.details is tool-specific UI/debug metadata and is typed opaque; narrow or cast before reading detail fields.",
