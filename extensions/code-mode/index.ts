@@ -34,6 +34,13 @@ const TRACE_VERSION = 1
 const RESULT_KIND = "pi-code-mode.result"
 const DEFAULT_TIMEOUT_MS = 60_000
 const DEFAULT_MEMORY_LIMIT_BYTES = 64 * 1024 * 1024
+const MAX_TRACE_COUNT = 50
+const MAX_TRACE_INPUT_CHARS = 16_384
+const MAX_TRACE_TEXT_CHARS = 32_768
+const MAX_TRACE_DETAILS_CHARS = 65_536
+const MAX_TRACE_IMAGE_BYTES = 16 * 1024 * 1024
+const MAX_OUTPUT_IMAGES = 8
+const MAX_SERIALIZED_TRACE_NODES = 4_096
 const TOOL_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls"] as const
 
 type BuiltinToolName = (typeof TOOL_NAMES)[number]
@@ -140,6 +147,8 @@ interface CodeModeTraceV1 {
 	readonly codeSha256: string
 	readonly prints: readonly string[]
 	readonly operations: readonly TraceOperation[]
+	readonly droppedOperationCount?: number
+	readonly omittedImageCount?: number
 	readonly result?: unknown
 	readonly error?: string
 }
@@ -168,7 +177,10 @@ const resultDetailsSchema = Type.Object({
 	result: Type.Optional(Type.Unknown()),
 	prints: Type.Array(Type.String()),
 	operationCount: Type.Number(),
+	droppedOperationCount: Type.Optional(Type.Number()),
 	imageCount: Type.Optional(Type.Number()),
+	omittedImageCount: Type.Optional(Type.Number()),
+	omittedOutputImageCount: Type.Optional(Type.Number()),
 	operations: Type.Optional(Type.Array(renderOperationSchema)),
 	error: Type.Optional(Type.String()),
 })
@@ -214,6 +226,8 @@ class CodeModeRuntimeError extends Error {
 		message: string,
 		readonly prints: readonly string[],
 		readonly operations: readonly TraceOperation[],
+		readonly droppedOperationCount: number,
+		readonly omittedImageCount: number,
 	) {
 		super(message)
 		this.name = "CodeModeRuntimeError"
@@ -472,14 +486,6 @@ const hostErrorResponseSchema = Type.Object({
 })
 
 const hostResponseSchema = Type.Union([hostOkResponseSchema, hostErrorResponseSchema])
-
-const hostCallSchemaFor = (ref: PiToolRef, argsSchema: TSchema): TSchema =>
-	Type.Object({ ref: Type.Literal(ref), args: argsSchema })
-
-const hostCallSchema = (cwd: string, catalog: ToolCatalog): TSchema => {
-	const entries = toolRegistry(cwd, catalog)
-	return Type.Union(entries.map((entry) => hostCallSchemaFor(entry.ref, entry.definition.parameters)))
-}
 
 const decodeHostCall = (rawEnvelope: string, cwd: string, catalog: ToolCatalog): HostCall => {
 	let decoded: unknown
@@ -1011,22 +1017,56 @@ const runInQuickJs = async (input: {
 	onPartial?: (snapshot: {
 		prints: readonly string[]
 		operations: readonly CodeExecRenderOperation[]
+		operationCount: number
+		droppedOperationCount: number
 	}) => void
-}): Promise<{ result: unknown; prints: string[]; operations: TraceOperation[] }> => {
+}): Promise<{
+	result: unknown
+	prints: string[]
+	operations: TraceOperation[]
+	droppedOperationCount: number
+	omittedImageCount: number
+}> => {
 	const started = Date.now()
 	let sequence = 0
+	let droppedOperationCount = 0
+	let traceImageBytesUsed = 0
+	let traceOmittedImageCount = 0
 	const prints: string[] = []
 	const operations: TraceOperation[] = []
 	const renderOperations = new Map<number, CodeExecRenderOperation>()
+	const operationCount = (): number => droppedOperationCount + operations.length
 	const renderOperationSnapshots = (): CodeExecRenderOperation[] =>
 		[...renderOperations.values()].sort((left, right) => left.sequence - right.sequence)
-	const emitPartial = (): void => input.onPartial?.({ prints: [...prints], operations: renderOperationSnapshots() })
+	const emitPartial = (): void =>
+		input.onPartial?.({
+			prints: boundPrints(prints),
+			operations: renderOperationSnapshots(),
+			operationCount: Math.max(sequence, operationCount()),
+			droppedOperationCount,
+		})
 	const setRenderOperation = (operation: CodeExecRenderOperation): void => {
 		renderOperations.set(
 			operation.sequence,
 			assertTypeBox<CodeExecRenderOperation>(renderOperationSchema, operation, "Invalid code-mode render operation"),
 		)
+		while (renderOperations.size > MAX_TRACE_COUNT) {
+			const firstKey = [...renderOperations.keys()].sort((left, right) => left - right)[0]
+			if (firstKey === undefined) break
+			renderOperations.delete(firstKey)
+		}
 		emitPartial()
+	}
+	const pushOperation = (operation: TraceOperation): TraceOperation => {
+		const bounded = boundTraceOperation(operation, Math.max(0, MAX_TRACE_IMAGE_BYTES - traceImageBytesUsed))
+		traceImageBytesUsed += bounded.imageBytesUsed
+		traceOmittedImageCount += bounded.omittedImageCount
+		if (operations.length >= MAX_TRACE_COUNT) {
+			operations.shift()
+			droppedOperationCount += 1
+		}
+		operations.push(bounded.operation)
+		return bounded.operation
 	}
 	const vm = (await quickJsModule()).newContext()
 	const runtime = vm.runtime
@@ -1061,7 +1101,7 @@ const runInQuickJs = async (input: {
 						ref: call.ref,
 						outcome: "running",
 						startedAt: opStartedAt,
-						args: sanitizeForUi(call.args),
+						args: sanitizeForUi(sanitizeTraceValue(call.args, { remaining: MAX_TRACE_INPUT_CHARS })),
 					})
 					const response = validateHostResponse(
 						await invokePiTool({
@@ -1075,7 +1115,7 @@ const runInQuickJs = async (input: {
 								try {
 									const partialValue = assertTypeBox<PiToolResult>(
 										toolResultSchema,
-										sanitizeForUi(toolResultValue(partialResult)),
+										sanitizeForUi(boundPiToolResultForTrace(toolResultValue(partialResult), 0).result),
 										"Invalid nested partial result",
 									)
 									setRenderOperation({
@@ -1084,7 +1124,9 @@ const runInQuickJs = async (input: {
 										ref: call?.ref ?? refFromRawEnvelope(rawEnvelope),
 										outcome: "running",
 										startedAt: opStartedAt,
-										...(call ? { args: sanitizeForUi(call.args) } : { rawEnvelope: rawEnvelopeForUi(rawEnvelope) }),
+										...(call
+											? { args: sanitizeForUi(sanitizeTraceValue(call.args, { remaining: MAX_TRACE_INPUT_CHARS })) }
+											: { rawEnvelope: rawEnvelopeForUi(rawEnvelope) }),
 										result: partialValue,
 									})
 								} catch {
@@ -1102,8 +1144,8 @@ const runInQuickJs = async (input: {
 						call,
 						response: response as HostOkResponse,
 					}
-					operations.push(operation)
-					setRenderOperation(renderOperationFromTrace(operation))
+					const storedOperation = pushOperation(operation)
+					setRenderOperation(renderOperationFromTrace(storedOperation))
 					const responseHandle = vm.newString(JSON.stringify(response))
 					promise.resolve(responseHandle)
 					responseHandle.dispose()
@@ -1124,8 +1166,8 @@ const runInQuickJs = async (input: {
 						response: failure,
 						...(call ? { call } : { rawEnvelope }),
 					}
-					operations.push(operation)
-					setRenderOperation(renderOperationFromTrace(operation))
+					const storedOperation = pushOperation(operation)
+					setRenderOperation(renderOperationFromTrace(storedOperation))
 					const responseHandle = vm.newString(JSON.stringify(failure))
 					promise.resolve(responseHandle)
 					responseHandle.dispose()
@@ -1160,7 +1202,13 @@ const runInQuickJs = async (input: {
 				const state = vm.getPromiseState(evaluation.value)
 				if (state.type === "fulfilled") {
 					try {
-						return { result: vm.dump(state.value), prints, operations }
+						return {
+							result: vm.dump(state.value),
+							prints: boundPrints(prints),
+							operations,
+							droppedOperationCount,
+							omittedImageCount: traceOmittedImageCount,
+						}
 					} finally {
 						if (state.notAPromise !== true && state.value.alive) state.value.dispose()
 					}
@@ -1176,7 +1224,13 @@ const runInQuickJs = async (input: {
 				await new Promise((resolve) => setTimeout(resolve, 5))
 			}
 		} catch (error) {
-			throw new CodeModeRuntimeError(error instanceof Error ? error.message : String(error), prints, operations)
+			throw new CodeModeRuntimeError(
+				error instanceof Error ? error.message : String(error),
+				boundPrints(prints),
+				operations,
+				droppedOperationCount,
+				traceOmittedImageCount,
+			)
 		} finally {
 			if (evaluation.error) evaluation.error.dispose()
 			else if (evaluation.value.alive) evaluation.value.dispose()
@@ -1187,8 +1241,8 @@ const runInQuickJs = async (input: {
 	}
 }
 
-const traceSchemaFor = (cwd: string, catalog: ToolCatalog): TSchema => {
-	const callSchema = hostCallSchema(cwd, catalog)
+const traceSchemaFor = (_cwd: string, _catalog: ToolCatalog): TSchema => {
+	const callSchema = Type.Object({ ref: Type.String(), args: Type.Record(Type.String(), Type.Unknown()) })
 	const traceOperationSchema = Type.Union([
 		Type.Object({
 			sequence: Type.Number(),
@@ -1232,6 +1286,8 @@ const traceSchemaFor = (cwd: string, catalog: ToolCatalog): TSchema => {
 		codeSha256: Type.String(),
 		prints: Type.Array(Type.String()),
 		operations: Type.Array(traceOperationSchema),
+		droppedOperationCount: Type.Optional(Type.Number()),
+		omittedImageCount: Type.Optional(Type.Number()),
 		result: Type.Optional(Type.Unknown()),
 		error: Type.Optional(Type.String()),
 	})
@@ -1250,6 +1306,190 @@ const sanitizeForUi = (value: unknown): unknown => {
 	return Object.fromEntries(Object.entries(record).map(([key, child]) => [key, sanitizeForUi(child)]))
 }
 
+interface TraceSerializationBudget {
+	remaining: number
+	nodesRemaining?: number
+	seen?: WeakSet<object>
+	depth?: number
+}
+
+const truncateTraceText = (text: string, remaining: number): string => {
+	if (remaining <= 0) return ""
+	if (text.length <= remaining) return text
+	const marker = "\n[Trace output truncated]"
+	return `${text.slice(0, Math.max(0, remaining - marker.length))}${marker}`
+}
+
+const sanitizeTraceValue = (value: unknown, budget: TraceSerializationBudget): unknown => {
+	const depth = budget.depth ?? 0
+	const nodesRemaining = budget.nodesRemaining ?? MAX_SERIALIZED_TRACE_NODES
+	if (nodesRemaining <= 0 || budget.remaining <= 0) return "[value limit]"
+	budget.nodesRemaining = nodesRemaining - 1
+	budget.remaining = Math.max(0, budget.remaining - 1)
+	if (value === null || value === undefined || typeof value === "boolean") return value
+	if (typeof value === "number") {
+		budget.remaining = Math.max(0, budget.remaining - 8)
+		return Number.isFinite(value) ? value : String(value)
+	}
+	if (typeof value === "bigint" || typeof value === "symbol" || typeof value === "function") {
+		return sanitizeTraceValue(String(value), budget)
+	}
+	if (typeof value === "string") {
+		const available = Math.max(0, budget.remaining)
+		budget.remaining -= Math.min(value.length, available)
+		return value.length <= available ? value : `${value.slice(0, Math.max(0, available - 17))}[value truncated]`
+	}
+	if (depth >= 12) return "[depth limit]"
+	if (typeof value !== "object") return String(value)
+	const seen = budget.seen ?? new WeakSet<object>()
+	if (seen.has(value)) return "[circular]"
+	seen.add(value)
+	const childBudget: TraceSerializationBudget = { ...budget, seen, depth: depth + 1 }
+	if (Array.isArray(value)) {
+		const output: unknown[] = []
+		for (const item of value) {
+			if (budget.remaining <= 0) {
+				output.push("[values omitted]")
+				break
+			}
+			output.push(sanitizeTraceValue(item, childBudget))
+			budget.remaining = childBudget.remaining
+			budget.nodesRemaining = childBudget.nodesRemaining ?? 0
+		}
+		return output
+	}
+	const output: Record<string, unknown> = {}
+	let entries: Array<[string, unknown]>
+	try {
+		entries = Object.entries(value)
+	} catch {
+		return "[unavailable object]"
+	}
+	for (const [key, entry] of entries) {
+		if (budget.remaining <= 0) {
+			output.trace_truncated = true
+			break
+		}
+		childBudget.remaining = Math.max(0, childBudget.remaining - key.length - 1)
+		output[key] = sanitizeTraceValue(entry, childBudget)
+		budget.remaining = childBudget.remaining
+		budget.nodesRemaining = childBudget.nodesRemaining ?? 0
+	}
+	return output
+}
+
+const boundPrints = (prints: readonly string[]): string[] => {
+	let remaining = MAX_TRACE_TEXT_CHARS
+	const output: string[] = []
+	for (const print of prints) {
+		const text = truncateTraceText(print, remaining)
+		remaining = Math.max(0, remaining - text.length)
+		if (text) output.push(text)
+		if (remaining <= 0) break
+	}
+	if (prints.length > output.length) output.push(`[${prints.length - output.length} prints omitted from trace]`)
+	return output
+}
+
+const boundPiToolResultForTrace = (
+	result: PiToolResult,
+	imageBytesRemaining: number,
+): { result: PiToolResult; imageBytesUsed: number; omittedImageCount: number } => {
+	let textRemaining = MAX_TRACE_TEXT_CHARS
+	let imageRemaining = imageBytesRemaining
+	let imageBytesUsed = 0
+	let omittedImageCount = 0
+	const content: PiToolResult["content"] = []
+	for (const item of result.content) {
+		if (item.type === "text") {
+			const text = truncateTraceText(item.text, textRemaining)
+			textRemaining = Math.max(0, textRemaining - text.length)
+			if (text) content.push({ ...item, text })
+			continue
+		}
+		if (item.data.length <= imageRemaining) {
+			imageRemaining -= item.data.length
+			imageBytesUsed += item.data.length
+			content.push({ ...item })
+		} else {
+			omittedImageCount += 1
+		}
+	}
+	if (omittedImageCount > 0) {
+		content.push({ type: "text", text: `[${omittedImageCount} nested images omitted from trace]` })
+	}
+	const bounded = {
+		content,
+		...(result.details === undefined
+			? {}
+			: { details: sanitizeTraceValue(result.details, { remaining: MAX_TRACE_DETAILS_CHARS }) }),
+	}
+	return {
+		result: assertTypeBox<PiToolResult>(toolResultSchema, bounded, "Invalid bounded trace tool result"),
+		imageBytesUsed,
+		omittedImageCount,
+	}
+}
+
+const boundTraceOperation = (
+	operation: TraceOperation,
+	imageBytesRemaining: number,
+): { operation: TraceOperation; imageBytesUsed: number; omittedImageCount: number } => {
+	if (operation.outcome === "ok") {
+		const bounded = boundPiToolResultForTrace(operation.response.value, imageBytesRemaining)
+		return {
+			operation: {
+				...operation,
+				call: {
+					ref: operation.call.ref,
+					args: sanitizeTraceValue(operation.call.args, { remaining: MAX_TRACE_INPUT_CHARS }) as Record<
+						string,
+						unknown
+					>,
+				},
+				response: { ...operation.response, value: bounded.result },
+			},
+			imageBytesUsed: bounded.imageBytesUsed,
+			omittedImageCount: bounded.omittedImageCount,
+		}
+	}
+	return {
+		operation: {
+			...operation,
+			error: truncateTraceText(operation.error, MAX_TRACE_TEXT_CHARS),
+			...(operation.call
+				? {
+						call: {
+							ref: operation.call.ref,
+							args: sanitizeTraceValue(operation.call.args, { remaining: MAX_TRACE_INPUT_CHARS }) as Record<
+								string,
+								unknown
+							>,
+						},
+					}
+				: {}),
+			...(operation.rawEnvelope
+				? { rawEnvelope: truncateTraceText(operation.rawEnvelope, MAX_TRACE_INPUT_CHARS) }
+				: {}),
+			response: { ...operation.response, error: truncateTraceText(operation.response.error, MAX_TRACE_TEXT_CHARS) },
+		},
+		imageBytesUsed: 0,
+		omittedImageCount: 0,
+	}
+}
+
+const boundTraceResult = (
+	value: unknown,
+	imageBytesRemaining: number,
+): { result: unknown; imageBytesUsed: number; omittedImageCount: number } => {
+	if (isPiToolResult(value)) return boundPiToolResultForTrace(value, imageBytesRemaining)
+	return {
+		result: sanitizeTraceValue(value, { remaining: MAX_TRACE_TEXT_CHARS }),
+		imageBytesUsed: 0,
+		omittedImageCount: 0,
+	}
+}
+
 const compactValue = (value: unknown): string => {
 	if (typeof value === "string") return value
 	if (value === undefined) return ""
@@ -1262,9 +1502,9 @@ const compactValue = (value: unknown): string => {
 
 const rawEnvelopeForUi = (rawEnvelope: string): unknown => {
 	try {
-		return sanitizeForUi(JSON.parse(rawEnvelope))
+		return sanitizeForUi(sanitizeTraceValue(JSON.parse(rawEnvelope), { remaining: MAX_TRACE_INPUT_CHARS }))
 	} catch {
-		return rawEnvelope
+		return truncateTraceText(rawEnvelope, MAX_TRACE_INPUT_CHARS)
 	}
 }
 
@@ -1563,7 +1803,10 @@ const imagePartsFromValue = (value: unknown): ToolImageContentPart[] => {
 	return value.content.filter((part): part is ToolImageContentPart => part.type === "image")
 }
 
-const imagesFromRun = (result: unknown, operations: readonly TraceOperation[]): ToolImageContentPart[] => {
+const imagesFromRun = (
+	result: unknown,
+	operations: readonly TraceOperation[],
+): { images: ToolImageContentPart[]; omittedOutputImageCount: number } => {
 	const images = [
 		...imagePartsFromValue(result),
 		...operations.flatMap((operation) =>
@@ -1571,12 +1814,16 @@ const imagesFromRun = (result: unknown, operations: readonly TraceOperation[]): 
 		),
 	]
 	const seen = new Set<string>()
-	return images.filter((image) => {
+	const unique = images.filter((image) => {
 		const key = `${image.mimeType}:${image.data}`
 		if (seen.has(key)) return false
 		seen.add(key)
 		return true
 	})
+	return {
+		images: unique.slice(0, MAX_OUTPUT_IMAGES),
+		omittedOutputImageCount: Math.max(0, unique.length - MAX_OUTPUT_IMAGES),
+	}
 }
 
 const formatCodeCallMarkdown = (args: unknown, expanded: boolean): string => {
@@ -1594,7 +1841,16 @@ const formatUiResultMarkdown = (details: CodeExecResultDetails, expanded: boolea
 	const title =
 		details.status === "running" ? "code_exec running" : details.success ? "code_exec completed" : "code_exec failed"
 	const headerParts = [`**${title}**`, countLabel(details.operationCount, "operation")]
+	if (details.droppedOperationCount && details.droppedOperationCount > 0) {
+		headerParts.push(`${countLabel(details.droppedOperationCount, "older operation")} omitted from trace`)
+	}
 	if (imageCount > 0) headerParts.push(countLabel(imageCount, "image"))
+	if (details.omittedImageCount && details.omittedImageCount > 0) {
+		headerParts.push(`${countLabel(details.omittedImageCount, "image")} omitted from trace`)
+	}
+	if (details.omittedOutputImageCount && details.omittedOutputImageCount > 0) {
+		headerParts.push(`${countLabel(details.omittedOutputImageCount, "image")} omitted from result`)
+	}
 	const lines = [headerParts.join(" · ")]
 	if (details.status !== "running" && !details.success && details.error) {
 		lines.push("", markdownFence("text", truncateLines(details.error, expanded, 8)))
@@ -1680,9 +1936,13 @@ const codeModeTool = (pi: ExtensionAPI, catalog: ToolCatalog) =>
 			let error: string | undefined
 			let prints: string[] = []
 			let operations: TraceOperation[] = []
+			let droppedOperationCount = 0
+			let omittedImageCount = 0
 			const emitPartial = (snapshot: {
 				prints: readonly string[]
 				operations: readonly CodeExecRenderOperation[]
+				operationCount: number
+				droppedOperationCount: number
 			}): void => {
 				if (!onUpdate) return
 				const details = assertTypeBox<CodeExecResultDetails>(
@@ -1694,15 +1954,16 @@ const codeModeTool = (pi: ExtensionAPI, catalog: ToolCatalog) =>
 						traceEntryType: TRACE_ENTRY_TYPE,
 						success: false,
 						status: "running",
-						prints: snapshot.prints,
-						operationCount: snapshot.operations.length,
-						operations: snapshot.operations,
+						prints: [...snapshot.prints],
+						operationCount: snapshot.operationCount,
+						...(snapshot.droppedOperationCount > 0 ? { droppedOperationCount: snapshot.droppedOperationCount } : {}),
+						operations: [...snapshot.operations],
 					},
 					"Invalid code-mode partial result details",
 				)
 				onUpdate({ content: [{ type: "text", text: "running" }], details })
 			}
-			emitPartial({ prints, operations: [] })
+			emitPartial({ prints, operations: [], operationCount: 0, droppedOperationCount: 0 })
 			try {
 				const checked = typeCheckCode(params.code, guestDeclarations(context.cwd, catalog))
 				if (checked.errors.length > 0) {
@@ -1725,16 +1986,23 @@ const codeModeTool = (pi: ExtensionAPI, catalog: ToolCatalog) =>
 				result = run.result
 				prints = run.prints
 				operations = run.operations
+				droppedOperationCount = run.droppedOperationCount
+				omittedImageCount = run.omittedImageCount
 				success = true
 			} catch (cause) {
 				if (cause instanceof CodeModeRuntimeError) {
 					prints = [...cause.prints]
 					operations = [...cause.operations]
+					droppedOperationCount = cause.droppedOperationCount
+					omittedImageCount = cause.omittedImageCount
 				}
 				error = cause instanceof Error ? cause.message : String(cause)
 			}
 
 			operations = [...operations].sort((left, right) => left.sequence - right.sequence)
+			const operationCount = droppedOperationCount + operations.length
+			const boundedResult = result !== undefined ? boundTraceResult(result, MAX_TRACE_IMAGE_BYTES) : undefined
+			if (boundedResult) omittedImageCount += boundedResult.omittedImageCount
 			const trace = validateTrace(traceSchemaFor(context.cwd, catalog), {
 				kind: TRACE_KIND,
 				version: TRACE_VERSION,
@@ -1745,14 +2013,16 @@ const codeModeTool = (pi: ExtensionAPI, catalog: ToolCatalog) =>
 				endedAt: new Date().toISOString(),
 				success,
 				codeSha256: crypto.createHash("sha256").update(params.code).digest("hex"),
-				prints,
+				prints: boundPrints(prints),
 				operations,
-				...(result !== undefined ? { result } : {}),
-				...(error ? { error } : {}),
+				...(droppedOperationCount > 0 ? { droppedOperationCount } : {}),
+				...(omittedImageCount > 0 ? { omittedImageCount } : {}),
+				...(boundedResult ? { result: boundedResult.result } : {}),
+				...(error ? { error: truncateTraceText(error, MAX_TRACE_TEXT_CHARS) } : {}),
 			})
 			pi.appendEntry<CodeModeTraceV1>(TRACE_ENTRY_TYPE, trace)
 			const summary = summarizeTrace(trace)
-			const images = imagesFromRun(result, operations)
+			const { images, omittedOutputImageCount } = imagesFromRun(result, operations)
 			const details = assertTypeBox<CodeExecResultDetails>(
 				resultDetailsSchema,
 				{
@@ -1762,12 +2032,15 @@ const codeModeTool = (pi: ExtensionAPI, catalog: ToolCatalog) =>
 					traceEntryType: TRACE_ENTRY_TYPE,
 					success,
 					status: success ? "completed" : "failed",
-					...(result !== undefined ? { result: sanitizeForUi(result) } : {}),
-					prints,
-					operationCount: operations.length,
+					...(boundedResult ? { result: sanitizeForUi(boundedResult.result) } : {}),
+					prints: trace.prints,
+					operationCount,
+					...(droppedOperationCount > 0 ? { droppedOperationCount } : {}),
 					...(images.length > 0 ? { imageCount: images.length } : {}),
+					...(omittedImageCount > 0 ? { omittedImageCount } : {}),
+					...(omittedOutputImageCount > 0 ? { omittedOutputImageCount } : {}),
 					operations: operations.map(renderOperationFromTrace),
-					...(error ? { error } : {}),
+					...(error ? { error: truncateTraceText(error, MAX_TRACE_TEXT_CHARS) } : {}),
 				},
 				"Invalid code-mode result details",
 			)
