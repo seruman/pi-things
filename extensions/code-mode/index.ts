@@ -834,13 +834,42 @@ ${extensionMethods || "  /** No extension tools are currently captured. */\n  re
 
 interface ToolsApi {
   providers(): Array<{ name: PiToolProvider; description: string }>;
-  list(args?: { provider?: PiToolProvider; query?: string; limit?: number }): PiToolSchemaEntry[];
+  list(args?: { provider?: PiToolProvider; query?: string; limit?: number; compact?: false }): PiToolSchemaEntry[];
+  list(args: { provider?: PiToolProvider; query?: string; limit?: number; compact: true }): PiToolRef[];
+  names(provider?: PiToolProvider): PiToolRef[];
   schema(): PiToolSchemaMap;
   schema(ref: PiToolRef): PiToolSchemaEntry;
+  argSchema(ref: PiToolRef): JsonValue;
+  requiredArgs(ref: PiToolRef): string[];
   help(): PiToolHelpMap;
   help(ref: PiToolRef): PiToolHelpEntry;
   call<Ref extends PiOptionalArgToolRef>(request: { ref: Ref; args?: PiToolArgsByRef[Ref] }): Promise<PiToolResult>;
   call<Ref extends PiRequiredArgToolRef>(request: { ref: Ref; args: PiToolArgsByRef[Ref] }): Promise<PiToolResult>;
+  invoke<Ref extends PiOptionalArgToolRef>(ref: Ref, args?: PiToolArgsByRef[Ref]): Promise<PiToolResult>;
+  invoke<Ref extends PiRequiredArgToolRef>(ref: Ref, args: PiToolArgsByRef[Ref]): Promise<PiToolResult>;
+}
+
+interface ResultImage {
+  type: "image";
+  mimeType: string;
+  data: string;
+  bytes: number;
+}
+
+interface ResultsApi {
+  blocks(result: PiToolResult): PiToolContentPart[];
+  text(result: PiToolResult): string;
+  firstText(result: PiToolResult): string | undefined;
+  images(result: PiToolResult): ResultImage[];
+  imageBlocks(result: PiToolResult): ResultImage[];
+  preview(result: PiToolResult, options?: { maxChars?: number }): string;
+}
+
+interface AssertApi {
+  includes(value: PiToolResult | string, expected: string, message?: string): void;
+  textIncludes(result: PiToolResult, expected: string, message?: string): void;
+  hasImage(result: PiToolResult, message?: string): void;
+  noImages(result: PiToolResult, message?: string): void;
 }
 
 interface AgentSpawnRequest {
@@ -859,11 +888,15 @@ interface AgentSpawnRequest {
 interface AgentsApi {
   /** Create an isolated Pi AgentSession, send prompt, and return the final assistant text as a PiToolResult. */
   spawn(request: string | AgentSpawnRequest): Promise<PiToolResult>;
+  /** Spawn multiple isolated Pi AgentSessions concurrently. */
+  parallel(requests: Array<string | AgentSpawnRequest>): Promise<PiToolResult[]>;
 }
 
 declare const pi: Readonly<PiApi>;
 declare const extensions: Readonly<ExtensionsApi>;
 declare const tools: Readonly<ToolsApi>;
+declare const results: Readonly<ResultsApi>;
+declare const assert: Readonly<AssertApi>;
 declare const agents: Readonly<AgentsApi>;
 declare function print(...values: unknown[]): void;
 declare const console: Readonly<{
@@ -975,7 +1008,17 @@ const __listTools = (args) => {
     values = values.filter((entry) => JSON.stringify(entry).toLowerCase().includes(query));
   }
   if (typeof options.limit === "number") values = values.slice(0, Math.max(0, Math.floor(options.limit)));
-  return __clone(values);
+  return __clone(options.compact === true ? values.map((entry) => entry.ref) : values);
+};
+const __toolNames = (provider) => {
+  if (provider === undefined) return __clone(Object.keys(__metadata.schemas));
+  if (provider !== "pi" && provider !== "extensions") throw new Error("tools.names provider must be 'pi' or 'extensions'");
+  return __clone(__metadata.refsByProvider[provider] ?? []);
+};
+const __argSchema = (ref) => __lookup(__metadata.schemas, "schema", ref).argsSchema;
+const __requiredArgs = (ref) => {
+  const schema = __argSchema(ref);
+  return Array.isArray(schema && schema.required) ? __clone(schema.required) : [];
 };
 const __shellEscape = (value) => {
   const text = String(value);
@@ -998,6 +1041,33 @@ const __agentSpawn = async (request) => {
   if (response.status === "ok") return response.value;
   throw new Error(response.ref + " failed during " + response.stage + ": " + response.error);
 };
+const __agentParallel = (requests) => {
+  if (!Array.isArray(requests)) throw new Error("agents.parallel requests must be an array");
+  return Promise.all(requests.map(__agentSpawn));
+};
+const __resultBlocks = (result) => Array.isArray(result && result.content) ? __clone(result.content) : [];
+const __resultText = (result) => __resultBlocks(result)
+  .filter((part) => part && part.type === "text" && typeof part.text === "string")
+  .map((part) => part.text)
+  .join("\\n");
+const __firstText = (result) => {
+  const part = __resultBlocks(result).find((item) => item && item.type === "text" && typeof item.text === "string");
+  return part ? part.text : undefined;
+};
+const __resultImages = (result) => __resultBlocks(result)
+  .filter((part) => part && part.type === "image" && typeof part.data === "string" && typeof part.mimeType === "string")
+  .map((part) => ({ type: "image", mimeType: part.mimeType, data: part.data, bytes: part.data.length }));
+const __previewResult = (result, options) => {
+  const maxChars = Math.max(0, Math.floor(typeof (options && options.maxChars) === "number" ? options.maxChars : 1000));
+  const text = __resultText(result);
+  const imageSummary = __resultImages(result).map((image) => "[image:" + image.mimeType + ", " + image.bytes + " bytes]").join("\\n");
+  const preview = [text, imageSummary].filter(Boolean).join("\\n");
+  return preview.length <= maxChars ? preview : preview.slice(0, Math.max(0, maxChars - 23)) + "\\n[preview truncated]";
+};
+const __assertIncludes = (value, expected, message) => {
+  const haystack = typeof value === "string" ? value : __resultText(value);
+  if (!haystack.includes(expected)) throw new Error(message || "Expected text to include: " + expected);
+};
 const __formatPrintValue = (value) => {
   if (typeof value === "string") return value;
   try { return JSON.stringify(value); } catch (_) { return String(value); }
@@ -1017,16 +1087,34 @@ globalThis.pi = Object.freeze({
   $: __bashTemplate,
 });
 globalThis.extensions = __toolNamespace("extensions");
-globalThis.agents = Object.freeze({ spawn: __agentSpawn });
+globalThis.agents = Object.freeze({ spawn: __agentSpawn, parallel: __agentParallel });
+globalThis.results = Object.freeze({
+  blocks: __resultBlocks,
+  text: __resultText,
+  firstText: __firstText,
+  images: __resultImages,
+  imageBlocks: __resultImages,
+  preview: __previewResult,
+});
+globalThis.assert = Object.freeze({
+  includes: __assertIncludes,
+  textIncludes: __assertIncludes,
+  hasImage: (result, message) => { if (__resultImages(result).length === 0) throw new Error(message || "Expected at least one image block"); },
+  noImages: (result, message) => { if (__resultImages(result).length > 0) throw new Error(message || "Expected no image blocks"); },
+});
 globalThis.tools = Object.freeze({
   providers: () => __clone(__metadata.providers),
   list: __listTools,
+  names: __toolNames,
   schema: (ref) => __lookup(__metadata.schemas, "schema", ref),
+  argSchema: __argSchema,
+  requiredArgs: __requiredArgs,
   help: (ref) => __lookup(__metadata.schemas, "help", ref),
   call: (request) => {
     if (!request || typeof request !== "object" || Array.isArray(request)) throw new Error("tools.call request must be an object");
     return __callRef(request.ref, request.args);
   },
+  invoke: (ref, args) => __callRef(ref, args),
 });
 globalThis.print = (...values) => __print(values.map(__formatPrintValue).join(" "));
 globalThis.console = Object.freeze({ log: globalThis.print, error: globalThis.print, warn: globalThis.print });
@@ -2115,14 +2203,15 @@ const codeModeTool = (pi: ExtensionAPI, catalog: ToolCatalog) =>
 		description:
 			"Run a small TypeScript/JavaScript program in a QuickJS sandbox. The program can call exposed Pi builtins and registered extension tools through the code-mode API.",
 		promptSnippet:
-			"Run a small TypeScript/JavaScript program. API: pi.* for built-in tools, extensions.* for registered extension tools, tools.* for discovery/schema/help/dynamic calls, agents.spawn(...) for Pi subagents when available.",
+			"Run a small TypeScript/JavaScript program. API: pi.* for built-in tools, extensions.* for registered extension tools, tools.* for discovery/schema/help/dynamic calls, results.* helpers for PiToolResult, agents.spawn(...) for child Pi sessions.",
 		promptGuidelines: [
 			"Use code_exec for multi-step mechanical tool workflows; await every tool call.",
 			"Inside code_exec, use pi.read/pi.bash/pi.edit/pi.write/pi.grep/pi.find/pi.ls for Pi built-in coding tools only.",
 			"Use extensions.<toolName>(args) for registered extension tools, e.g. extensions.web_search({ query: '...' }) or extensions.task({ action: 'list' }).",
 			"Use tools.list({ provider: 'extensions' }), tools.help('extensions.<toolName>'), and tools.schema('extensions.<toolName>') to discover extension tools and their TypeBox argument schemas.",
-			"Use tools.call({ ref: 'extensions.<toolName>', args }) or tools.call({ ref: 'pi.read', args }) only when the ref is computed dynamically.",
-			"Use agents.spawn({ prompt: '...', cwd?: '.', tools?: ['read', 'bash'] }) to create isolated Pi AgentSessions; parallel composition is plain Promise.all.",
+			"Use results.text(result), results.firstText(result), results.images(result), and results.preview(result) for convenient PiToolResult handling; pi.* remains tool-only.",
+			"Use tools.names('extensions') or tools.list({ provider: 'extensions', compact: true }) for compact discovery; use tools.invoke(ref, args) for dynamic calls.",
+			"Use agents.spawn({ prompt: '...', cwd?: '.', tools?: ['read', 'bash'] }) to create isolated Pi AgentSessions; use agents.parallel([...]) or plain Promise.all for concurrent child sessions.",
 			"Tool refs are explicit strings like 'pi.read' and 'extensions.web_search'; there is no pi.tool, pi.call, pi.schema, or pi.help API.",
 			"All tool calls return PiToolResult: { content: [{ type: 'text', text } | { type: 'image', data, mimeType }], details? }. Do not assume stdout/stderr/exitCode/output fields for bash.",
 			"Prefer result.content for program logic. result.details is tool-specific UI/debug metadata and is typed opaque; narrow or cast before reading detail fields.",
