@@ -33,7 +33,6 @@
       "./extensions/web-fetch/index.ts",
       "./extensions/code-mode/index.ts",
       "./extensions/task-tools/index.ts",
-      "./extensions/subagent-tools/index.ts",
       "./extensions/diff-review/src/index.ts",
       "./extensions/split-fork.ts",
       "./extensions/goal.ts",

@@ -10,6 +10,7 @@ import {
 	ExtensionRunner as ImportedExtensionRunner,
 	type RegisteredTool,
 	SessionManager,
+	SettingsManager,
 	type Theme,
 	type ToolDefinition,
 	createAgentSession,
@@ -71,9 +72,29 @@ const codeExecSchema = Type.Object({
 	memoryLimitBytes: Type.Optional(Type.Number({ minimum: 1024 * 1024, maximum: 512 * 1024 * 1024 })),
 })
 
+const thinkingLevelSchema = Type.Union([
+	Type.Literal("off"),
+	Type.Literal("minimal"),
+	Type.Literal("low"),
+	Type.Literal("medium"),
+	Type.Literal("high"),
+	Type.Literal("xhigh"),
+])
+
+const modelSelectionSchema = Type.Union([
+	Type.String(),
+	Type.Object({
+		provider: Type.String(),
+		id: Type.Optional(Type.String()),
+		modelId: Type.Optional(Type.String()),
+	}),
+])
+
 const agentSpawnSchema = Type.Object({
 	prompt: Type.String({ minLength: 1 }),
 	cwd: Type.Optional(Type.String()),
+	model: Type.Optional(modelSelectionSchema),
+	thinkingLevel: Type.Optional(thinkingLevelSchema),
 	tools: Type.Optional(Type.Array(Type.String())),
 	excludeTools: Type.Optional(Type.Array(Type.String())),
 	noTools: Type.Optional(Type.Union([Type.Literal("all"), Type.Literal("builtin")])),
@@ -872,11 +893,17 @@ interface AssertApi {
   noImages(result: PiToolResult, message?: string): void;
 }
 
+type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+type AgentModelSelection = string | { provider: string; id?: string; modelId?: string };
 interface AgentSpawnRequest {
   /** Prompt to send to the spawned Pi AgentSession. */
   prompt: string;
   /** Working directory for project-local discovery. Defaults to the current Code Mode cwd. */
   cwd?: string;
+  /** Optional model override. Omit to inherit the parent session model. */
+  model?: AgentModelSelection;
+  /** Optional thinking override. Omit to inherit the parent session thinking level. */
+  thinkingLevel?: ThinkingLevel;
   /** Optional allowlist of active tool names for the spawned session. */
   tools?: string[];
   /** Optional denylist of active tool names for the spawned session. */
@@ -888,8 +915,6 @@ interface AgentSpawnRequest {
 interface AgentsApi {
   /** Create an isolated Pi AgentSession, send prompt, and return the final assistant text as a PiToolResult. */
   spawn(request: string | AgentSpawnRequest): Promise<PiToolResult>;
-  /** Spawn multiple isolated Pi AgentSessions concurrently. */
-  parallel(requests: Array<string | AgentSpawnRequest>): Promise<PiToolResult[]>;
 }
 
 declare const pi: Readonly<PiApi>;
@@ -1041,10 +1066,6 @@ const __agentSpawn = async (request) => {
   if (response.status === "ok") return response.value;
   throw new Error(response.ref + " failed during " + response.stage + ": " + response.error);
 };
-const __agentParallel = (requests) => {
-  if (!Array.isArray(requests)) throw new Error("agents.parallel requests must be an array");
-  return Promise.all(requests.map(__agentSpawn));
-};
 const __resultBlocks = (result) => Array.isArray(result && result.content) ? __clone(result.content) : [];
 const __resultText = (result) => __resultBlocks(result)
   .filter((part) => part && part.type === "text" && typeof part.text === "string")
@@ -1087,7 +1108,7 @@ globalThis.pi = Object.freeze({
   $: __bashTemplate,
 });
 globalThis.extensions = __toolNamespace("extensions");
-globalThis.agents = Object.freeze({ spawn: __agentSpawn, parallel: __agentParallel });
+globalThis.agents = Object.freeze({ spawn: __agentSpawn });
 globalThis.results = Object.freeze({
   blocks: __resultBlocks,
   text: __resultText,
@@ -1153,22 +1174,49 @@ const decodeAgentSpawnRequest = (rawEnvelope: string): AgentSpawnInput => {
 	}
 }
 
+const resolveAgentModel = (request: AgentSpawnInput, context: ExtensionContext) => {
+	const selection = request.model
+	if (!selection) return context.model
+	if (typeof selection === "string") {
+		const slash = selection.indexOf("/")
+		if (slash > 0) return context.modelRegistry.find(selection.slice(0, slash), selection.slice(slash + 1))
+		const matches = context.modelRegistry.getAll().filter((model) => model.id === selection)
+		if (matches.length === 1) return matches[0]
+		throw new CodeModeBoundaryError(
+			"validate",
+			matches.length === 0 ? `unknown model ${selection}` : `ambiguous model id ${selection}; use provider/model`,
+		)
+	}
+	const modelId = selection.id ?? selection.modelId
+	if (!modelId) throw new CodeModeBoundaryError("validate", "agents.spawn model object requires id or modelId")
+	const model = context.modelRegistry.find(selection.provider, modelId)
+	if (!model) throw new CodeModeBoundaryError("validate", `unknown model ${selection.provider}/${modelId}`)
+	return model
+}
+
 const spawnPiAgent = async (input: {
 	request: AgentSpawnInput
 	context: ExtensionContext
+	parentThinkingLevel: ReturnType<ExtensionAPI["getThinkingLevel"]>
 	signal: AbortSignal | undefined
 	onUpdate?: (partialResult: AgentToolResult<unknown>) => void
 }): Promise<AgentToolResult<unknown>> => {
-	const cwd = input.request.cwd ?? input.context.cwd
+	const cwd = input.request.cwd ? path.resolve(input.context.cwd, input.request.cwd) : input.context.cwd
+	const settingsManager = SettingsManager.create(cwd, undefined, { projectTrusted: input.context.isProjectTrusted() })
+	const model = resolveAgentModel(input.request, input.context)
+	const thinkingLevel = input.request.thinkingLevel ?? input.parentThinkingLevel
 	const { session } = await createAgentSession({
 		cwd,
-		model: input.context.model,
+		model,
+		thinkingLevel,
 		modelRegistry: input.context.modelRegistry,
+		settingsManager,
 		sessionManager: SessionManager.inMemory(cwd),
 		...(input.request.tools ? { tools: input.request.tools } : {}),
 		...(input.request.excludeTools ? { excludeTools: input.request.excludeTools } : {}),
 		...(input.request.noTools ? { noTools: input.request.noTools } : {}),
 	})
+	await session.bindExtensions({ mode: "print" })
 	let streamedText = ""
 	const unsubscribe = session.subscribe((event: unknown) => {
 		if (!event || typeof event !== "object") return
@@ -1182,7 +1230,7 @@ const spawnPiAgent = async (input: {
 	const abort = (): void => void session.abort()
 	input.signal?.addEventListener("abort", abort, { once: true })
 	try {
-		await session.prompt(input.request.prompt)
+		await session.prompt(input.request.prompt, { source: "extension" })
 		const finalText = session.getLastAssistantText() ?? streamedText
 		return {
 			content: [{ type: "text", text: finalText || "(no response)" }],
@@ -1191,11 +1239,18 @@ const spawnPiAgent = async (input: {
 				version: TRACE_VERSION,
 				sessionId: session.sessionId,
 				cwd,
+				model: session.model ? { provider: session.model.provider, id: session.model.id } : undefined,
+				thinkingLevel: session.thinkingLevel,
+				projectTrusted: settingsManager.isProjectTrusted(),
+				tools: session.getActiveToolNames(),
 			},
 		}
 	} finally {
 		input.signal?.removeEventListener("abort", abort)
 		unsubscribe()
+		if (session.extensionRunner.hasHandlers("session_shutdown")) {
+			await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" })
+		}
 		session.dispose()
 	}
 }
@@ -1206,6 +1261,7 @@ const runInQuickJs = async (input: {
 	timeoutMs: number
 	memoryLimitBytes: number
 	context: ExtensionContext
+	parentThinkingLevel: ReturnType<ExtensionAPI["getThinkingLevel"]>
 	toolCallId: string
 	catalog: ToolCatalog
 	onPartial?: (snapshot: {
@@ -1405,6 +1461,7 @@ const runInQuickJs = async (input: {
 						await spawnPiAgent({
 							request,
 							context: input.context,
+							parentThinkingLevel: input.parentThinkingLevel,
 							signal: input.context.signal,
 							onUpdate: (partialResult) => {
 								try {
@@ -2211,7 +2268,7 @@ const codeModeTool = (pi: ExtensionAPI, catalog: ToolCatalog) =>
 			"Use tools.list({ provider: 'extensions' }), tools.help('extensions.<toolName>'), and tools.schema('extensions.<toolName>') to discover extension tools and their TypeBox argument schemas.",
 			"Use results.text(result), results.firstText(result), results.images(result), and results.preview(result) for convenient PiToolResult handling; pi.* remains tool-only.",
 			"Use tools.names('extensions') or tools.list({ provider: 'extensions', compact: true }) for compact discovery; use tools.invoke(ref, args) for dynamic calls.",
-			"Use agents.spawn({ prompt: '...', cwd?: '.', tools?: ['read', 'bash'] }) to create isolated Pi AgentSessions; use agents.parallel([...]) or plain Promise.all for concurrent child sessions.",
+			"Use agents.spawn({ prompt: '...', cwd?: '.', tools?: ['read', 'bash'] }) to create isolated Pi AgentSessions; use plain Promise.all for concurrent child sessions.",
 			"Tool refs are explicit strings like 'pi.read' and 'extensions.web_search'; there is no pi.tool, pi.call, pi.schema, or pi.help API.",
 			"All tool calls return PiToolResult: { content: [{ type: 'text', text } | { type: 'image', data, mimeType }], details? }. Do not assume stdout/stderr/exitCode/output fields for bash.",
 			"Prefer result.content for program logic. result.details is tool-specific UI/debug metadata and is typed opaque; narrow or cast before reading detail fields.",
@@ -2276,6 +2333,7 @@ const codeModeTool = (pi: ExtensionAPI, catalog: ToolCatalog) =>
 					timeoutMs: params.timeoutMs ?? DEFAULT_TIMEOUT_MS,
 					memoryLimitBytes: params.memoryLimitBytes ?? DEFAULT_MEMORY_LIMIT_BYTES,
 					context,
+					parentThinkingLevel: pi.getThinkingLevel(),
 					toolCallId,
 					catalog,
 					onPartial: emitPartial,
