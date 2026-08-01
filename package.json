@@ -18,19 +18,17 @@
     "test:shell-leash": "bun test extensions/shell-leash/*.test.ts",
     "typecheck:web-search": "bunx tsc -p extensions/web-search/tsconfig.json",
     "typecheck:web-fetch": "bunx tsc -p extensions/web-fetch/tsconfig.json",
-    "typecheck:diff-review": "bunx tsc -p extensions/diff-review/tsconfig.json",
     "typecheck:pi-safety": "bunx tsc -p extensions/pi-safety/tsconfig.json",
     "typecheck:shell-leash": "bunx tsc -p extensions/shell-leash/tsconfig.json",
     "typecheck:code-mode": "bunx tsc -p extensions/code-mode/tsconfig.json",
     "typecheck:single-extensions": "bunx tsc -p extensions/tsconfig.json",
-    "typecheck": "bun run typecheck:web-search && bun run typecheck:web-fetch && bun run typecheck:diff-review && bun run typecheck:pi-safety && bun run typecheck:shell-leash && bun run typecheck:code-mode && bun run typecheck:single-extensions"
+    "typecheck": "bun run typecheck:web-search && bun run typecheck:web-fetch && bun run typecheck:pi-safety && bun run typecheck:shell-leash && bun run typecheck:code-mode && bun run typecheck:single-extensions"
   },
   "pi": {
     "extensions": [
       "./extensions/web-search/index.ts",
       "./extensions/web-fetch/index.ts",
       "./extensions/code-mode/index.ts",
-      "./extensions/diff-review/src/index.ts",
       "./extensions/split-fork.ts",
       "./extensions/goal.ts",
       "./extensions/comment.ts",
@@ -43,7 +41,6 @@
     "@jitl/quickjs-singlefile-mjs-release-sync": "^0.32.0",
     "defuddle": "^0.15.0",
     "diff": "8.0.4",
-    "glimpseui": "^0.8.0",
     "glob-to-regexp": "0.4.1",
     "ignore": "^7.0.5",
     "just-bash": "^2.14.2",
