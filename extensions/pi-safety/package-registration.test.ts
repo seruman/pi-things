@@ -24,9 +24,6 @@ test("package activates Pi safety alongside the standalone shell guard", () => {
 	assert.match(fs.readFileSync(snapshotExecutable, "utf8"), /^#!\/usr\/bin\/env -S bun --no-env-file\n/)
 	assert.equal(fs.existsSync(path.join(repository, "extensions", "shell-leash", "index.ts")), true)
 	assert.equal(fs.existsSync(path.join(repository, "extensions", "secret-guard")), false)
-	const subagentSource = fs.readFileSync(path.join(repository, "extensions", "subagent-tools", "index.ts"), "utf8")
-	assert.match(subagentSource, /"pi-safety", "index\.ts"/)
-	assert.doesNotMatch(subagentSource, /"secret-guard"/)
 })
 
 test("Pi SDK dependencies exactly match the installed Pi release used for Bash parity", () => {

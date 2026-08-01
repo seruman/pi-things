@@ -50,4 +50,4 @@ Opens a settings UI to view and toggle session approvals for all capabilities.
 
 ## Non-interactive sessions
 
-The extension does nothing outside interactive sessions. No blocking, no warnings, yolo. Sub-sessions -see `subagent-tool`- are in YOLO mode.
+The extension does nothing outside interactive sessions. No blocking, no warnings, yolo. Spawned agent sessions (e.g. `agents.spawn` from code-mode) run in print mode, so they are in YOLO mode too.
