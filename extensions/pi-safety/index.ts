@@ -37,31 +37,40 @@ export default function piSafety(pi: ExtensionAPI): void {
 	let initialization: SessionInitialization = { kind: "not-started" }
 	let recordedCheckpointId: SnapshotId | undefined
 	const features = { protection: false, checkpoints: true }
-	const bashTool = createBashTool(process.cwd())
-	pi.registerTool({
-		...bashTool,
-		promptSnippet: "Execute bash commands (ls, grep, find, etc.)",
-		execute: async (id, params, signal, onUpdate, _context) => {
-			const environment = () => ({
-				PI_SAFETY_CHECKPOINT_READY: "1",
-				...(initialization.kind === "ready" ? initialization.session.bashEnvironment() : {}),
-			})
-			const invocationTool = features.protection
-				? createBashTool(process.cwd(), {
-						operations: createSandboxedBashOperations(() => {
-							if (initialization.kind !== "ready") {
-								throw new Error("pi-safety: Bash sandbox requested before session initialization")
-							}
-							return initialization.session.seatbeltProfile()
-						}, environment),
-					})
-				: createBashTool(process.cwd(), {
-						shellPath: "/bin/bash",
-						spawnHook: (context) => ({ ...context, env: { ...context.env, ...environment() } }),
-					})
-			return invocationTool.execute(id, params, signal, onUpdate)
-		},
-	})
+	let bashWrapperRegistered = false
+	const registerBashWrapper = (context: ExtensionContext): void => {
+		if (bashWrapperRegistered) return
+		if (!pi.getAllTools().some((tool) => tool.name === "bash")) return
+		bashWrapperRegistered = true
+		const bashTool = createBashTool(context.cwd)
+		pi.registerTool({
+			...bashTool,
+			promptSnippet: "Execute bash commands (ls, grep, find, etc.)",
+			execute: async (id, params, signal, onUpdate, toolContext) => {
+				const cwd = toolContext.cwd
+				const environment = () => ({
+					PI_SAFETY_CHECKPOINT_READY: "1",
+					...(initialization.kind === "ready" ? initialization.session.bashEnvironment() : {}),
+				})
+				const invocationTool = features.protection
+					? createBashTool(cwd, {
+							operations: createSandboxedBashOperations(() => {
+								if (initialization.kind !== "ready") {
+									throw new Error("pi-safety: Bash sandbox requested before session initialization")
+								}
+								return initialization.session.seatbeltProfile()
+							}, environment),
+						})
+					: createBashTool(cwd, {
+							shellPath: "/bin/bash",
+							spawnHook: (context) => ({ ...context, env: { ...context.env, ...environment() } }),
+						})
+				return invocationTool.execute(id, params, signal, onUpdate)
+			},
+		})
+	}
+
+	pi.on("session_start", (_event, context) => registerBashWrapper(context))
 
 	pi.registerCommand("pi-safety", {
 		description: "Manage Pi Safety for this session or inspect its policy",
