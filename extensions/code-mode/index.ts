@@ -4,6 +4,8 @@ import * as path from "node:path"
 import { pathToFileURL } from "node:url"
 import {
 	type AgentToolResult,
+	type CustomEntry,
+	DefaultResourceLoader,
 	type ExtensionAPI,
 	type ExtensionContext,
 	type ExtensionRunner,
@@ -13,6 +15,7 @@ import {
 	SettingsManager,
 	type Theme,
 	type ToolDefinition,
+	convertToPng,
 	createAgentSession,
 	createBashToolDefinition,
 	createEditToolDefinition,
@@ -22,9 +25,21 @@ import {
 	createReadToolDefinition,
 	createWriteToolDefinition,
 	defineTool,
+	getAgentDir,
 	getMarkdownTheme,
 } from "@earendil-works/pi-coding-agent"
-import { type Component, Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui"
+import {
+	Box,
+	type Component,
+	Container,
+	Image,
+	Markdown,
+	Spacer,
+	Text,
+	getCapabilities,
+	getImageDimensions,
+	imageFallback,
+} from "@earendil-works/pi-tui"
 import releaseSyncVariant from "@jitl/quickjs-singlefile-mjs-release-sync"
 import { newQuickJSWASMModuleFromVariant } from "quickjs-emscripten-core"
 import { type Static, type TSchema, Type } from "typebox"
@@ -32,9 +47,12 @@ import { Value } from "typebox/value"
 import * as ts from "typescript"
 
 const TRACE_ENTRY_TYPE = "code-mode-trace"
+const OPERATION_ENTRY_TYPE = "code-mode-operation"
+const FINAL_ENTRY_TYPE = "code-mode-final-result"
 const TRACE_KIND = "pi-code-mode.trace"
 const TRACE_VERSION = 1
 const RESULT_KIND = "pi-code-mode.result"
+const CODEMODE_TOOL_NAME = "codemode"
 const DEFAULT_TIMEOUT_MS = 60_000
 const DEFAULT_MEMORY_LIMIT_BYTES = 64 * 1024 * 1024
 const MAX_TRACE_COUNT = 50
@@ -44,9 +62,12 @@ const MAX_TRACE_DETAILS_CHARS = 65_536
 const MAX_TRACE_IMAGE_BYTES = 16 * 1024 * 1024
 const MAX_OUTPUT_IMAGES = 8
 const MAX_SERIALIZED_TRACE_NODES = 4_096
-const TOOL_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls"] as const
+const READONLY_BUILTIN_TOOL_NAMES = ["read", "grep", "find", "ls"] as const
+// Public Pi exposes configured/active tools via getAllTools()/getActiveTools(). This list is only the
+// local factory map for builtins Code Mode knows how to execute after Pi reports them as active.
+const KNOWN_BUILTIN_TOOL_NAMES = ["read", "bash", "edit", "write", ...READONLY_BUILTIN_TOOL_NAMES.slice(1)] as const
 
-type BuiltinToolName = (typeof TOOL_NAMES)[number]
+type BuiltinToolName = (typeof KNOWN_BUILTIN_TOOL_NAMES)[number]
 type PiToolRef = `${"pi" | "extensions"}.${string}`
 type CodeModeCallRef = PiToolRef | "agents.spawn"
 type QuickJsModule = Awaited<ReturnType<typeof newQuickJSWASMModuleFromVariant>>
@@ -95,7 +116,7 @@ const agentSpawnSchema = Type.Object({
 	cwd: Type.Optional(Type.String()),
 	model: Type.Optional(modelSelectionSchema),
 	thinkingLevel: Type.Optional(thinkingLevelSchema),
-	tools: Type.Optional(Type.Array(Type.String())),
+	tools: Type.Optional(Type.Union([Type.Array(Type.String()), Type.Literal("readonly")])),
 	excludeTools: Type.Optional(Type.Array(Type.String())),
 	noTools: Type.Optional(Type.Union([Type.Literal("all"), Type.Literal("builtin")])),
 })
@@ -188,6 +209,25 @@ interface CodeModeTraceV1 {
 	readonly error?: string
 }
 
+interface CodeModeOperationEntryV1 {
+	readonly kind: "pi-code-mode.operation"
+	readonly version: typeof TRACE_VERSION
+	readonly executionId: string
+	readonly parentToolCallId: string
+	readonly cwd: string
+	readonly operation: CodeExecRenderOperation
+}
+
+interface CodeModeFinalEntryV1 {
+	readonly kind: "pi-code-mode.final-result"
+	readonly version: typeof TRACE_VERSION
+	readonly executionId: string
+	readonly parentToolCallId: string
+	readonly success: boolean
+	readonly result?: unknown
+	readonly error?: string
+}
+
 const renderOperationSchema = Type.Object({
 	sequence: Type.Number(),
 	toolCallId: Type.String(),
@@ -227,10 +267,6 @@ interface NestedRendererSlot {
 	call?: Component
 	result?: Component
 	state: Record<string, unknown>
-}
-
-interface CodeExecRendererState {
-	nestedSlots?: Map<number, NestedRendererSlot>
 }
 
 interface ToolCatalogEntry {
@@ -438,7 +474,7 @@ const parseToolRef = (ref: string): { provider: ToolProvider; name: string } | u
 
 const builtinToolEntries = (cwd: string, catalog: ToolCatalog): ToolRegistryEntry[] => {
 	const builtins = builtInTools(cwd)
-	return TOOL_NAMES.map((name) => ({
+	return KNOWN_BUILTIN_TOOL_NAMES.map((name) => ({
 		ref: refForTool("pi", name),
 		provider: "pi" as const,
 		name,
@@ -449,7 +485,7 @@ const builtinToolEntries = (cwd: string, catalog: ToolCatalog): ToolRegistryEntr
 const extensionToolEntries = (catalog: ToolCatalog): ToolRegistryEntry[] =>
 	catalog
 		.list()
-		.filter((entry) => !(TOOL_NAMES as readonly string[]).includes(entry.definition.name))
+		.filter((entry) => !(KNOWN_BUILTIN_TOOL_NAMES as readonly string[]).includes(entry.definition.name))
 		.map((entry) => ({
 			ref: refForTool("extensions", entry.definition.name),
 			provider: "extensions" as const,
@@ -462,10 +498,36 @@ const toolRegistry = (cwd: string, catalog: ToolCatalog): ToolRegistryEntry[] =>
 	...extensionToolEntries(catalog),
 ]
 
-const toolDefinitionForRef = (cwd: string, catalog: ToolCatalog, ref: string): ToolRegistryEntry | undefined => {
+const toolNameSet = (toolNames: readonly string[] | undefined): ReadonlySet<string> | undefined =>
+	toolNames ? new Set(toolNames) : undefined
+
+const accessibleToolRegistry = (
+	cwd: string,
+	catalog: ToolCatalog,
+	activeToolNames: readonly string[] | undefined,
+	configuredToolNames: readonly string[] | undefined,
+): ToolRegistryEntry[] => {
+	const active = toolNameSet(activeToolNames)
+	const configured = toolNameSet(configuredToolNames)
+	return toolRegistry(cwd, catalog).filter((entry) => {
+		if (configured && !configured.has(entry.name)) return false
+		if (active && !active.has(entry.name)) return false
+		return true
+	})
+}
+
+const toolDefinitionForRef = (
+	cwd: string,
+	catalog: ToolCatalog,
+	ref: string,
+	activeToolNames?: readonly string[],
+	configuredToolNames?: readonly string[],
+): ToolRegistryEntry | undefined => {
 	const parsed = parseToolRef(ref)
 	if (!parsed) return undefined
-	return toolRegistry(cwd, catalog).find((entry) => entry.provider === parsed.provider && entry.name === parsed.name)
+	return accessibleToolRegistry(cwd, catalog, activeToolNames, configuredToolNames).find(
+		(entry) => entry.provider === parsed.provider && entry.name === parsed.name,
+	)
 }
 
 const textContent = (content: ToolContent): string =>
@@ -522,7 +584,13 @@ const hostErrorResponseSchema = Type.Object({
 
 const hostResponseSchema = Type.Union([hostOkResponseSchema, hostErrorResponseSchema])
 
-const decodeHostCall = (rawEnvelope: string, cwd: string, catalog: ToolCatalog): PiHostCall => {
+const decodeHostCall = (
+	rawEnvelope: string,
+	cwd: string,
+	catalog: ToolCatalog,
+	activeToolNames: readonly string[] | undefined,
+	configuredToolNames: readonly string[] | undefined,
+): PiHostCall => {
 	let decoded: unknown
 	try {
 		decoded = JSON.parse(rawEnvelope)
@@ -534,8 +602,8 @@ const decodeHostCall = (rawEnvelope: string, cwd: string, catalog: ToolCatalog):
 		if (!decoded || typeof decoded !== "object") throw new Error("expected object envelope")
 		const envelope = decoded as { ref?: unknown; args?: unknown }
 		if (typeof envelope.ref !== "string") throw new Error("ref must be string")
-		const entry = toolDefinitionForRef(cwd, catalog, envelope.ref)
-		if (!entry) throw new Error(`unknown tool ref ${envelope.ref}`)
+		const entry = toolDefinitionForRef(cwd, catalog, envelope.ref, activeToolNames, configuredToolNames)
+		if (!entry) throw new Error(`unknown or inactive tool ref ${envelope.ref}`)
 		const args = assertTypeBox<Record<string, unknown>>(
 			entry.definition.parameters,
 			envelope.args ?? {},
@@ -577,11 +645,19 @@ const invokePiTool = async (input: {
 	sequence: number
 	context: ExtensionContext
 	catalog: ToolCatalog
+	activeToolNames: readonly string[] | undefined
+	configuredToolNames: readonly string[] | undefined
 	signal: AbortSignal | undefined
 	onUpdate?: (partialResult: AgentToolResult<unknown>) => void
 }): Promise<HostOkResponse> => {
-	const entry = toolDefinitionForRef(input.context.cwd, input.catalog, input.call.ref)
-	if (!entry) throw new CodeModeBoundaryError("validate", `unknown tool ref ${input.call.ref}`)
+	const entry = toolDefinitionForRef(
+		input.context.cwd,
+		input.catalog,
+		input.call.ref,
+		input.activeToolNames,
+		input.configuredToolNames,
+	)
+	if (!entry) throw new CodeModeBoundaryError("validate", `unknown or inactive tool ref ${input.call.ref}`)
 	const { name, definition } = entry
 	const runner = input.catalog.get(name)?.runner ?? input.catalog.runner
 	if (!runner) {
@@ -743,8 +819,13 @@ interface ToolDeclarationEntry extends ToolRegistryEntry {
 
 const identifierPart = (value: string): string => value.replace(/[^A-Za-z0-9_$]/g, "_") || "tool"
 
-const toolDeclarationEntries = (cwd: string, catalog: ToolCatalog): ToolDeclarationEntry[] =>
-	toolRegistry(cwd, catalog).map((entry, index) => ({
+const toolDeclarationEntries = (
+	cwd: string,
+	catalog: ToolCatalog,
+	activeToolNames?: readonly string[],
+	configuredToolNames?: readonly string[],
+): ToolDeclarationEntry[] =>
+	accessibleToolRegistry(cwd, catalog, activeToolNames, configuredToolNames).map((entry, index) => ({
 		...entry,
 		typeName: `PiToolArgs_${identifierPart(entry.provider)}_${identifierPart(entry.name)}_${index}`,
 	}))
@@ -754,27 +835,39 @@ const toolRequiresArgs = (definition: CapturedToolDefinition): boolean => {
 	return Array.isArray(required) && required.length > 0
 }
 
-const toolSchemaEntries = (cwd: string, catalog: ToolCatalog) =>
+const toolSchemaEntries = (
+	cwd: string,
+	catalog: ToolCatalog,
+	activeToolNames?: readonly string[],
+	configuredToolNames?: readonly string[],
+) =>
 	Object.fromEntries(
-		toolDeclarationEntries(cwd, catalog).map(({ ref, provider, name, definition }) => [
-			ref,
-			{
+		toolDeclarationEntries(cwd, catalog, activeToolNames, configuredToolNames).map(
+			({ ref, provider, name, definition }) => [
 				ref,
-				provider,
-				name,
-				label: definition.label,
-				description: guestToolDescription(name, definition.description),
-				promptSnippet: definition.promptSnippet,
-				argsSchema: definition.parameters,
-				resultSchema: toolResultSchema,
-			},
-		]),
+				{
+					ref,
+					provider,
+					name,
+					label: definition.label,
+					description: guestToolDescription(name, definition.description),
+					promptSnippet: definition.promptSnippet,
+					argsSchema: definition.parameters,
+					resultSchema: toolResultSchema,
+				},
+			],
+		),
 	) as Record<string, unknown>
 
-const guestRuntimeMetadata = (cwd: string, catalog: ToolCatalog): string => {
-	const entries = toolDeclarationEntries(cwd, catalog)
+const guestRuntimeMetadata = (
+	cwd: string,
+	catalog: ToolCatalog,
+	activeToolNames?: readonly string[],
+	configuredToolNames?: readonly string[],
+): string => {
+	const entries = toolDeclarationEntries(cwd, catalog, activeToolNames, configuredToolNames)
 	return JSON.stringify({
-		schemas: toolSchemaEntries(cwd, catalog),
+		schemas: toolSchemaEntries(cwd, catalog, activeToolNames, configuredToolNames),
 		providers: [
 			{ name: "pi", description: "Pi built-in coding tools" },
 			{ name: "extensions", description: "Captured registered Pi extension tools" },
@@ -793,8 +886,13 @@ const toolMethodDeclaration = (entry: ToolDeclarationEntry): string => {
 	return `${commentForDescription(description, "  ")}\n  ${JSON.stringify(entry.name)}(args${optionalArgs ? "?" : ""}: ${entry.typeName}): Promise<PiToolResult>;`
 }
 
-const guestDeclarations = (cwd: string, catalog: ToolCatalog): string => {
-	const entries = toolDeclarationEntries(cwd, catalog)
+const guestDeclarations = (
+	cwd: string,
+	catalog: ToolCatalog,
+	activeToolNames?: readonly string[],
+	configuredToolNames?: readonly string[],
+): string => {
+	const entries = toolDeclarationEntries(cwd, catalog, activeToolNames, configuredToolNames)
 	const piEntries = entries.filter((entry) => entry.provider === "pi")
 	const extensionEntries = entries.filter((entry) => entry.provider === "extensions")
 	const typeAliases = entries
@@ -806,6 +904,9 @@ const guestDeclarations = (cwd: string, catalog: ToolCatalog): string => {
 		.join("\n\n")
 	const argsByRef = entries.map(({ ref, typeName }) => `  ${JSON.stringify(ref)}: ${typeName};`).join("\n")
 	const piMethods = piEntries.map(toolMethodDeclaration).join("\n")
+	const piDollar = piEntries.some((entry) => entry.name === "bash")
+		? "  /** Tagged-template sugar for pi.bash({ command }) with shell-escaped interpolations. */\n  $(strings: TemplateStringsArray, ...values: unknown[]): Promise<PiToolResult>;"
+		: ""
 	const extensionMethods = extensionEntries.map(toolMethodDeclaration).join("\n")
 	const toolRefs = entries.map((entry) => JSON.stringify(entry.ref)).join(" | ") || "never"
 	const optionalToolRefs =
@@ -844,9 +945,7 @@ type PiToolHelpEntry = PiToolSchemaEntry;
 type PiToolHelpMap = Record<PiToolRef, PiToolHelpEntry>;
 
 interface PiApi {
-${piMethods}
-  /** Tagged-template sugar for pi.bash({ command }) with shell-escaped interpolations. */
-  $(strings: TemplateStringsArray, ...values: unknown[]): Promise<PiToolResult>;
+${[piMethods, piDollar].filter(Boolean).join("\n") || "  /** No Pi built-in tools are currently active. */\n  readonly __empty?: never;"}
 }
 
 interface ExtensionsApi {
@@ -895,6 +994,7 @@ interface AssertApi {
 
 type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 type AgentModelSelection = string | { provider: string; id?: string; modelId?: string };
+type AgentToolSelection = string[] | "readonly";
 interface AgentSpawnRequest {
   /** Prompt to send to the spawned Pi AgentSession. */
   prompt: string;
@@ -904,9 +1004,9 @@ interface AgentSpawnRequest {
   model?: AgentModelSelection;
   /** Optional thinking override. Omit to inherit the parent session thinking level. */
   thinkingLevel?: ThinkingLevel;
-  /** Optional allowlist of active tool names for the spawned session. */
-  tools?: string[];
-  /** Optional denylist of active tool names for the spawned session. */
+  /** Optional allowlist of active tool names for the spawned session, or "readonly" for Pi's read/grep/find/ls preset. codemode is rejected to prevent nested Code Mode. */
+  tools?: AgentToolSelection;
+  /** Optional denylist of active tool names for the spawned session. codemode is always excluded. */
   excludeTools?: string[];
   /** Optional default tool suppression mode when tools is omitted. */
   noTools?: "all" | "builtin";
@@ -1014,7 +1114,7 @@ const __toolNamespace = (provider) => {
       writable: false,
     });
   }
-  return Object.freeze(target);
+  return target;
 };
 const __clone = (value) => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 const __lookup = (record, kind, ref) => {
@@ -1097,17 +1197,17 @@ delete globalThis.process;
 delete globalThis.require;
 delete globalThis.module;
 delete globalThis.exports;
-globalThis.pi = Object.freeze({
-  read: (args) => __callRef("pi.read", args),
-  bash: (args) => __callRef("pi.bash", args),
-  edit: (args) => __callRef("pi.edit", args),
-  write: (args) => __callRef("pi.write", args),
-  grep: (args) => __callRef("pi.grep", args),
-  find: (args) => __callRef("pi.find", args),
-  ls: (args) => __callRef("pi.ls", args),
-  $: __bashTemplate,
-});
-globalThis.extensions = __toolNamespace("extensions");
+const __piNamespace = __toolNamespace("pi");
+if (Object.prototype.hasOwnProperty.call(__metadata.schemas, "pi.bash")) {
+  Object.defineProperty(__piNamespace, "$", {
+    value: __bashTemplate,
+    enumerable: true,
+    configurable: false,
+    writable: false,
+  });
+}
+globalThis.pi = Object.freeze(__piNamespace);
+globalThis.extensions = Object.freeze(__toolNamespace("extensions"));
 globalThis.agents = Object.freeze({ spawn: __agentSpawn });
 globalThis.results = Object.freeze({
   blocks: __resultBlocks,
@@ -1194,42 +1294,115 @@ const resolveAgentModel = (request: AgentSpawnInput, context: ExtensionContext) 
 	return model
 }
 
+const concreteParentExtensionPaths = (runner: ExtensionRunner | undefined): string[] =>
+	runner?.getExtensionPaths().filter((extensionPath) => !extensionPath.startsWith("<")) ?? []
+
+const createInheritedResourceLoader = async (input: {
+	cwd: string
+	agentDir: string
+	settingsManager: SettingsManager
+	parentRunner: ExtensionRunner | undefined
+}): Promise<{
+	loader: DefaultResourceLoader | undefined
+	extensionPathCount: number
+	inheritedFlagCount: number
+}> => {
+	const additionalExtensionPaths = concreteParentExtensionPaths(input.parentRunner)
+	if (additionalExtensionPaths.length === 0) return { loader: undefined, extensionPathCount: 0, inheritedFlagCount: 0 }
+
+	const loader = new DefaultResourceLoader({
+		cwd: input.cwd,
+		agentDir: input.agentDir,
+		settingsManager: input.settingsManager,
+		additionalExtensionPaths,
+		noExtensions: true,
+	})
+	await loader.reload()
+
+	let inheritedFlagCount = 0
+	const extensionsResult = loader.getExtensions()
+	for (const [name, value] of input.parentRunner?.getFlagValues() ?? []) {
+		extensionsResult.runtime.flagValues.set(name, value)
+		inheritedFlagCount++
+	}
+	return { loader, extensionPathCount: additionalExtensionPaths.length, inheritedFlagCount }
+}
+
+const resolveRequestedAgentTools = (tools: AgentSpawnInput["tools"]): readonly string[] | undefined =>
+	tools === "readonly" ? READONLY_BUILTIN_TOOL_NAMES : tools
+
+const validateRequestedAgentTools = (
+	requestedTools: readonly string[] | undefined,
+	availableToolNames: readonly string[] | undefined,
+): void => {
+	if (!requestedTools) return
+	const requested = new Set(requestedTools)
+	if (requested.has(CODEMODE_TOOL_NAME)) {
+		throw new CodeModeBoundaryError("validate", "agents.spawn cannot enable codemode; nested Code Mode is disabled")
+	}
+	if (!availableToolNames) return
+	const available = new Set(availableToolNames)
+	const unknown = [...requested].filter((name) => !available.has(name))
+	if (unknown.length > 0)
+		throw new CodeModeBoundaryError("validate", `unknown agents.spawn tool(s): ${unknown.join(", ")}`)
+}
+
+const childAgentExcludeTools = (request: AgentSpawnInput): string[] => [
+	...new Set([...(request.excludeTools ?? []), CODEMODE_TOOL_NAME]),
+]
+
 const spawnPiAgent = async (input: {
 	request: AgentSpawnInput
 	context: ExtensionContext
 	parentThinkingLevel: ReturnType<ExtensionAPI["getThinkingLevel"]>
+	parentRunner: ExtensionRunner | undefined
 	signal: AbortSignal | undefined
 	onUpdate?: (partialResult: AgentToolResult<unknown>) => void
 }): Promise<AgentToolResult<unknown>> => {
 	const cwd = input.request.cwd ? path.resolve(input.context.cwd, input.request.cwd) : input.context.cwd
-	const settingsManager = SettingsManager.create(cwd, undefined, { projectTrusted: input.context.isProjectTrusted() })
+	const agentDir = getAgentDir()
+	const settingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted: input.context.isProjectTrusted() })
+	const inheritedResources = await createInheritedResourceLoader({
+		cwd,
+		agentDir,
+		settingsManager,
+		parentRunner: input.parentRunner,
+	})
+	const requestedTools = resolveRequestedAgentTools(input.request.tools)
+	validateRequestedAgentTools(requestedTools, undefined)
 	const model = resolveAgentModel(input.request, input.context)
 	const thinkingLevel = input.request.thinkingLevel ?? input.parentThinkingLevel
+	const excludeTools = childAgentExcludeTools(input.request)
 	const { session } = await createAgentSession({
 		cwd,
+		agentDir,
 		model,
 		thinkingLevel,
 		modelRegistry: input.context.modelRegistry,
 		settingsManager,
+		...(inheritedResources.loader ? { resourceLoader: inheritedResources.loader } : {}),
 		sessionManager: SessionManager.inMemory(cwd),
-		...(input.request.tools ? { tools: input.request.tools } : {}),
-		...(input.request.excludeTools ? { excludeTools: input.request.excludeTools } : {}),
+		...(requestedTools ? { tools: [...requestedTools] } : {}),
+		excludeTools,
 		...(input.request.noTools ? { noTools: input.request.noTools } : {}),
 	})
-	await session.bindExtensions({ mode: "print" })
 	let streamedText = ""
-	const unsubscribe = session.subscribe((event: unknown) => {
-		if (!event || typeof event !== "object") return
-		const item = event as { type?: unknown; assistantMessageEvent?: { type?: unknown; delta?: unknown } }
-		if (item.type === "message_update" && item.assistantMessageEvent?.type === "text_delta") {
-			const delta = typeof item.assistantMessageEvent.delta === "string" ? item.assistantMessageEvent.delta : ""
-			streamedText += delta
-			input.onUpdate?.({ content: [{ type: "text", text: streamedText }], details: undefined })
-		}
-	})
+	let unsubscribe: () => void = () => {}
 	const abort = (): void => void session.abort()
 	input.signal?.addEventListener("abort", abort, { once: true })
 	try {
+		const availableToolNames = [...new Set(session.getAllTools().map((tool) => tool.name))]
+		validateRequestedAgentTools(requestedTools, availableToolNames)
+		await session.bindExtensions({ mode: "print" })
+		unsubscribe = session.subscribe((event: unknown) => {
+			if (!event || typeof event !== "object") return
+			const item = event as { type?: unknown; assistantMessageEvent?: { type?: unknown; delta?: unknown } }
+			if (item.type === "message_update" && item.assistantMessageEvent?.type === "text_delta") {
+				const delta = typeof item.assistantMessageEvent.delta === "string" ? item.assistantMessageEvent.delta : ""
+				streamedText += delta
+				input.onUpdate?.({ content: [{ type: "text", text: streamedText }], details: undefined })
+			}
+		})
 		await session.prompt(input.request.prompt, { source: "extension" })
 		const finalText = session.getLastAssistantText() ?? streamedText
 		return {
@@ -1242,6 +1415,10 @@ const spawnPiAgent = async (input: {
 				model: session.model ? { provider: session.model.provider, id: session.model.id } : undefined,
 				thinkingLevel: session.thinkingLevel,
 				projectTrusted: settingsManager.isProjectTrusted(),
+				resourceInheritance: {
+					extensionPathCount: inheritedResources.extensionPathCount,
+					inheritedFlagCount: inheritedResources.inheritedFlagCount,
+				},
 				tools: session.getActiveToolNames(),
 			},
 		}
@@ -1264,6 +1441,9 @@ const runInQuickJs = async (input: {
 	parentThinkingLevel: ReturnType<ExtensionAPI["getThinkingLevel"]>
 	toolCallId: string
 	catalog: ToolCatalog
+	activeToolNames: readonly string[] | undefined
+	configuredToolNames: readonly string[] | undefined
+	appendOperation?: (operation: CodeExecRenderOperation) => void | Promise<void>
 	onPartial?: (snapshot: {
 		prints: readonly string[]
 		operations: readonly CodeExecRenderOperation[]
@@ -1341,8 +1521,20 @@ const runInQuickJs = async (input: {
 			})
 			const task = (async () => {
 				try {
-					call = decodeHostCall(rawEnvelope, input.context.cwd, input.catalog)
-					const entry = toolDefinitionForRef(input.context.cwd, input.catalog, call.ref)
+					call = decodeHostCall(
+						rawEnvelope,
+						input.context.cwd,
+						input.catalog,
+						input.activeToolNames,
+						input.configuredToolNames,
+					)
+					const entry = toolDefinitionForRef(
+						input.context.cwd,
+						input.catalog,
+						call.ref,
+						input.activeToolNames,
+						input.configuredToolNames,
+					)
 					if (!entry) throw new CodeModeBoundaryError("guard", `code-mode does not expose ${call.ref}`)
 					toolCallId = `${input.toolCallId}:code:${opSequence}:${call.ref}`
 					setRenderOperation({
@@ -1360,6 +1552,8 @@ const runInQuickJs = async (input: {
 							sequence: opSequence,
 							context: input.context,
 							catalog: input.catalog,
+							activeToolNames: input.activeToolNames,
+							configuredToolNames: input.configuredToolNames,
 							signal: input.context.signal,
 							onUpdate: (partialResult) => {
 								try {
@@ -1395,7 +1589,9 @@ const runInQuickJs = async (input: {
 						response: response as HostOkResponse,
 					}
 					const storedOperation = pushOperation(operation)
-					setRenderOperation(renderOperationFromTrace(storedOperation))
+					const renderOperation = renderOperationFromTrace(storedOperation)
+					setRenderOperation(renderOperation)
+					await input.appendOperation?.(renderOperation)
 					const responseHandle = vm.newString(JSON.stringify(response))
 					promise.resolve(responseHandle)
 					responseHandle.dispose()
@@ -1417,7 +1613,9 @@ const runInQuickJs = async (input: {
 						...(call ? { call } : { rawEnvelope }),
 					}
 					const storedOperation = pushOperation(operation)
-					setRenderOperation(renderOperationFromTrace(storedOperation))
+					const renderOperation = renderOperationFromTrace(storedOperation)
+					setRenderOperation(renderOperation)
+					await input.appendOperation?.(renderOperation)
 					const responseHandle = vm.newString(JSON.stringify(failure))
 					promise.resolve(responseHandle)
 					responseHandle.dispose()
@@ -1462,6 +1660,7 @@ const runInQuickJs = async (input: {
 							request,
 							context: input.context,
 							parentThinkingLevel: input.parentThinkingLevel,
+							parentRunner: input.catalog.runner,
 							signal: input.context.signal,
 							onUpdate: (partialResult) => {
 								try {
@@ -1496,7 +1695,9 @@ const runInQuickJs = async (input: {
 						response,
 					}
 					const storedOperation = pushOperation(operation)
-					setRenderOperation(renderOperationFromTrace(storedOperation))
+					const renderOperation = renderOperationFromTrace(storedOperation)
+					setRenderOperation(renderOperation)
+					await input.appendOperation?.(renderOperation)
 					const responseHandle = vm.newString(JSON.stringify(response))
 					promise.resolve(responseHandle)
 					responseHandle.dispose()
@@ -1519,7 +1720,9 @@ const runInQuickJs = async (input: {
 							: { rawEnvelope }),
 					}
 					const storedOperation = pushOperation(operation)
-					setRenderOperation(renderOperationFromTrace(storedOperation))
+					const renderOperation = renderOperationFromTrace(storedOperation)
+					setRenderOperation(renderOperation)
+					await input.appendOperation?.(renderOperation)
 					const responseHandle = vm.newString(JSON.stringify(failure))
 					promise.resolve(responseHandle)
 					responseHandle.dispose()
@@ -1906,8 +2109,8 @@ const prettyValue = (value: unknown): string => {
 }
 
 const markdownFence = (language: string, text: string): string => {
-	const ticks = text.match(/`+/g)?.reduce((max, ticks) => Math.max(max, ticks.length), 3) ?? 3
-	const fence = "`".repeat(ticks + 1)
+	const longestRun = text.match(/`+/g)?.reduce((max, ticks) => Math.max(max, ticks.length), 0) ?? 0
+	const fence = "`".repeat(Math.max(3, longestRun + 1))
 	return `${fence}${language}\n${text}\n${fence}`
 }
 
@@ -1954,6 +2157,41 @@ const formatToolResult = (value: PiToolResult, expanded: boolean): string => {
 	if (imageCount > 0) return formatMultimodalToolResult(value, expanded)
 	const text = toolResultText(value)
 	return text ? markdownFence("text", truncateLines(text, expanded, 8)) : "(no result)"
+}
+
+const isTableCellValue = (value: unknown): boolean =>
+	value === null || ["string", "number", "boolean", "undefined"].includes(typeof value)
+
+const tableCell = (value: unknown, maxChars: number | undefined): string => {
+	const text = value === undefined ? "" : value === null ? "null" : String(value)
+	const singleLine = text.replaceAll("|", "\\|").replaceAll("\n", " ")
+	return maxChars !== undefined && singleLine.length > maxChars ? `${singleLine.slice(0, maxChars - 1)}…` : singleLine
+}
+
+const formatObjectArrayTable = (items: Record<string, unknown>[], expanded: boolean): string | undefined => {
+	const rows = expanded ? items : items.slice(0, 12)
+	const candidateKeys = [
+		...new Set(
+			rows.flatMap((row) => Object.keys(row).filter((key) => key !== "details" && isTableCellValue(row[key]))),
+		),
+	]
+	const keys = candidateKeys.slice(0, expanded ? candidateKeys.length : 6)
+	if (rows.length === 0 || keys.length === 0) return undefined
+	const lines = [`| ${keys.join(" | ")} |`, `| ${keys.map(() => "---").join(" | ")} |`]
+	for (const row of rows)
+		lines.push(`| ${keys.map((key) => tableCell(row[key], expanded ? undefined : 80)).join(" | ")} |`)
+	if (!expanded && items.length > rows.length) lines.push(`\n… ${countLabel(items.length - rows.length, "more row")}`)
+	return lines.join("\n")
+}
+
+const formatFinalValue = (value: unknown, expanded: boolean): string => {
+	if (isPiToolResult(value)) return formatToolResult(value, expanded)
+	if (Array.isArray(value) && value.every((item) => asRecord(item))) {
+		const table = formatObjectArrayTable(value as Record<string, unknown>[], expanded)
+		if (table) return table
+	}
+	if (typeof value === "string") return markdownFence("text", truncateLines(value, expanded, 12))
+	return markdownFence("json", truncateLines(prettyValue(value), expanded, expanded ? 200 : 14))
 }
 
 const shortJson = (value: unknown, maxChars = 180): string => {
@@ -2004,6 +2242,16 @@ const summarizedArgsForRef = (ref: string, args: unknown): unknown => {
 			])
 		case "pi.ls":
 			return compactObject([["path", record.path]])
+		case "agents.spawn":
+			return compactObject([
+				["prompt", typeof record.prompt === "string" ? truncateLines(record.prompt, false, 2) : record.prompt],
+				["cwd", record.cwd],
+				["model", record.model],
+				["thinkingLevel", record.thinkingLevel],
+				["tools", Array.isArray(record.tools) ? record.tools.join(", ") : record.tools],
+				["excludeTools", Array.isArray(record.excludeTools) ? record.excludeTools.join(", ") : record.excludeTools],
+				["noTools", record.noTools],
+			])
 		default:
 			return record
 	}
@@ -2022,35 +2270,61 @@ const operationCallText = (operation: Pick<CodeExecRenderOperation, "ref" | "arg
 	return previewArgs === undefined ? ref : `${ref}(${shortJson(summarizedArgsForRef(ref, previewArgs), 140)})`
 }
 
-const operationHeadline = (operation: CodeExecRenderOperation): string => {
-	const glyph = operation.outcome === "ok" ? "✓" : operation.outcome === "error" ? "✗" : "◌"
+const operationStatusGlyph = (operation: CodeExecRenderOperation): string =>
+	operation.outcome === "ok" ? "✓" : operation.outcome === "error" ? "✗" : "◌"
+
+const operationTitle = (operation: CodeExecRenderOperation): string => {
 	const stage = operation.outcome === "error" && operation.stage ? ` [${operation.stage}]` : ""
-	return `${glyph} step ${operation.sequence + 1}: ${inlineCode(operationCallText(operation))}${stage}`
+	return `↳ step ${operation.sequence + 1} · ${operation.ref} ${operationStatusGlyph(operation)}${stage}`
 }
 
-const operationFallbackMarkdown = (operation: CodeExecRenderOperation, expanded: boolean): string => {
-	const lines = [operationHeadline(operation)]
-	if (operation.outcome === "error" && operation.error) lines.push(`  ${operation.error}`)
-	if (expanded && operation.args !== undefined) {
-		lines.push("", "args", "", markdownFence("json", truncateLines(prettyValue(operation.args), true, 20)))
-	}
-	if (expanded && operation.rawEnvelope !== undefined) {
-		lines.push("", "raw call", "", markdownFence("json", truncateLines(prettyValue(operation.rawEnvelope), true, 20)))
-	}
-	return lines.join("\n")
+const callArgsForOperation = (operation: CodeExecRenderOperation): unknown => {
+	const rawRecord = asRecord(operation.rawEnvelope)
+	return operation.args !== undefined
+		? operation.args
+		: rawRecord && Object.hasOwn(rawRecord, "args")
+			? rawRecord.args
+			: operation.rawEnvelope
 }
 
-const nestedSlot = (state: CodeExecRendererState, sequence: number): NestedRendererSlot => {
-	state.nestedSlots ??= new Map()
-	let slot = state.nestedSlots.get(sequence)
-	if (!slot) {
-		slot = { state: {} }
-		state.nestedSlots.set(sequence, slot)
-	}
-	return slot
+const formatAgentSpawnValue = (value: unknown, expanded: boolean): string => {
+	if (Array.isArray(value)) return value.length === 0 ? "none" : value.join(", ")
+	if (typeof value === "string") return expanded ? value : truncateLines(value, false, 2)
+	return value === undefined ? "" : compactValue(value)
 }
 
-const renderNativeOperation = (input: {
+const operationBg = (operation: CodeExecRenderOperation, theme: Theme): ((text: string) => string) => {
+	if (operation.outcome === "running") return (text) => theme.bg("toolPendingBg", text)
+	if (operation.outcome === "error") return (text) => theme.bg("toolErrorBg", text)
+	return (text) => theme.bg("toolSuccessBg", text)
+}
+
+const isBuiltinToolName = (name: string): name is BuiltinToolName =>
+	(KNOWN_BUILTIN_TOOL_NAMES as readonly string[]).includes(name)
+
+// 1:1 port of pi's ToolExecutionComponent result-text fallback (core/tools/render-utils getTextOutput),
+// minus ansi/binary sanitization helpers that pi does not export.
+const textOutputForResult = (result: PiToolResult, showImages: boolean): string => {
+	const textBlocks = result.content.filter((part) => part.type === "text")
+	const imageBlocks = result.content.filter((part) => part.type === "image")
+	let output = textBlocks.map((part) => (part.type === "text" ? part.text : "").replace(/\r/g, "")).join("\n")
+	const caps = getCapabilities()
+	if (imageBlocks.length > 0 && (!caps.images || !showImages)) {
+		const indicators = imageBlocks
+			.map((image) => {
+				if (image.type !== "image") return ""
+				const dimensions =
+					image.data && image.mimeType ? (getImageDimensions(image.data, image.mimeType) ?? undefined) : undefined
+				return imageFallback(image.mimeType ?? "image/unknown", dimensions)
+			})
+			.filter(Boolean)
+			.join("\n")
+		output = output ? `${output}\n${indicators}` : indicators
+	}
+	return output
+}
+
+const renderPiToolOperation = (input: {
 	operation: CodeExecRenderOperation
 	definition: CapturedToolDefinition
 	theme: Theme
@@ -2059,95 +2333,212 @@ const renderNativeOperation = (input: {
 	outerContext: { invalidate: () => void; showImages: boolean }
 	slot: NestedRendererSlot
 }): Component => {
-	const component = new Container()
-	const args = input.operation.args as Record<string, unknown> | undefined
+	const { operation, definition, theme } = input
+	// Mirror pi's ToolExecutionComponent renderer resolution: a registered/wrapped builtin
+	// (e.g. pi-safety bash) may lack renderers; fall back to the native builtin definition.
+	const native = isBuiltinToolName(definition.name) ? builtInTools(input.cwd)[definition.name] : undefined
+	const callRenderer = definition.renderCall ?? native?.renderCall
+	const resultRenderer = definition.renderResult ?? native?.renderResult
+	const renderShell = definition.renderShell ?? native?.renderShell ?? "default"
+	const bgFn = operationBg(operation, theme)
+	const args = operation.args as Record<string, unknown> | undefined
+	const result = operation.result
+	const isPartial = operation.outcome === "running"
 	const renderContext = (lastComponent: Component | undefined) => ({
 		args: args ?? {},
-		toolCallId: input.operation.toolCallId,
+		toolCallId: operation.toolCallId,
 		invalidate: input.outerContext.invalidate,
 		lastComponent,
 		state: input.slot.state,
 		cwd: input.cwd,
 		executionStarted: true,
 		argsComplete: true,
-		isPartial: input.operation.outcome === "running",
+		isPartial,
 		expanded: input.expanded,
 		showImages: input.outerContext.showImages,
-		isError: input.operation.outcome === "error",
+		isError: operation.outcome === "error",
 	})
-	try {
-		if (input.definition.renderCall && args) {
-			input.slot.call = input.definition.renderCall(args, input.theme, renderContext(input.slot.call))
-			component.addChild(input.slot.call)
-		} else {
-			component.addChild(new Markdown(operationFallbackMarkdown(input.operation, false), 0, 0, getMarkdownTheme()))
-		}
-		if (input.operation.result && input.definition.renderResult) {
-			input.slot.result = input.definition.renderResult(
-				{ content: input.operation.result.content, details: input.operation.result.details },
-				{ expanded: input.expanded, isPartial: input.operation.outcome === "running" },
-				input.theme,
-				renderContext(input.slot.result),
-			)
-			component.addChild(input.slot.result)
-		} else if (input.operation.outcome === "running") {
-			component.addChild(new Text(input.theme.fg("dim", "running…"), 0, 0))
-		} else if (input.operation.outcome === "error" && input.operation.error) {
-			component.addChild(new Text(input.theme.fg("error", input.operation.error), 0, 0))
-		}
-		return component
-	} catch {
-		const fallback = new Container()
-		fallback.addChild(
-			new Markdown(operationFallbackMarkdown(input.operation, input.expanded), 0, 0, getMarkdownTheme()),
-		)
-		return fallback
+	const callFallback = () => new Text(theme.fg("toolTitle", theme.bold(definition.name)), 0, 0)
+	const resultFallback = (): Text | undefined => {
+		const output = result ? textOutputForResult(result, input.outerContext.showImages) : ""
+		return output ? new Text(theme.fg("toolOutput", output), 0, 0) : undefined
 	}
+
+	const renderContainer = renderShell === "self" ? new Container() : new Box(1, 1, bgFn)
+	// The one intentional deviation from pi: the code-mode step header lives inside the tool's box.
+	renderContainer.addChild(new Text(theme.fg("dim", operationTitle(operation)), 0, 0))
+	if (callRenderer && args) {
+		try {
+			input.slot.call = callRenderer(args, theme, renderContext(input.slot.call))
+			renderContainer.addChild(input.slot.call)
+		} catch {
+			input.slot.call = undefined
+			renderContainer.addChild(callFallback())
+		}
+	} else {
+		renderContainer.addChild(callFallback())
+	}
+	if (result) {
+		if (resultRenderer) {
+			try {
+				input.slot.result = resultRenderer(
+					{ content: result.content, details: result.details },
+					{ expanded: input.expanded, isPartial },
+					theme,
+					renderContext(input.slot.result),
+				)
+				renderContainer.addChild(input.slot.result)
+			} catch {
+				input.slot.result = undefined
+				const fallback = resultFallback()
+				if (fallback) renderContainer.addChild(fallback)
+			}
+		} else {
+			const fallback = resultFallback()
+			if (fallback) renderContainer.addChild(fallback)
+		}
+	} else if (isPartial) {
+		renderContainer.addChild(new Text(theme.fg("dim", "running…"), 0, 0))
+	} else if (operation.outcome === "error" && operation.error) {
+		renderContainer.addChild(new Text(theme.fg("error", operation.error), 0, 0))
+	}
+
+	const outer = new Container()
+	outer.addChild(renderContainer)
+	// Mirror pi: image blocks render as siblings after the box.
+	if (result && input.outerContext.showImages) {
+		const caps = getCapabilities()
+		for (const part of result.content) {
+			if (!caps.images || part.type !== "image" || !part.data || !part.mimeType) continue
+			if (caps.images === "kitty" && part.mimeType !== "image/png") continue
+			outer.addChild(new Spacer(1))
+			outer.addChild(
+				new Image(
+					part.data,
+					part.mimeType,
+					{ fallbackColor: (text) => theme.fg("toolOutput", text) },
+					{ maxWidthCells: 60 },
+				),
+			)
+		}
+	}
+	return outer
 }
 
-const renderOperations = (input: {
-	operations: readonly CodeExecRenderOperation[]
-	catalog: ToolCatalog
-	theme: Theme
-	expanded: boolean
-	cwd: string
-	outerContext: { invalidate: () => void; showImages: boolean; state: CodeExecRendererState }
-}): Component | undefined => {
-	if (input.operations.length === 0) return undefined
-	const component = new Container()
-	component.addChild(new Markdown("**calls**", 0, 0, getMarkdownTheme()))
-	const shown = input.expanded ? input.operations : input.operations.slice(0, 6)
-	for (const operation of shown) {
-		component.addChild(new Spacer(1))
-		const definition = toolDefinitionForRef(input.cwd, input.catalog, operation.ref)?.definition
-		if (definition) {
-			component.addChild(
-				renderNativeOperation({
-					operation,
-					definition,
-					theme: input.theme,
-					expanded: input.expanded,
-					cwd: input.cwd,
-					outerContext: input.outerContext,
-					slot: nestedSlot(input.outerContext.state, operation.sequence),
-				}),
-			)
-		} else {
-			component.addChild(new Markdown(operationFallbackMarkdown(operation, input.expanded), 0, 0, getMarkdownTheme()))
+const renderAgentSpawnOperation = (operation: CodeExecRenderOperation, theme: Theme, expanded: boolean): Component => {
+	const box = new Box(1, 1, operationBg(operation, theme))
+	box.addChild(new Text(theme.fg("dim", operationTitle(operation)), 0, 0))
+	box.addChild(new Text(theme.fg("toolTitle", theme.bold("agents.spawn")), 0, 0))
+	const args = asRecord(callArgsForOperation(operation))
+	if (args) {
+		const lines: string[] = []
+		if (typeof args.prompt === "string") {
+			lines.push(theme.fg("toolOutput", expanded ? args.prompt : truncateLines(args.prompt, false, 3)))
 		}
+		const meta: string[] = []
+		if (typeof args.cwd === "string" && args.cwd !== ".") meta.push(`cwd: ${args.cwd}`)
+		if (args.model !== undefined) meta.push(`model: ${compactValue(args.model)}`)
+		if (args.thinkingLevel !== undefined) meta.push(`thinking: ${String(args.thinkingLevel)}`)
+		if (args.tools !== undefined) meta.push(`tools: ${formatAgentSpawnValue(args.tools, expanded)}`)
+		if (args.excludeTools !== undefined) meta.push(`exclude: ${formatAgentSpawnValue(args.excludeTools, expanded)}`)
+		if (args.noTools !== undefined) meta.push(`noTools: ${String(args.noTools)}`)
+		if (meta.length > 0) lines.push(theme.fg("dim", meta.join(" · ")))
+		if (lines.length > 0) box.addChild(new Text(lines.join("\n"), 0, 0))
 	}
-	if (!input.expanded && input.operations.length > shown.length) {
-		component.addChild(new Spacer(1))
-		component.addChild(
-			new Markdown(
-				`… ${countLabel(input.operations.length - shown.length, "more call")}; expand to show all`,
-				0,
-				0,
-				getMarkdownTheme(),
-			),
-		)
+	if (operation.result) {
+		const output = toolResultText(operation.result)
+		if (output) box.addChild(new Text(theme.fg("toolOutput", truncateLines(output, expanded, 10)), 0, 0))
 	}
-	return component
+	if (!operation.result && operation.outcome === "running") {
+		box.addChild(new Text(theme.fg("dim", "running…"), 0, 0))
+	}
+	if (!operation.result && operation.outcome === "error" && operation.error) {
+		box.addChild(new Text(theme.fg("error", operation.error), 0, 0))
+	}
+	return box
+}
+
+const renderOperationEntry = (
+	entry: CustomEntry<CodeModeOperationEntryV1>,
+	catalog: ToolCatalog,
+	expanded: boolean,
+	theme: Theme,
+): Component | undefined => {
+	const data = entry.data
+	if (!data || data.kind !== "pi-code-mode.operation") return undefined
+	if (data.operation.ref === "agents.spawn") {
+		return renderAgentSpawnOperation(data.operation, theme, expanded)
+	}
+	const definition = toolDefinitionForRef(data.cwd, catalog, data.operation.ref)?.definition
+	if (!definition) {
+		// Mirror pi's ToolExecutionComponent.formatToolExecution for tools without a definition.
+		const box = new Box(1, 1, operationBg(data.operation, theme))
+		box.addChild(new Text(theme.fg("dim", operationTitle(data.operation)), 0, 0))
+		let text = theme.fg("toolTitle", theme.bold(data.operation.ref))
+		const callArgs = callArgsForOperation(data.operation)
+		if (callArgs !== undefined) text += `\n\n${JSON.stringify(sanitizeForUi(callArgs), null, 2)}`
+		const output = data.operation.result ? textOutputForResult(data.operation.result, true) : ""
+		if (output) text += `\n${output}`
+		box.addChild(new Text(text, 0, 0))
+		return box
+	}
+	return renderPiToolOperation({
+		operation: data.operation,
+		definition,
+		theme,
+		expanded,
+		cwd: data.cwd,
+		outerContext: { invalidate: () => {}, showImages: true },
+		slot: { state: {} },
+	})
+}
+
+const renderFinalEntry = (
+	entry: CustomEntry<CodeModeFinalEntryV1>,
+	expanded: boolean,
+	theme: Theme,
+): Component | undefined => {
+	const data = entry.data
+	if (!data || data.kind !== "pi-code-mode.final-result") return undefined
+	const box = new Box(1, 1, (text) => theme.bg(data.success ? "toolSuccessBg" : "toolErrorBg", text))
+	box.addChild(new Text(theme.fg("toolTitle", theme.bold(`codemode final result ${data.success ? "✓" : "✗"}`)), 0, 0))
+	if (data.error) box.addChild(new Text(theme.fg("error", truncateLines(data.error, expanded, 8)), 0, 0))
+	if (data.result !== undefined) {
+		box.addChild(new Markdown(formatFinalValue(data.result, expanded), 0, 0, getMarkdownTheme()))
+	}
+	return box
+}
+
+// Mirror pi's ToolExecutionComponent kitty handling: convert non-png images to png before display.
+// Conversion happens at entry-append time (async), so renderers stay synchronous.
+const kittyPngCache = new Map<string, ToolImageContentPart>()
+
+const convertResultImagesForKitty = async (result: PiToolResult): Promise<PiToolResult> => {
+	if (getCapabilities().images !== "kitty") return result
+	if (!result.content.some((part) => part.type === "image" && part.mimeType !== "image/png")) return result
+	const content = await Promise.all(
+		result.content.map(async (part) => {
+			if (part.type !== "image" || part.mimeType === "image/png" || !part.data) return part
+			const cached = kittyPngCache.get(part.data)
+			if (cached) return cached
+			const converted = await convertToPng(part.data, part.mimeType)
+			if (!converted) return part
+			const next: ToolImageContentPart = { type: "image", data: converted.data, mimeType: converted.mimeType }
+			if (kittyPngCache.size >= 32) {
+				const oldest = kittyPngCache.keys().next().value
+				if (oldest !== undefined) kittyPngCache.delete(oldest)
+			}
+			kittyPngCache.set(part.data, next)
+			return next
+		}),
+	)
+	return { ...result, content }
+}
+
+const convertOperationImagesForKitty = async (operation: CodeExecRenderOperation): Promise<CodeExecRenderOperation> => {
+	if (!operation.result) return operation
+	const converted = await convertResultImagesForKitty(operation.result)
+	return converted === operation.result ? operation : { ...operation, result: converted }
 }
 
 const imagePartsFromValue = (value: unknown): ToolImageContentPart[] => {
@@ -2184,14 +2575,14 @@ const formatCodeCallMarkdown = (args: unknown, expanded: boolean): string => {
 			? (args as CodeExecInput).code
 			: compactValue(args)
 	const shown = truncateLines(code, expanded, 10)
-	return ["**code_exec**", "", markdownFence("ts", shown)].join("\n")
+	return ["**codemode**", "", markdownFence("ts", shown)].join("\n")
 }
 
 const formatUiResultMarkdown = (details: CodeExecResultDetails, expanded: boolean): string => {
 	const imageCount =
 		details.imageCount ?? (isPiToolResult(details.result) ? imagePartsFromValue(details.result).length : 0)
 	const title =
-		details.status === "running" ? "code_exec running" : details.success ? "code_exec completed" : "code_exec failed"
+		details.status === "running" ? "codemode running" : details.success ? "codemode completed" : "codemode failed"
 	const headerParts = [`**${title}**`, countLabel(details.operationCount, "operation")]
 	if (details.droppedOperationCount && details.droppedOperationCount > 0) {
 		headerParts.push(`${countLabel(details.droppedOperationCount, "older operation")} omitted from trace`)
@@ -2210,19 +2601,6 @@ const formatUiResultMarkdown = (details: CodeExecResultDetails, expanded: boolea
 	if (details.prints.length > 0) {
 		lines.push("", "**prints**", "", markdownFence("text", truncateLines(details.prints.join("\n"), expanded, 8)))
 	}
-	if (details.status !== "running" && details.result !== undefined) {
-		lines.push("", "**result**", "")
-		if (isPiToolResult(details.result)) {
-			lines.push(formatToolResult(details.result, expanded))
-		} else {
-			lines.push(
-				markdownFence(
-					typeof details.result === "string" ? "text" : "json",
-					truncateLines(prettyValue(details.result), expanded, 14),
-				),
-			)
-		}
-	}
 	return lines.join("\n")
 }
 
@@ -2239,7 +2617,7 @@ const summarizeTrace = (trace: CodeModeTraceV1): string => {
 	}
 
 	const failed = trace.operations.filter((op) => op.outcome === "error")
-	const lines = ["code_exec failed"]
+	const lines = ["codemode failed"]
 	if (failed.length > 0) {
 		lines.push(
 			failed
@@ -2255,24 +2633,25 @@ const summarizeTrace = (trace: CodeModeTraceV1): string => {
 
 const codeModeTool = (pi: ExtensionAPI, catalog: ToolCatalog) =>
 	defineTool({
-		name: "code_exec",
-		label: "Code Exec",
+		name: "codemode",
+		label: "Codemode",
 		description:
-			"Run a small TypeScript/JavaScript program in a QuickJS sandbox. The program can call exposed Pi builtins and registered extension tools through the code-mode API.",
+			"Run a small TypeScript/JavaScript program in a QuickJS sandbox. The program can call currently active Pi builtins and registered extension tools through the code-mode API.",
 		promptSnippet:
-			"Run a small TypeScript/JavaScript program. API: pi.* for built-in tools, extensions.* for registered extension tools, tools.* for discovery/schema/help/dynamic calls, results.* helpers for PiToolResult, agents.spawn(...) for child Pi sessions.",
+			"Run a small TypeScript/JavaScript program. API: pi.* for active built-in tools, extensions.* for active registered extension tools, tools.* for discovery/schema/help/dynamic calls, results.* helpers for PiToolResult, agents.spawn(...) for child Pi sessions.",
 		promptGuidelines: [
-			"Use code_exec for multi-step mechanical tool workflows; await every tool call.",
-			"Inside code_exec, use pi.read/pi.bash/pi.edit/pi.write/pi.grep/pi.find/pi.ls for Pi built-in coding tools only.",
-			"Use extensions.<toolName>(args) for registered extension tools, e.g. extensions.web_search({ query: '...' }) or extensions.task({ action: 'list' }).",
-			"Use tools.list({ provider: 'extensions' }), tools.help('extensions.<toolName>'), and tools.schema('extensions.<toolName>') to discover extension tools and their TypeBox argument schemas.",
+			"Use codemode for multi-step mechanical tool workflows; await every tool call.",
+			"Code Mode only exposes tools that are active in the current Pi session; noTools/tools/excludeTools restrictions apply inside codemode.",
+			"Inside codemode, use pi.<toolName>(args) only for active Pi built-in tools; use tools.names('pi') to see which ones are available.",
+			"Use extensions.<toolName>(args) for active registered extension tools, e.g. extensions.web_search({ query: '...' }) or extensions.task({ action: 'list' }).",
+			"Use tools.list(), tools.help('<ref>'), and tools.schema('<ref>') to discover active tools and their TypeBox argument schemas.",
 			"Use results.text(result), results.firstText(result), results.images(result), and results.preview(result) for convenient PiToolResult handling; pi.* remains tool-only.",
 			"Use tools.names('extensions') or tools.list({ provider: 'extensions', compact: true }) for compact discovery; use tools.invoke(ref, args) for dynamic calls.",
-			"Use agents.spawn({ prompt: '...', cwd?: '.', tools?: ['read', 'bash'] }) to create isolated Pi AgentSessions; use plain Promise.all for concurrent child sessions.",
+			"Use agents.spawn({ prompt: '...', cwd?: '.', tools?: ['read', 'bash'] }) to create isolated Pi AgentSessions; use tools: 'readonly' for Pi's read/grep/find/ls preset. Spawned sessions cannot use codemode, and plain Promise.all handles concurrency.",
 			"Tool refs are explicit strings like 'pi.read' and 'extensions.web_search'; there is no pi.tool, pi.call, pi.schema, or pi.help API.",
 			"All tool calls return PiToolResult: { content: [{ type: 'text', text } | { type: 'image', data, mimeType }], details? }. Do not assume stdout/stderr/exitCode/output fields for bash.",
 			"Prefer result.content for program logic. result.details is tool-specific UI/debug metadata and is typed opaque; narrow or cast before reading detail fields.",
-			"Return a compact final value from the code body when useful; intermediate nested tool calls are shown in the code_exec UI audit.",
+			"Return a compact final value from the code body when useful; intermediate nested tool calls are shown in the codemode UI audit.",
 		],
 		parameters: codeExecSchema,
 		executionMode: "sequential",
@@ -2319,7 +2698,12 @@ const codeModeTool = (pi: ExtensionAPI, catalog: ToolCatalog) =>
 			}
 			emitPartial({ prints, operations: [], operationCount: 0, droppedOperationCount: 0 })
 			try {
-				const checked = typeCheckCode(params.code, guestDeclarations(context.cwd, catalog))
+				const activeToolNames = pi.getActiveTools()
+				const configuredToolNames = [...new Set(pi.getAllTools().map((tool) => tool.name))]
+				const checked = typeCheckCode(
+					params.code,
+					guestDeclarations(context.cwd, catalog, activeToolNames, configuredToolNames),
+				)
 				if (checked.errors.length > 0) {
 					const diagnostics = checked.errors
 						.map((diagnostic) => `${diagnostic.line}:${diagnostic.column} ${diagnostic.message}`)
@@ -2329,13 +2713,24 @@ const codeModeTool = (pi: ExtensionAPI, catalog: ToolCatalog) =>
 				if (!checked.javascript) throw new Error("TypeScript did not emit JavaScript")
 				const run = await runInQuickJs({
 					javascript: checked.javascript,
-					metadataJson: guestRuntimeMetadata(context.cwd, catalog),
+					metadataJson: guestRuntimeMetadata(context.cwd, catalog, activeToolNames, configuredToolNames),
 					timeoutMs: params.timeoutMs ?? DEFAULT_TIMEOUT_MS,
 					memoryLimitBytes: params.memoryLimitBytes ?? DEFAULT_MEMORY_LIMIT_BYTES,
 					context,
 					parentThinkingLevel: pi.getThinkingLevel(),
 					toolCallId,
 					catalog,
+					activeToolNames,
+					configuredToolNames,
+					appendOperation: async (operation) =>
+						pi.appendEntry<CodeModeOperationEntryV1>(OPERATION_ENTRY_TYPE, {
+							kind: "pi-code-mode.operation",
+							version: TRACE_VERSION,
+							executionId,
+							parentToolCallId: toolCallId,
+							cwd: context.cwd,
+							operation: await convertOperationImagesForKitty(operation),
+						}),
 					onPartial: emitPartial,
 				})
 				result = run.result
@@ -2399,33 +2794,24 @@ const codeModeTool = (pi: ExtensionAPI, catalog: ToolCatalog) =>
 				},
 				"Invalid code-mode result details",
 			)
+			pi.appendEntry<CodeModeFinalEntryV1>(FINAL_ENTRY_TYPE, {
+				kind: "pi-code-mode.final-result",
+				version: TRACE_VERSION,
+				executionId,
+				parentToolCallId: toolCallId,
+				success,
+				...(details.result !== undefined ? { result: details.result } : {}),
+				...(details.error ? { error: details.error } : {}),
+			})
 			return { content: [{ type: "text", text: summary }, ...images], details, ...(success ? {} : { isError: true }) }
 		},
-		renderResult(result, options, theme, context) {
+		renderResult(result, options, _theme, context) {
 			const details = result.details as CodeExecResultDetails | undefined
 			const component = (context.lastComponent as Container | undefined) ?? new Container()
 			component.clear()
 			const markdown =
 				details?.kind === RESULT_KIND ? formatUiResultMarkdown(details, options.expanded) : textContent(result.content)
 			component.addChild(new Markdown(markdown, 0, 0, getMarkdownTheme()))
-			if (details?.kind === RESULT_KIND && details.operations) {
-				const operationsComponent = renderOperations({
-					operations: details.operations,
-					catalog,
-					theme,
-					expanded: options.expanded,
-					cwd: context.cwd,
-					outerContext: {
-						invalidate: context.invalidate,
-						showImages: context.showImages,
-						state: context.state as CodeExecRendererState,
-					},
-				})
-				if (operationsComponent) {
-					component.addChild(new Spacer(1))
-					component.addChild(operationsComponent)
-				}
-			}
 			return component
 		},
 	})
@@ -2435,5 +2821,11 @@ export default async function codeMode(pi: ExtensionAPI): Promise<void> {
 	const tool = codeModeTool(pi, catalog)
 	const disposeCapture = await installToolCapture(tool, catalog)
 	pi.on("session_shutdown", () => disposeCapture())
+	pi.registerEntryRenderer<CodeModeOperationEntryV1>(OPERATION_ENTRY_TYPE, (entry, options, theme) =>
+		renderOperationEntry(entry, catalog, options.expanded, theme),
+	)
+	pi.registerEntryRenderer<CodeModeFinalEntryV1>(FINAL_ENTRY_TYPE, (entry, options, theme) =>
+		renderFinalEntry(entry, options.expanded, theme),
+	)
 	pi.registerTool(tool)
 }
