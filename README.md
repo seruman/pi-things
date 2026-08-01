@@ -5,7 +5,6 @@ Me just prompting the shit out of LLMs to create things I want in pi.
 ## Things
 
 - [web-search / web-fetch](./extensions/web-tools/README.md)
-- [task-tools](./extensions/task-tools/README.md)
 - `/split-fork`
 - `/goal`
 - `/comment`

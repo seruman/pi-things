@@ -2643,7 +2643,7 @@ const codeModeTool = (pi: ExtensionAPI, catalog: ToolCatalog) =>
 			"Use codemode for multi-step mechanical tool workflows; await every tool call.",
 			"Code Mode only exposes tools that are active in the current Pi session; noTools/tools/excludeTools restrictions apply inside codemode.",
 			"Inside codemode, use pi.<toolName>(args) only for active Pi built-in tools; use tools.names('pi') to see which ones are available.",
-			"Use extensions.<toolName>(args) for active registered extension tools, e.g. extensions.web_search({ query: '...' }) or extensions.task({ action: 'list' }).",
+			"Use extensions.<toolName>(args) for active registered extension tools, e.g. extensions.web_search({ query: '...' }).",
 			"Use tools.list(), tools.help('<ref>'), and tools.schema('<ref>') to discover active tools and their TypeBox argument schemas.",
 			"Use results.text(result), results.firstText(result), results.images(result), and results.preview(result) for convenient PiToolResult handling; pi.* remains tool-only.",
 			"Use tools.names('extensions') or tools.list({ provider: 'extensions', compact: true }) for compact discovery; use tools.invoke(ref, args) for dynamic calls.",
