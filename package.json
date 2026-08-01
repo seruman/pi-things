@@ -16,18 +16,16 @@
     "check:write": "biome check --write .",
     "test:pi-safety": "bun test ./extensions/pi-safety/*.integration.ts && bun test extensions/pi-safety/*.test.ts",
     "test:shell-leash": "bun test extensions/shell-leash/*.test.ts",
-    "typecheck:web-search": "bunx tsc -p extensions/web-search/tsconfig.json",
-    "typecheck:web-fetch": "bunx tsc -p extensions/web-fetch/tsconfig.json",
+    "typecheck:web-tools": "bunx tsc -p extensions/web-tools/tsconfig.json",
     "typecheck:pi-safety": "bunx tsc -p extensions/pi-safety/tsconfig.json",
     "typecheck:shell-leash": "bunx tsc -p extensions/shell-leash/tsconfig.json",
     "typecheck:code-mode": "bunx tsc -p extensions/code-mode/tsconfig.json",
     "typecheck:single-extensions": "bunx tsc -p extensions/tsconfig.json",
-    "typecheck": "bun run typecheck:web-search && bun run typecheck:web-fetch && bun run typecheck:pi-safety && bun run typecheck:shell-leash && bun run typecheck:code-mode && bun run typecheck:single-extensions"
+    "typecheck": "bun run typecheck:web-tools && bun run typecheck:pi-safety && bun run typecheck:shell-leash && bun run typecheck:code-mode && bun run typecheck:single-extensions"
   },
   "pi": {
     "extensions": [
-      "./extensions/web-search/index.ts",
-      "./extensions/web-fetch/index.ts",
+      "./extensions/web-tools/index.ts",
       "./extensions/code-mode/index.ts",
       "./extensions/split-fork.ts",
       "./extensions/goal.ts",
