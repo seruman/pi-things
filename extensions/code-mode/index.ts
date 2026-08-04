@@ -53,7 +53,8 @@ const TRACE_KIND = "pi-code-mode.trace"
 const TRACE_VERSION = 1
 const RESULT_KIND = "pi-code-mode.result"
 const CODEMODE_TOOL_NAME = "codemode"
-const DEFAULT_TIMEOUT_MS = 60_000
+const DEFAULT_TIMEOUT_MS = 15 * 60_000
+const MAX_TIMEOUT_MS = 60 * 60_000
 const DEFAULT_MEMORY_LIMIT_BYTES = 64 * 1024 * 1024
 const MAX_TRACE_COUNT = 50
 const MAX_TRACE_INPUT_CHARS = 16_384
@@ -89,7 +90,14 @@ const codeExecSchema = Type.Object({
 		description:
 			"TypeScript/JavaScript function body to run in code mode. Use synchronous-looking pi.* calls and return a final value.",
 	}),
-	timeoutMs: Type.Optional(Type.Number({ minimum: 1, maximum: 300_000 })),
+	timeoutMs: Type.Optional(
+		Type.Number({
+			minimum: 1,
+			maximum: MAX_TIMEOUT_MS,
+			description:
+				"Total workflow timeout in milliseconds, including nested tool and agent calls. Defaults to 15 minutes.",
+		}),
+	),
 	memoryLimitBytes: Type.Optional(Type.Number({ minimum: 1024 * 1024, maximum: 512 * 1024 * 1024 })),
 })
 
