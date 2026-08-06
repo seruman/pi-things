@@ -124,7 +124,12 @@ const agentSpawnSchema = Type.Object({
 	cwd: Type.Optional(Type.String()),
 	model: Type.Optional(modelSelectionSchema),
 	thinkingLevel: Type.Optional(thinkingLevelSchema),
-	tools: Type.Optional(Type.Union([Type.Array(Type.String()), Type.Literal("readonly")])),
+	tools: Type.Optional(
+		Type.Union([Type.Array(Type.String()), Type.Literal("readonly")], {
+			description:
+				'Tool allowlist. "readonly" enables exactly Pi\'s read, grep, find, and ls builtins; it does not include web access or extension tools. Pass an explicit string array for other tools.',
+		}),
+	),
 	excludeTools: Type.Optional(Type.Array(Type.String())),
 	noTools: Type.Optional(Type.Union([Type.Literal("all"), Type.Literal("builtin")])),
 })
@@ -1012,7 +1017,7 @@ interface AgentSpawnRequest {
   model?: AgentModelSelection;
   /** Optional thinking override. Omit to inherit the parent session thinking level. */
   thinkingLevel?: ThinkingLevel;
-  /** Optional allowlist of active tool names for the spawned session, or "readonly" for Pi's read/grep/find/ls preset. codemode is rejected to prevent nested Code Mode. */
+  /** Optional allowlist of active tool names. "readonly" enables exactly Pi's read/grep/find/ls builtins—no web access or extension tools. Pass an explicit array for other tools. codemode is rejected to prevent nested Code Mode. */
   tools?: AgentToolSelection;
   /** Optional denylist of active tool names for the spawned session. codemode is always excluded. */
   excludeTools?: string[];
@@ -1466,6 +1471,28 @@ const runInQuickJs = async (input: {
 	omittedImageCount: number
 }> => {
 	const started = Date.now()
+	const timeoutMessage = `Execution timed out after ${input.timeoutMs}ms`
+	const executionAbort = new AbortController()
+	let timedOut = false
+	const abortExecution = (reason: Error): void => {
+		if (!executionAbort.signal.aborted) executionAbort.abort(reason)
+	}
+	const abortForTimeout = (): void => {
+		timedOut = true
+		abortExecution(new Error(timeoutMessage))
+	}
+	const parentSignal = input.context.signal
+	const abortForParent = (): void => abortExecution(new Error("Operation aborted"))
+	if (parentSignal?.aborted) abortForParent()
+	else parentSignal?.addEventListener("abort", abortForParent, { once: true })
+	const timeout = setTimeout(abortForTimeout, input.timeoutMs)
+	const throwIfExecutionStopped = (): void => {
+		if (timedOut || Date.now() - started > input.timeoutMs) {
+			abortForTimeout()
+			throw new Error(timeoutMessage)
+		}
+		if (parentSignal?.aborted) throw new Error("Operation aborted")
+	}
 	let sequence = 0
 	let droppedOperationCount = 0
 	let traceImageBytesUsed = 0
@@ -1509,7 +1536,11 @@ const runInQuickJs = async (input: {
 	const vm = (await quickJsModule()).newContext()
 	const runtime = vm.runtime
 	runtime.setMemoryLimit(input.memoryLimitBytes)
-	runtime.setInterruptHandler(() => Date.now() - started > input.timeoutMs)
+	runtime.setInterruptHandler(() => {
+		if (Date.now() - started <= input.timeoutMs) return executionAbort.signal.aborted
+		abortForTimeout()
+		return true
+	})
 	const hostTasks = new Set<Promise<void>>()
 	try {
 		const callHandle = vm.newFunction("__pi_call", (rawEnvelopeHandle) => {
@@ -1562,7 +1593,7 @@ const runInQuickJs = async (input: {
 							catalog: input.catalog,
 							activeToolNames: input.activeToolNames,
 							configuredToolNames: input.configuredToolNames,
-							signal: input.context.signal,
+							signal: executionAbort.signal,
 							onUpdate: (partialResult) => {
 								try {
 									const partialValue = assertTypeBox<PiToolResult>(
@@ -1669,7 +1700,7 @@ const runInQuickJs = async (input: {
 							context: input.context,
 							parentThinkingLevel: input.parentThinkingLevel,
 							parentRunner: input.catalog.runner,
-							signal: input.context.signal,
+							signal: executionAbort.signal,
 							onUpdate: (partialResult) => {
 								try {
 									const partialValue = assertTypeBox<PiToolResult>(
@@ -1762,6 +1793,7 @@ const runInQuickJs = async (input: {
 			if (evaluation.error) throw new Error(quickJsErrorMessage(evaluation.error))
 			while (true) {
 				runtime.executePendingJobs()
+				throwIfExecutionStopped()
 				const state = vm.getPromiseState(evaluation.value)
 				if (state.type === "fulfilled") {
 					try {
@@ -1783,7 +1815,6 @@ const runInQuickJs = async (input: {
 						if (state.error.alive) state.error.dispose()
 					}
 				}
-				if (Date.now() - started > input.timeoutMs) throw new Error(`Execution timed out after ${input.timeoutMs}ms`)
 				await new Promise((resolve) => setTimeout(resolve, 5))
 			}
 		} catch (error) {
@@ -1799,7 +1830,12 @@ const runInQuickJs = async (input: {
 			else if (evaluation.value.alive) evaluation.value.dispose()
 		}
 	} finally {
-		if (hostTasks.size > 0) await Promise.allSettled(hostTasks)
+		clearTimeout(timeout)
+		parentSignal?.removeEventListener("abort", abortForParent)
+		if (hostTasks.size > 0) {
+			abortExecution(new Error("Code Mode execution stopped"))
+			await Promise.allSettled(hostTasks)
+		}
 		vm.dispose()
 	}
 }
@@ -2655,7 +2691,7 @@ const codeModeTool = (pi: ExtensionAPI, catalog: ToolCatalog) =>
 			"Use tools.list(), tools.help('<ref>'), and tools.schema('<ref>') to discover active tools and their TypeBox argument schemas.",
 			"Use results.text(result), results.firstText(result), results.images(result), and results.preview(result) for convenient PiToolResult handling; pi.* remains tool-only.",
 			"Use tools.names('extensions') or tools.list({ provider: 'extensions', compact: true }) for compact discovery; use tools.invoke(ref, args) for dynamic calls.",
-			"Use agents.spawn({ prompt: '...', cwd?: '.', tools?: ['read', 'bash'] }) to create isolated Pi AgentSessions; use tools: 'readonly' for Pi's read/grep/find/ls preset. Spawned sessions cannot use codemode, and plain Promise.all handles concurrency.",
+			"Use agents.spawn({ prompt: '...', cwd?: '.', tools?: ['read', 'bash'] }) to create isolated Pi AgentSessions. tools: 'readonly' enables exactly Pi's read/grep/find/ls builtins—no web access or extension tools. For web research, pass an explicit tool array such as ['read', 'grep', 'find', 'ls', 'web_search', 'web_fetch']. Spawned sessions cannot use codemode, and plain Promise.all handles concurrency.",
 			"Tool refs are explicit strings like 'pi.read' and 'extensions.web_search'; there is no pi.tool, pi.call, pi.schema, or pi.help API.",
 			"All tool calls return PiToolResult: { content: [{ type: 'text', text } | { type: 'image', data, mimeType }], details? }. Do not assume stdout/stderr/exitCode/output fields for bash.",
 			"Prefer result.content for program logic. result.details is tool-specific UI/debug metadata and is typed opaque; narrow or cast before reading detail fields.",
