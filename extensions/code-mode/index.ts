@@ -1,5 +1,5 @@
 import * as crypto from "node:crypto"
-import { existsSync, readFileSync, realpathSync } from "node:fs"
+import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs"
 import * as path from "node:path"
 import { pathToFileURL } from "node:url"
 import {
@@ -53,6 +53,7 @@ const TRACE_KIND = "pi-code-mode.trace"
 const TRACE_VERSION = 1
 const RESULT_KIND = "pi-code-mode.result"
 const CODEMODE_TOOL_NAME = "codemode"
+const SNIPPET_DIR = path.join(".pi", "codemode-snippets")
 const DEFAULT_TIMEOUT_MS = 15 * 60_000
 const MAX_TIMEOUT_MS = 60 * 60_000
 const DEFAULT_MEMORY_LIMIT_BYTES = 64 * 1024 * 1024
@@ -88,7 +89,7 @@ const quickJsModule = (): Promise<QuickJsModule> => {
 const codeExecSchema = Type.Object({
 	code: Type.String({
 		description:
-			"TypeScript/JavaScript function body to run in code mode. Use synchronous-looking pi.* calls and return a final value.",
+			"TypeScript/JavaScript code to run in code mode. Static imports from pi-snippets:* may appear at top; the remaining code runs as an async function body. Prefer fs.readFile/fs.writeFile/fs.editFile and sh`...` for normal file/shell work; use raw pi.* for exact Pi tool access.",
 	}),
 	timeoutMs: Type.Optional(
 		Type.Number({
@@ -157,6 +158,18 @@ const toolResultSchema = Type.Object({
 
 type ToolImageContentPart = Static<typeof toolImageContentPartSchema>
 type PiToolResult = Static<typeof toolResultSchema>
+
+interface CodeModeSnippetInfo {
+	readonly name: string
+	readonly description?: string
+	readonly savedAt?: string
+	readonly path: string
+	readonly exports: readonly string[]
+}
+
+interface CodeModeSnippetRecord extends CodeModeSnippetInfo {
+	readonly source: string
+}
 
 type HostCall = {
 	readonly ref: CodeModeCallRef
@@ -917,8 +930,28 @@ const guestDeclarations = (
 		.join("\n\n")
 	const argsByRef = entries.map(({ ref, typeName }) => `  ${JSON.stringify(ref)}: ${typeName};`).join("\n")
 	const piMethods = piEntries.map(toolMethodDeclaration).join("\n")
-	const piDollar = piEntries.some((entry) => entry.name === "bash")
+	const hasPiRead = piEntries.some((entry) => entry.name === "read")
+	const hasPiWrite = piEntries.some((entry) => entry.name === "write")
+	const hasPiEdit = piEntries.some((entry) => entry.name === "edit")
+	const hasPiBash = piEntries.some((entry) => entry.name === "bash")
+	const piDollar = hasPiBash
 		? "  /** Tagged-template sugar for pi.bash({ command }) with shell-escaped interpolations. */\n  $(strings: TemplateStringsArray, ...values: unknown[]): Promise<PiToolResult>;"
+		: ""
+	const fsMethods = [
+		hasPiRead
+			? '  /** Read a text file through Pi\'s read tool and return joined text content. */\n  readFile(path: string, encoding?: "utf8" | "text"): Promise<string>;'
+			: undefined,
+		hasPiWrite
+			? "  /** Write a file through Pi's write tool. */\n  writeFile(path: string, content: string): Promise<PiToolResult>;"
+			: undefined,
+		hasPiEdit
+			? "  /** Edit a file through Pi's edit tool. */\n  editFile(path: string, edits: Array<{ oldText: string; newText: string }>): Promise<PiToolResult>;"
+			: undefined,
+	]
+		.filter(Boolean)
+		.join("\n")
+	const shDeclaration = hasPiBash
+		? "declare function sh(strings: TemplateStringsArray, ...values: unknown[]): Promise<PiToolResult>;"
 		: ""
 	const extensionMethods = extensionEntries.map(toolMethodDeclaration).join("\n")
 	const toolRefs = entries.map((entry) => JSON.stringify(entry.ref)).join(" | ") || "never"
@@ -976,6 +1009,7 @@ interface ToolsApi {
   requiredArgs(ref: PiToolRef): string[];
   help(): PiToolHelpMap;
   help(ref: PiToolRef): PiToolHelpEntry;
+  describe(ref: PiToolRef): PiToolHelpEntry;
   call<Ref extends PiOptionalArgToolRef>(request: { ref: Ref; args?: PiToolArgsByRef[Ref] }): Promise<PiToolResult>;
   call<Ref extends PiRequiredArgToolRef>(request: { ref: Ref; args: PiToolArgsByRef[Ref] }): Promise<PiToolResult>;
   invoke<Ref extends PiOptionalArgToolRef>(ref: Ref, args?: PiToolArgsByRef[Ref]): Promise<PiToolResult>;
@@ -1003,6 +1037,27 @@ interface AssertApi {
   textIncludes(result: PiToolResult, expected: string, message?: string): void;
   hasImage(result: PiToolResult, message?: string): void;
   noImages(result: PiToolResult, message?: string): void;
+}
+
+interface FsApi {
+${fsMethods || "  /** No fs facade methods are currently active because read/write/edit tools are unavailable. */\n  readonly __empty?: never;"}
+}
+
+interface SnippetInfo {
+  name: string;
+  description?: string;
+  savedAt?: string;
+  path: string;
+  exports: string[];
+}
+interface SnippetRecord extends SnippetInfo {
+  source: string;
+}
+interface SnippetsApi {
+  /** List saved ESM snippets under .pi/codemode-snippets. Import them with static ESM specifiers such as import { helper } from "pi-snippets:helper". */
+  list(): Promise<SnippetInfo[]>;
+  /** Describe a saved ESM snippet without executing it. */
+  describe(name: string): Promise<SnippetRecord>;
 }
 
 type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
@@ -1035,7 +1090,10 @@ declare const extensions: Readonly<ExtensionsApi>;
 declare const tools: Readonly<ToolsApi>;
 declare const results: Readonly<ResultsApi>;
 declare const assert: Readonly<AssertApi>;
+declare const fs: Readonly<FsApi>;
+declare const snippets: Readonly<SnippetsApi>;
 declare const agents: Readonly<AgentsApi>;
+${shDeclaration}
 declare function print(...values: unknown[]): void;
 declare const console: Readonly<{
   log(...values: unknown[]): void;
@@ -1043,6 +1101,154 @@ declare const console: Readonly<{
   error(...values: unknown[]): void;
 }>;
 `
+}
+
+const isIdentifierName = (value: string): boolean => /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(value)
+
+const snippetDirectory = (cwd: string): string => path.join(cwd, SNIPPET_DIR)
+
+const normalizedSnippetName = (name: string): string => {
+	const normalized = name.replace(/\\/g, "/").replace(/\.ts$/, "")
+	if (!normalized || normalized.startsWith("/") || normalized.split("/").some((part) => !isIdentifierName(part))) {
+		throw new Error(`Invalid snippet name ${JSON.stringify(name)}; expected an identifier path`)
+	}
+	return normalized
+}
+
+const relativeSnippetPath = (name: string): string => path.join(SNIPPET_DIR, `${normalizedSnippetName(name)}.ts`)
+
+const pathInside = (directory: string, filePath: string): boolean => {
+	const relative = path.relative(directory, filePath)
+	return Boolean(relative && !relative.startsWith("..") && !path.isAbsolute(relative))
+}
+
+const isInsideSnippetDirectory = (cwd: string, filePath: string): boolean =>
+	pathInside(path.resolve(cwd, SNIPPET_DIR), path.resolve(filePath))
+
+const assertInsideSnippetDirectory = (cwd: string, filePath: string): string => {
+	const directory = path.resolve(cwd, SNIPPET_DIR)
+	const resolved = path.resolve(filePath)
+	if (!pathInside(directory, resolved)) throw new Error(`Snippet import escapes ${SNIPPET_DIR}: ${filePath}`)
+	if (existsSync(resolved)) {
+		const realDirectory = existsSync(directory) ? realpathSync(directory) : directory
+		const realFile = realpathSync(resolved)
+		if (!pathInside(realDirectory, realFile)) throw new Error(`Snippet import escapes ${SNIPPET_DIR}: ${filePath}`)
+	}
+	return resolved
+}
+
+const snippetPath = (cwd: string, name: string): string =>
+	assertInsideSnippetDirectory(cwd, path.join(cwd, relativeSnippetPath(name)))
+
+const stripSnippetMetadata = (source: string): string =>
+	source.replace(/^\s*\/\*\s*@pi-codemode-snippet\s*\n[\s\S]*?\n\s*\*\/\s*/, "")
+
+const parseSnippetMetadata = (source: string): Record<string, unknown> | undefined => {
+	const match = source.match(/^\s*\/\*\s*@pi-codemode-snippet\s*\n([\s\S]*?)\n\s*\*\//)
+	if (!match) return undefined
+	try {
+		const parsed = JSON.parse(match[1] ?? "{}") as unknown
+		return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+			? (parsed as Record<string, unknown>)
+			: undefined
+	} catch {
+		return undefined
+	}
+}
+
+const exportNamesFromSnippetSource = (source: string): string[] => {
+	const file = ts.createSourceFile("snippet.ts", stripSnippetMetadata(source), ts.ScriptTarget.ES2022, true)
+	const names: string[] = []
+	for (const statement of file.statements) {
+		const hasExport = ts.canHaveModifiers(statement)
+			? (ts.getModifiers(statement) ?? []).some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)
+			: false
+		if (!hasExport) continue
+		if (ts.isFunctionDeclaration(statement) && statement.name) names.push(statement.name.text)
+		if (ts.isVariableStatement(statement)) {
+			for (const declaration of statement.declarationList.declarations) {
+				if (ts.isIdentifier(declaration.name)) names.push(declaration.name.text)
+			}
+		}
+	}
+	return [...new Set(names)]
+}
+
+const snippetInfoFromSource = (name: string, source: string): CodeModeSnippetRecord => {
+	const metadata = parseSnippetMetadata(source) ?? {}
+	const metadataName =
+		typeof metadata.name === "string" ? metadata.name : (normalizedSnippetName(name).split("/").at(-1) ?? name)
+	const description = typeof metadata.description === "string" ? metadata.description : undefined
+	const savedAt = typeof metadata.savedAt === "string" ? metadata.savedAt : undefined
+	const exports = exportNamesFromSnippetSource(source)
+	return {
+		name: metadataName,
+		...(description ? { description } : {}),
+		...(savedAt ? { savedAt } : {}),
+		path: relativeSnippetPath(name),
+		exports,
+		source,
+	}
+}
+
+const readSnippet = (cwd: string, name: string): CodeModeSnippetRecord => {
+	const source = readFileSync(snippetPath(cwd, name), "utf8")
+	return snippetInfoFromSource(name, source)
+}
+
+const listSnippets = (cwd: string): CodeModeSnippetInfo[] => {
+	const directory = snippetDirectory(cwd)
+	if (!existsSync(directory)) return []
+	const walk = (current: string): CodeModeSnippetInfo[] =>
+		readdirSync(current, { withFileTypes: true }).flatMap((entry) => {
+			const entryPath = path.join(current, entry.name)
+			if (entry.isDirectory()) return walk(entryPath)
+			if (!entry.isFile() || !entry.name.endsWith(".ts")) return []
+			const relative = path.relative(directory, entryPath).replace(/\\/g, "/").replace(/\.ts$/, "")
+			try {
+				const { source: _source, ...info } = readSnippet(cwd, relative)
+				return [info]
+			} catch {
+				return []
+			}
+		})
+	return walk(directory)
+}
+
+const resolveSnippetModule = (input: { cwd: string; containingFile: string; specifier: string }):
+	| string
+	| undefined => {
+	const directory = path.resolve(input.cwd, SNIPPET_DIR)
+	let candidate: string | undefined
+	if (input.specifier.startsWith("pi-snippets:")) {
+		candidate = path.join(directory, `${normalizedSnippetName(input.specifier.slice("pi-snippets:".length))}.ts`)
+	} else if (input.specifier.startsWith(".") && isInsideSnippetDirectory(input.cwd, input.containingFile)) {
+		candidate = path.resolve(path.dirname(input.containingFile), input.specifier)
+		if (!candidate.endsWith(".ts")) candidate = `${candidate}.ts`
+	}
+	if (!candidate) return undefined
+	const resolved = assertInsideSnippetDirectory(input.cwd, candidate)
+	if (!existsSync(resolved)) return undefined
+	return resolved
+}
+
+const splitGuestImports = (code: string): { imports: string; body: string } => {
+	const sourceFile = ts.createSourceFile("guest-input.ts", code, ts.ScriptTarget.ES2022, true)
+	const importSpans: Array<readonly [number, number]> = []
+	for (const statement of sourceFile.statements) {
+		if (ts.isImportDeclaration(statement) || ts.isImportEqualsDeclaration(statement)) {
+			importSpans.push([statement.getFullStart(), statement.end])
+		}
+	}
+	const imports = importSpans
+		.map(([start, end]) => code.slice(start, end).trim())
+		.filter(Boolean)
+		.join("\n")
+	let body = code
+	for (const [start, end] of importSpans.sort((left, right) => right[0] - left[0])) {
+		body = `${body.slice(0, start)}${body.slice(end)}`
+	}
+	return { imports, body: body.trim() }
 }
 
 interface CodeModeTypeError {
@@ -1066,42 +1272,114 @@ const compilerOptions: ts.CompilerOptions = {
 	lib: ["lib.es2022.d.ts"],
 }
 
-const typeCheckCode = (code: string, declarations: string): CodeModeTypeCheckResult => {
+const moduleCompilerOptions: ts.CompilerOptions = {
+	...compilerOptions,
+	module: ts.ModuleKind.CommonJS,
+	moduleResolution: ts.ModuleResolutionKind.Node10,
+	esModuleInterop: false,
+	allowSyntheticDefaultImports: false,
+}
+
+const javaScriptString = (value: string): string => JSON.stringify(value).replaceAll("</script", "<\\/script")
+
+const moduleBundleSource = (
+	guestFile: string,
+	emitted: Record<string, string>,
+	moduleImports: Record<string, Record<string, string>>,
+): string => {
+	const modules = Object.entries(emitted)
+		.map(([id, source]) => `${javaScriptString(id)}: function(exports, require, module) {\n${source}\n}`)
+		.join(",\n")
+	return `
+const __cm_modules = {${modules}};
+const __cm_module_imports = ${JSON.stringify(moduleImports)};
+const __cm_cache = Object.create(null);
+const __cm_resolve = (request, parent) => {
+  if (Object.prototype.hasOwnProperty.call(__cm_modules, request)) return request;
+  const mapping = __cm_module_imports[parent] && __cm_module_imports[parent][request];
+  if (mapping && Object.prototype.hasOwnProperty.call(__cm_modules, mapping)) return mapping;
+  throw new Error("Unsupported import " + request + " from " + parent + ". Only static ESM imports from pi-snippets:* and relative imports inside ${SNIPPET_DIR} are allowed.");
+};
+const __cm_require = (request, parent) => {
+  const id = __cm_resolve(request, parent || ${javaScriptString(guestFile)});
+  if (__cm_cache[id]) return __cm_cache[id].exports;
+  const module = { exports: {} };
+  __cm_cache[id] = module;
+  __cm_modules[id](module.exports, (child) => __cm_require(child, id), module);
+  return module.exports;
+};
+__cm_require(${javaScriptString(guestFile)}, ${javaScriptString(guestFile)}).__piCodeModeMain();`
+}
+
+const typeCheckCode = (code: string, declarations: string, cwd: string): CodeModeTypeCheckResult => {
 	const guestFile = path.resolve("/__pi_code_mode_guest.ts")
 	const declarationFile = path.resolve("/__pi_code_mode_globals.d.ts")
-	const sourceText = `async function __piCodeModeMain() {\n${code}\n}\n`
-	const host = ts.createCompilerHost(compilerOptions, true)
+	const split = splitGuestImports(code)
+	const importLineCount = split.imports ? split.imports.split("\n").length : 0
+	const sourceText = `${split.imports}\nasync function __piCodeModeMain() {\n${split.body}\n}\nexport { __piCodeModeMain }\n`
+	const emitted: Record<string, string> = {}
+	const moduleImports: Record<string, Record<string, string>> = {}
+	const host = ts.createCompilerHost(moduleCompilerOptions, true)
 	const originalFileExists = host.fileExists.bind(host)
 	const originalReadFile = host.readFile.bind(host)
 	const originalGetSourceFile = host.getSourceFile.bind(host)
-	host.fileExists = (fileName) => fileName === guestFile || fileName === declarationFile || originalFileExists(fileName)
+	host.fileExists = (fileName) => {
+		if (fileName === guestFile || fileName === declarationFile) return true
+		if (isInsideSnippetDirectory(cwd, fileName) && existsSync(fileName)) return true
+		return originalFileExists(fileName)
+	}
 	host.readFile = (fileName) => {
 		if (fileName === guestFile) return sourceText
 		if (fileName === declarationFile) return declarations
+		if (isInsideSnippetDirectory(cwd, fileName) && existsSync(fileName)) {
+			return readFileSync(assertInsideSnippetDirectory(cwd, fileName), "utf8")
+		}
 		return originalReadFile(fileName)
 	}
 	host.getSourceFile = (fileName, languageVersion, onError, shouldCreateNewSourceFile) => {
 		if (fileName === guestFile) return ts.createSourceFile(fileName, sourceText, ts.ScriptTarget.ES2022, true)
 		if (fileName === declarationFile) return ts.createSourceFile(fileName, declarations, ts.ScriptTarget.ES2022, true)
+		if (isInsideSnippetDirectory(cwd, fileName) && existsSync(fileName)) {
+			return ts.createSourceFile(
+				fileName,
+				readFileSync(assertInsideSnippetDirectory(cwd, fileName), "utf8"),
+				ts.ScriptTarget.ES2022,
+				true,
+			)
+		}
 		return originalGetSourceFile(fileName, languageVersion, onError, shouldCreateNewSourceFile)
 	}
-	const program = ts.createProgram({ rootNames: [declarationFile, guestFile], options: compilerOptions, host })
+	host.resolveModuleNames = (moduleNames, containingFile) =>
+		moduleNames.map((specifier) => {
+			const resolved = resolveSnippetModule({ cwd, containingFile, specifier })
+			if (!resolved) return undefined
+			moduleImports[containingFile] ??= {}
+			moduleImports[containingFile][specifier] = resolved
+			return { resolvedFileName: resolved, extension: ts.Extension.Ts }
+		})
+	const program = ts.createProgram({ rootNames: [declarationFile, guestFile], options: moduleCompilerOptions, host })
 	const sourceFile = program.getSourceFile(guestFile)
 	if (!sourceFile) return { errors: [{ line: 0, column: 0, message: "Unable to create code-mode source file" }] }
-	const diagnostics = [...program.getSyntacticDiagnostics(sourceFile), ...program.getSemanticDiagnostics(sourceFile)]
+	const diagnostics = [...program.getSyntacticDiagnostics(), ...program.getSemanticDiagnostics()]
 	const errors = diagnostics.map((diagnostic) => {
 		const message = ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n")
 		if (!diagnostic.file || diagnostic.start === undefined) return { line: 0, column: 0, message }
 		const position = diagnostic.file.getLineAndCharacterOfPosition(diagnostic.start)
-		return { line: Math.max(1, position.line), column: position.character + 1, message }
+		const line =
+			diagnostic.file.fileName === guestFile
+				? position.line < importLineCount
+					? position.line + 1
+					: Math.max(1, position.line - importLineCount)
+				: position.line + 1
+		return { line, column: position.character + 1, message }
 	})
 	if (errors.length > 0) return { errors }
 
-	let javascript: string | undefined
-	program.emit(sourceFile, (fileName, content) => {
-		if (fileName.endsWith(".js")) javascript = content
+	program.emit(undefined, (fileName, content, _writeByteOrderMark, _onError, sourceFiles) => {
+		const source = sourceFiles?.[0]
+		if (fileName.endsWith(".js") && source && source.fileName !== declarationFile) emitted[source.fileName] = content
 	})
-	return { errors: [], ...(javascript ? { javascript } : {}) }
+	return { errors: [], javascript: moduleBundleSource(guestFile, emitted, moduleImports) }
 }
 
 const sandboxSource = (javascript: string, metadataJson: string): string => `
@@ -1159,6 +1437,7 @@ const __requiredArgs = (ref) => {
   return Array.isArray(schema && schema.required) ? __clone(schema.required) : [];
 };
 const __shellEscape = (value) => {
+  if (Array.isArray(value)) return value.map(__shellEscape).join(" ");
   const text = String(value);
   if (text.length > 0 && /^[A-Za-z0-9_\\/:=.,+@%-]+$/.test(text)) return text;
   return "'" + text.replace(/'/g, "'\\''") + "'";
@@ -1179,6 +1458,18 @@ const __agentSpawn = async (request) => {
   if (response.status === "ok") return response.value;
   throw new Error(response.ref + " failed during " + response.stage + ": " + response.error);
 };
+const __snippetRequest = async (request) => {
+  const response = JSON.parse(await __pi_snippet(JSON.stringify(request)));
+  if (response.status === "ok") return response.value;
+  throw new Error("snippets." + (request && request.op || "request") + " failed: " + response.error);
+};
+const __fsReadFile = async (filePath, encoding) => {
+  if (encoding !== undefined && encoding !== "utf8" && encoding !== "text") throw new Error("fs.readFile only supports utf8/text encoding");
+  const result = await __callRef("pi.read", { path: filePath });
+  return __resultText(result);
+};
+const __fsWriteFile = (filePath, content) => __callRef("pi.write", { path: filePath, content: String(content) });
+const __fsEditFile = (filePath, edits) => __callRef("pi.edit", { path: filePath, edits });
 const __resultBlocks = (result) => Array.isArray(result && result.content) ? __clone(result.content) : [];
 const __resultText = (result) => __resultBlocks(result)
   .filter((part) => part && part.type === "text" && typeof part.text === "string")
@@ -1218,9 +1509,19 @@ if (Object.prototype.hasOwnProperty.call(__metadata.schemas, "pi.bash")) {
     configurable: false,
     writable: false,
   });
+  globalThis.sh = __bashTemplate;
 }
 globalThis.pi = Object.freeze(__piNamespace);
 globalThis.extensions = Object.freeze(__toolNamespace("extensions"));
+const __fsNamespace = {};
+if (Object.prototype.hasOwnProperty.call(__metadata.schemas, "pi.read")) __fsNamespace.readFile = __fsReadFile;
+if (Object.prototype.hasOwnProperty.call(__metadata.schemas, "pi.write")) __fsNamespace.writeFile = __fsWriteFile;
+if (Object.prototype.hasOwnProperty.call(__metadata.schemas, "pi.edit")) __fsNamespace.editFile = __fsEditFile;
+globalThis.fs = Object.freeze(__fsNamespace);
+globalThis.snippets = Object.freeze({
+  list: () => __snippetRequest({ op: "list" }),
+  describe: (name) => __snippetRequest({ op: "describe", name }),
+});
 globalThis.agents = Object.freeze({ spawn: __agentSpawn });
 globalThis.results = Object.freeze({
   blocks: __resultBlocks,
@@ -1244,6 +1545,7 @@ globalThis.tools = Object.freeze({
   argSchema: __argSchema,
   requiredArgs: __requiredArgs,
   help: (ref) => __lookup(__metadata.schemas, "help", ref),
+  describe: (ref) => __lookup(__metadata.schemas, "describe", ref),
   call: (request) => {
     if (!request || typeof request !== "object" || Array.isArray(request)) throw new Error("tools.call request must be an object");
     return __callRef(request.ref, request.args);
@@ -1253,7 +1555,6 @@ globalThis.tools = Object.freeze({
 globalThis.print = (...values) => __print(values.map(__formatPrintValue).join(" "));
 globalThis.console = Object.freeze({ log: globalThis.print, error: globalThis.print, warn: globalThis.print });
 ${javascript}
-__piCodeModeMain();
 `
 
 const stageOf = (error: unknown): FailureStage => (error instanceof CodeModeBoundaryError ? error.stage : "invoke")
@@ -1363,6 +1664,24 @@ const validateRequestedAgentTools = (
 const childAgentExcludeTools = (request: AgentSpawnInput): string[] => [
 	...new Set([...(request.excludeTools ?? []), CODEMODE_TOOL_NAME]),
 ]
+
+const handleSnippetRequest = (input: { cwd: string; rawEnvelope: string }): unknown => {
+	let request: unknown
+	try {
+		request = JSON.parse(input.rawEnvelope)
+	} catch (error) {
+		throw new Error(`Invalid snippets request JSON: ${error instanceof Error ? error.message : String(error)}`)
+	}
+	if (!request || typeof request !== "object" || Array.isArray(request))
+		throw new Error("snippets request must be an object")
+	const record = request as { op?: unknown; name?: unknown }
+	if (record.op === "list") return listSnippets(input.cwd)
+	if (record.op === "describe") {
+		if (typeof record.name !== "string") throw new Error("snippet name must be a string")
+		return readSnippet(input.cwd, record.name)
+	}
+	throw new Error(`unknown snippets operation ${String(record.op)}`)
+}
 
 const spawnPiAgent = async (input: {
 	request: AgentSpawnInput
@@ -1774,6 +2093,28 @@ const runInQuickJs = async (input: {
 			return promise.handle
 		})
 		agentSpawnHandle.consume((handle) => vm.setProp(vm.global, "__pi_agent_spawn", handle))
+
+		const snippetHandle = vm.newFunction("__pi_snippet", (rawEnvelopeHandle) => {
+			const rawEnvelope = vm.getString(rawEnvelopeHandle)
+			const promise = vm.newPromise()
+			try {
+				const value = handleSnippetRequest({
+					cwd: input.context.cwd,
+					rawEnvelope,
+				})
+				const responseHandle = vm.newString(JSON.stringify({ status: "ok", value }))
+				promise.resolve(responseHandle)
+				responseHandle.dispose()
+			} catch (error) {
+				const responseHandle = vm.newString(
+					JSON.stringify({ status: "error", error: error instanceof Error ? error.message : String(error) }),
+				)
+				promise.resolve(responseHandle)
+				responseHandle.dispose()
+			}
+			return promise.handle
+		})
+		snippetHandle.consume((handle) => vm.setProp(vm.global, "__pi_snippet", handle))
 
 		const printHandle = vm.newFunction("__print", (textHandle) => {
 			const text = vm.getString(textHandle)
@@ -2682,19 +3023,21 @@ const codeModeTool = (pi: ExtensionAPI, catalog: ToolCatalog) =>
 		description:
 			"Run a small TypeScript/JavaScript program in a QuickJS sandbox. The program can call currently active Pi builtins and registered extension tools through the code-mode API.",
 		promptSnippet:
-			"Run a small TypeScript/JavaScript program. API: pi.* for active built-in tools, extensions.* for active registered extension tools, tools.* for discovery/schema/help/dynamic calls, results.* helpers for PiToolResult, agents.spawn(...) for child Pi sessions.",
+			"Run a small TypeScript/JavaScript program. Prefer fs.readFile/fs.writeFile/fs.editFile and sh`...` for file/shell work. Static imports from pi-snippets:* can load ESM helpers from .pi/codemode-snippets. Raw pi.* exposes active built-in tools; extensions.* exposes registered extension tools; tools.describe/schema/help supports discovery; results.* helps with PiToolResult; snippets.list/describe inspect saved helpers; agents.spawn(...) creates child Pi sessions.",
 		promptGuidelines: [
 			"Use codemode for multi-step mechanical tool workflows; await every tool call.",
 			"Code Mode only exposes tools that are active in the current Pi session; noTools/tools/excludeTools restrictions apply inside codemode.",
-			"Inside codemode, use pi.<toolName>(args) only for active Pi built-in tools; use tools.names('pi') to see which ones are available.",
+			"Prefer the native facade for normal workflows: fs.readFile(path, 'utf8') returns string; fs.writeFile(path, content) and fs.editFile(path, edits) return PiToolResult; sh`command ${arg}` returns PiToolResult with shell-escaped interpolations.",
+			"Use raw pi.<toolName>(args) only for advanced access to exact active Pi built-in tool args/results; use tools.names('pi') to see which builtins are available.",
 			"Use extensions.<toolName>(args) for active registered extension tools, e.g. extensions.web_search({ query: '...' }).",
-			"Use tools.list(), tools.help('<ref>'), and tools.schema('<ref>') to discover active tools and their TypeBox argument schemas.",
+			"Use tools.list(), tools.describe('<ref>'), tools.help('<ref>'), and tools.schema('<ref>') to inspect active tools and their TypeBox argument schemas.",
 			"Use results.text(result), results.firstText(result), results.images(result), and results.preview(result) for convenient PiToolResult handling; pi.* remains tool-only.",
 			"Use tools.names('extensions') or tools.list({ provider: 'extensions', compact: true }) for compact discovery; use tools.invoke(ref, args) for dynamic calls.",
 			"Use agents.spawn({ prompt: '...', cwd?: '.', tools?: ['read', 'bash'] }) to create isolated Pi AgentSessions. tools: 'readonly' enables exactly Pi's read/grep/find/ls builtins—no web access or extension tools. For web research, pass an explicit tool array such as ['read', 'grep', 'find', 'ls', 'web_search', 'web_fetch']. Spawned sessions cannot use codemode, and plain Promise.all handles concurrency.",
 			"Tool refs are explicit strings like 'pi.read' and 'extensions.web_search'; there is no pi.tool, pi.call, pi.schema, or pi.help API.",
-			"All tool calls return PiToolResult: { content: [{ type: 'text', text } | { type: 'image', data, mimeType }], details? }. Do not assume stdout/stderr/exitCode/output fields for bash.",
-			"Prefer result.content for program logic. result.details is tool-specific UI/debug metadata and is typed opaque; narrow or cast before reading detail fields.",
+			"All successful tool calls return PiToolResult: { content: [{ type: 'text', text } | { type: 'image', data, mimeType }], details? }. Do not assume stdout/stderr/exitCode/output fields for bash; commands expected to fail during diagnosis should be wrapped in try/catch or use `|| true` so execution can continue.",
+			"Prefer result.content for program logic. result.details is tool-specific UI/debug metadata and is typed opaque; narrow/cast before reading detail fields.",
+			"Reusable helpers are ESM files under .pi/codemode-snippets written with fs.writeFile/fs.editFile and imported with static ESM specifiers like `import { helper } from 'pi-snippets:helper'`; only pi-snippets:* imports and relative imports inside that directory are allowed. Static imports resolve before execution, so snippets written in this run are importable in later Code Mode calls. Use snippets.list()/describe() only for metadata/discovery.",
 			"Return a compact final value from the code body when useful; intermediate nested tool calls are shown in the codemode UI audit.",
 		],
 		parameters: codeExecSchema,
@@ -2747,6 +3090,7 @@ const codeModeTool = (pi: ExtensionAPI, catalog: ToolCatalog) =>
 				const checked = typeCheckCode(
 					params.code,
 					guestDeclarations(context.cwd, catalog, activeToolNames, configuredToolNames),
+					context.cwd,
 				)
 				if (checked.errors.length > 0) {
 					const diagnostics = checked.errors
