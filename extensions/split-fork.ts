@@ -1,16 +1,15 @@
 // Adapted from https://github.com/mitsuhiko/agent-stuff/blob/main/pi-extensions/split-fork.ts
 // Original work licensed under the Apache License 2.0 (Apache-2.0).
 
-import { randomUUID } from "node:crypto"
-import { promises as fs, existsSync } from "node:fs"
+import { existsSync } from "node:fs"
 import * as path from "node:path"
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent"
+import { type ExtensionAPI, type ExtensionCommandContext, SessionManager } from "@earendil-works/pi-coding-agent"
 import type { AutocompleteItem } from "@earendil-works/pi-tui"
 
 const VALID_DIRECTIONS = ["right", "left", "down", "up"] as const
 const DEFAULT_DIRECTION = "right"
-type SplitDirection = (typeof VALID_DIRECTIONS)[number]
-type SplitLaunchResult = { ok: true; terminalName: string } | { ok: false; terminalName: string; reason: string }
+export type SplitDirection = (typeof VALID_DIRECTIONS)[number]
+export type SplitLaunchResult = { ok: true; terminalName: string } | { ok: false; terminalName: string; reason: string }
 
 const GHOSTTY_SPLIT_SCRIPT = `on run argv
 	set targetCwd to item 1 of argv
@@ -46,7 +45,7 @@ function shellQuote(value: string): string {
 	return `'${value.replace(/'/g, `'"'"'`)}'`
 }
 
-function isTeteyeSession(): boolean {
+export function isTeteyeSession(): boolean {
 	return Boolean(process.env.TETEYE_SOCKET?.trim() && process.env.TETEYE_PANE_ID?.trim())
 }
 
@@ -73,35 +72,42 @@ function getPaneIdFromTeteyeResponse(stdout: string | undefined): string | undef
 	return typeof response.result?.pane_id === "string" ? response.result.pane_id : undefined
 }
 
-function getPiInvocationParts(): string[] {
-	const override = process.env.PI_SPLIT_FORK_COMMAND?.trim()
-	if (override) {
-		return [override]
-	}
-
-	const currentScript = process.argv[1]
-	if (currentScript && existsSync(currentScript)) {
-		return [process.execPath, currentScript]
-	}
-
-	const execName = path.basename(process.execPath).toLowerCase()
+export function resolvePiInvocation(
+	execPath: string,
+	currentScript: string | undefined,
+	currentScriptExists: boolean,
+): string[] {
+	const execName = path.basename(execPath).toLowerCase()
 	const isGenericRuntime = /^(node|bun)(\.exe)?$/.test(execName)
-	if (!isGenericRuntime) {
-		return [process.execPath]
-	}
-
+	if (!isGenericRuntime) return [execPath]
+	if (currentScript && currentScriptExists) return [execPath, currentScript]
 	return ["pi"]
 }
 
-function buildPiStartupInput(sessionFile: string | undefined, prompt: string): string {
+function getPiInvocationParts(): string[] {
+	const override = process.env.PI_SPLIT_FORK_COMMAND?.trim()
+	if (override) return [override]
+
+	const currentScript = process.argv[1]
+	return resolvePiInvocation(process.execPath, currentScript, Boolean(currentScript && existsSync(currentScript)))
+}
+
+export function buildPiStartupInput(
+	sessionFile: string | undefined,
+	prompt: string,
+	extensionFiles: readonly string[] = [],
+): string {
 	const commandParts = [...getPiInvocationParts()]
 
+	for (const extensionFile of extensionFiles) {
+		commandParts.push("-e", extensionFile)
+	}
 	if (sessionFile) {
 		commandParts.push("--session", sessionFile)
 	}
 
 	if (prompt.length > 0) {
-		commandParts.push("--", prompt)
+		commandParts.push(prompt)
 	}
 
 	return `${commandParts.map(shellQuote).join(" ")}\n`
@@ -111,7 +117,7 @@ function isSplitDirection(value: string): value is SplitDirection {
 	return (VALID_DIRECTIONS as readonly string[]).includes(value)
 }
 
-function parseSplitForkArgs(raw: string): { direction: SplitDirection; prompt: string } {
+export function parseSplitForkArgs(raw: string): { direction: SplitDirection; prompt: string } {
 	const trimmed = raw.trim()
 	if (!trimmed) {
 		return { direction: DEFAULT_DIRECTION, prompt: "" }
@@ -213,36 +219,31 @@ async function launchTeteyeSplit(
 	return { ok: true, terminalName: "teteye" }
 }
 
-async function createForkedSession(ctx: ExtensionCommandContext): Promise<string | undefined> {
+export async function launchTerminalSplit(
+	pi: ExtensionAPI,
+	ctx: ExtensionCommandContext,
+	startupInput: string,
+	direction: SplitDirection,
+): Promise<SplitLaunchResult> {
+	return isTeteyeSession()
+		? launchTeteyeSplit(pi, ctx, startupInput, direction)
+		: launchGhosttySplit(pi, ctx, startupInput, direction)
+}
+
+export function createClonedSession(ctx: ExtensionCommandContext): string | undefined {
 	const sessionFile = ctx.sessionManager.getSessionFile()
-	if (!sessionFile) {
-		return undefined
-	}
+	const leafId = ctx.sessionManager.getLeafId()
+	if (!sessionFile || !leafId || !existsSync(sessionFile)) return undefined
 
-	const sessionDir = path.dirname(sessionFile)
-	const branchEntries = ctx.sessionManager.getBranch()
-	const currentHeader = ctx.sessionManager.getHeader()
+	// createBranchedSession mutates its SessionManager, so mirror pi's native /clone
+	// implementation and operate on a separately opened manager. The original pi
+	// process keeps its current manager while the cloned active path opens in the split.
+	const clone = SessionManager.open(sessionFile, ctx.sessionManager.getSessionDir())
+	const clonedSessionFile = clone.createBranchedSession(leafId)
 
-	const timestamp = new Date().toISOString()
-	const fileTimestamp = timestamp.replace(/[:.]/g, "-")
-	const newSessionId = randomUUID()
-	const newSessionFile = path.join(sessionDir, `${fileTimestamp}_${newSessionId}.jsonl`)
-
-	const newHeader = {
-		type: "session",
-		version: currentHeader?.version ?? 3,
-		id: newSessionId,
-		timestamp,
-		cwd: currentHeader?.cwd ?? ctx.cwd,
-		parentSession: sessionFile,
-	}
-
-	const lines = `${[JSON.stringify(newHeader), ...branchEntries.map((entry) => JSON.stringify(entry))].join("\n")}\n`
-
-	await fs.mkdir(sessionDir, { recursive: true })
-	await fs.writeFile(newSessionFile, lines, "utf8")
-
-	return newSessionFile
+	// Pi defers writing a branch containing no assistant response. A detached manager
+	// cannot flush it later, so treat that edge case as an empty split instead.
+	return clonedSessionFile && existsSync(clonedSessionFile) ? clonedSessionFile : undefined
 }
 
 function getArgumentCompletions(prefix: string): AutocompleteItem[] | null {
@@ -283,7 +284,7 @@ function getArgumentCompletions(prefix: string): AutocompleteItem[] | null {
 export default function (pi: ExtensionAPI): void {
 	pi.registerCommand("split-fork", {
 		description:
-			"Fork this session into a new pi process in a teteye or Ghostty split. Usage: /split-fork [-d right|left|down|up] [optional prompt]",
+			"Clone the active session branch into a new pi process in a teteye or Ghostty split. Usage: /split-fork [-d right|left|down|up] [optional prompt]",
 		getArgumentCompletions,
 		handler: async (args, ctx) => {
 			if (process.platform !== "darwin" && !isTeteyeSession()) {
@@ -301,32 +302,37 @@ export default function (pi: ExtensionAPI): void {
 			}
 
 			const wasBusy = !ctx.isIdle()
-			const forkedSessionFile = await createForkedSession(ctx)
-			const startupInput = buildPiStartupInput(forkedSessionFile, parsedArgs.prompt)
+			let clonedSessionFile: string | undefined
+			try {
+				clonedSessionFile = createClonedSession(ctx)
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error)
+				ctx.ui.notify(`Failed to clone the active session branch: ${message}`, "error")
+				return
+			}
+			const startupInput = buildPiStartupInput(clonedSessionFile, parsedArgs.prompt)
 
-			const result = isTeteyeSession()
-				? await launchTeteyeSplit(pi, ctx, startupInput, parsedArgs.direction)
-				: await launchGhosttySplit(pi, ctx, startupInput, parsedArgs.direction)
+			const result = await launchTerminalSplit(pi, ctx, startupInput, parsedArgs.direction)
 			if (!result.ok) {
 				ctx.ui.notify(`Failed to launch ${result.terminalName} split: ${result.reason}`, "error")
-				if (forkedSessionFile) {
-					ctx.ui.notify(`Forked session was created: ${forkedSessionFile}`, "info")
+				if (clonedSessionFile) {
+					ctx.ui.notify(`Cloned session was created: ${clonedSessionFile}`, "info")
 				}
 				return
 			}
 
-			if (forkedSessionFile) {
-				const fileName = path.basename(forkedSessionFile)
+			if (clonedSessionFile) {
+				const fileName = path.basename(clonedSessionFile)
 				const promptSuffix = parsedArgs.prompt ? " and sent prompt" : ""
 				ctx.ui.notify(
-					`Forked to ${fileName} in a new ${result.terminalName} ${parsedArgs.direction} split${promptSuffix}.`,
+					`Cloned the active branch to ${fileName} in a new ${result.terminalName} ${parsedArgs.direction} split${promptSuffix}.`,
 					"info",
 				)
 				if (wasBusy) {
-					ctx.ui.notify("Forked from current committed state (in-flight turn continues in original session).", "info")
+					ctx.ui.notify("Cloned from current committed state (in-flight turn continues in original session).", "info")
 				}
 			} else {
-				ctx.ui.notify(`Opened a new ${result.terminalName} split (no persisted session to fork).`, "warning")
+				ctx.ui.notify(`Opened a new ${result.terminalName} split (no persisted branch to clone).`, "warning")
 			}
 		},
 	})
