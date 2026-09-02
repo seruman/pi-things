@@ -77,7 +77,7 @@ describe("Pi child startup", () => {
 		])
 	})
 
-	test("loads the extension in the child and keeps handoff text out of argv", async () => {
+	test("keeps handoff text out of argv", async () => {
 		const handoff = "Sensitive-looking shell text: $(touch /tmp/should-not-run) `whoami`"
 		const manifestFile = await createHandoffManifestFile({
 			goal: "continue safely",
@@ -88,11 +88,9 @@ describe("Pi child startup", () => {
 		temporaryDirectories.push(directory)
 
 		expect((await stat(manifestFile)).mode & 0o777).toBe(0o600)
-		const startupInput = buildPiStartupInput(undefined, `/split-handoff --receive ${manifestFile}`, [
-			"/repo/extensions/split-handoff.ts",
-		])
-		expect(startupInput).toContain("'-e' '/repo/extensions/split-handoff.ts'")
+		const startupInput = buildPiStartupInput(undefined, `/split-handoff --receive ${manifestFile}`)
 		expect(startupInput).toContain(manifestFile)
+		expect(startupInput).not.toContain("'-e'")
 		expect(startupInput).not.toContain(handoff)
 		expect(startupInput).not.toContain("/$bunfs/root/pi")
 		expect(startupInput).not.toContain(" '--' ")

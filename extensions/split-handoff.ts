@@ -1,7 +1,6 @@
 import { mkdtemp, open, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import { fileURLToPath } from "node:url"
 import type { AssistantMessage, Context, Message, SimpleStreamOptions } from "@earendil-works/pi-ai"
 import {
 	BorderedLoader,
@@ -110,7 +109,6 @@ type HandoffManifest = z.infer<typeof handoffManifestSchema>
 
 const MAX_MANIFEST_BYTES = 1024 * 1024
 const RECEIVE_PREFIX = "--receive "
-const EXTENSION_FILE = fileURLToPath(import.meta.url)
 
 function directionCompletions(prefix: string): AutocompleteItem[] | null {
 	const trimmedStart = prefix.trimStart()
@@ -370,12 +368,7 @@ export default function (pi: ExtensionAPI): void {
 			const receivePrompt = `/split-handoff ${RECEIVE_PREFIX}${manifestFile}`
 			let result: SplitLaunchResult
 			try {
-				result = await launchTerminalSplit(
-					pi,
-					ctx,
-					buildPiStartupInput(undefined, receivePrompt, [EXTENSION_FILE]),
-					direction,
-				)
+				result = await launchTerminalSplit(pi, ctx, buildPiStartupInput(undefined, receivePrompt), direction)
 			} catch (error) {
 				await rm(path.dirname(manifestFile), { recursive: true, force: true })
 				ctx.ui.notify(`Failed to launch split: ${error instanceof Error ? error.message : String(error)}`, "error")
