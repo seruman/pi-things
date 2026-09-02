@@ -295,6 +295,12 @@ interface NestedRendererSlot {
 	state: Record<string, unknown>
 }
 
+interface CodeModeRenderState {
+	startedAt?: number
+	endedAt?: number
+	interval?: ReturnType<typeof setInterval>
+}
+
 interface ToolCatalogEntry {
 	readonly definition: CapturedToolDefinition
 	readonly registeredTool: RegisteredTool
@@ -2954,6 +2960,8 @@ const imagesFromRun = (
 	}
 }
 
+const formatDuration = (ms: number): string => `${(ms / 1000).toFixed(1)}s`
+
 const formatCodeCallMarkdown = (args: unknown, expanded: boolean): string => {
 	const code =
 		typeof (args as { code?: unknown } | undefined)?.code === "string"
@@ -3043,6 +3051,11 @@ const codeModeTool = (pi: ExtensionAPI, catalog: ToolCatalog) =>
 		parameters: codeExecSchema,
 		executionMode: "sequential",
 		renderCall(args, _theme, context) {
+			const state = context.state as CodeModeRenderState
+			if (context.executionStarted && state.startedAt === undefined) {
+				state.startedAt = Date.now()
+				state.endedAt = undefined
+			}
 			const component = (context.lastComponent as Container | undefined) ?? new Container()
 			component.clear()
 			component.addChild(new Markdown(formatCodeCallMarkdown(args, context.expanded), 0, 0, getMarkdownTheme()))
@@ -3193,13 +3206,32 @@ const codeModeTool = (pi: ExtensionAPI, catalog: ToolCatalog) =>
 			})
 			return { content: [{ type: "text", text: summary }, ...images], details, ...(success ? {} : { isError: true }) }
 		},
-		renderResult(result, options, _theme, context) {
+		renderResult(result, options, theme, context) {
+			const state = context.state as CodeModeRenderState
+			if (state.startedAt !== undefined && options.isPartial && !state.interval) {
+				state.interval = setInterval(() => context.invalidate(), 1000)
+			}
+			if (!options.isPartial || context.isError) {
+				state.endedAt ??= Date.now()
+				if (state.interval) {
+					clearInterval(state.interval)
+					state.interval = undefined
+				}
+			}
+
 			const details = result.details as CodeExecResultDetails | undefined
 			const component = (context.lastComponent as Container | undefined) ?? new Container()
 			component.clear()
 			const markdown =
 				details?.kind === RESULT_KIND ? formatUiResultMarkdown(details, options.expanded) : textContent(result.content)
 			component.addChild(new Markdown(markdown, 0, 0, getMarkdownTheme()))
+			if (state.startedAt !== undefined) {
+				const label = options.isPartial ? "Elapsed" : "Took"
+				const endTime = state.endedAt ?? Date.now()
+				component.addChild(
+					new Text(`\n${theme.fg("muted", `${label} ${formatDuration(endTime - state.startedAt)}`)}`, 0, 0),
+				)
+			}
 			return component
 		},
 	})
