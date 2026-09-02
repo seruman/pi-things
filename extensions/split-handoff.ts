@@ -1,4 +1,4 @@
-import { mkdtemp, open, rename, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, open, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
@@ -191,19 +191,6 @@ export function buildHandoffRequest(conversationText: string, goal: string, snap
 	].join("\n")
 }
 
-function assertManifestPath(manifestFile: string): string {
-	const resolvedFile = path.resolve(manifestFile)
-	const directory = path.dirname(resolvedFile)
-	if (
-		path.basename(resolvedFile) !== "manifest.json" ||
-		path.dirname(directory) !== path.resolve(tmpdir()) ||
-		!path.basename(directory).startsWith("pi-split-handoff-")
-	) {
-		throw new Error("Invalid split-handoff manifest path")
-	}
-	return resolvedFile
-}
-
 function parseHandoffManifest(raw: string): HandoffManifest {
 	let decoded: unknown
 	try {
@@ -229,23 +216,14 @@ export async function createHandoffManifestFile(manifest: Omit<HandoffManifest, 
 }
 
 export async function consumeHandoffManifestFile(manifestFile: string): Promise<HandoffManifest> {
-	const resolvedFile = assertManifestPath(manifestFile)
-	const directory = path.dirname(resolvedFile)
-	const claimedFile = path.join(directory, "manifest.claimed")
-	await rename(resolvedFile, claimedFile)
-
+	const file = await open(path.resolve(manifestFile), "r")
 	try {
-		const file = await open(claimedFile, "r")
-		try {
-			const fileStat = await file.stat()
-			if (!fileStat.isFile()) throw new Error("Invalid split-handoff manifest")
-			if (fileStat.size > MAX_MANIFEST_BYTES) throw new Error("Split-handoff manifest is too large")
-			return parseHandoffManifest(await file.readFile("utf8"))
-		} finally {
-			await file.close()
-		}
+		const fileStat = await file.stat()
+		if (!fileStat.isFile()) throw new Error("Invalid split-handoff manifest")
+		if (fileStat.size > MAX_MANIFEST_BYTES) throw new Error("Split-handoff manifest is too large")
+		return parseHandoffManifest(await file.readFile("utf8"))
 	} finally {
-		await rm(directory, { recursive: true, force: true })
+		await file.close()
 	}
 }
 
