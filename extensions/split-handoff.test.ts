@@ -99,20 +99,40 @@ describe("Pi child startup", () => {
 
 		const manifest = await consumeHandoffManifestFile(manifestFile)
 		expect(manifest.handoff).toBe(handoff)
-		await expect(stat(directory)).rejects.toThrow()
+		expect((await stat(manifestFile)).isFile()).toBe(true)
 	})
 
-	test("rejects an invalid manifest and removes it", async () => {
-		const { directory, manifestFile } = await createRawManifest("null")
+	test("accepts a manifest beneath a wrapped temp directory", async () => {
+		const wrapper = await mkdtemp(path.join(tmpdir(), "nix-shell."))
+		temporaryDirectories.push(wrapper)
+		const directory = await mkdtemp(path.join(wrapper, "pi-split-handoff-"))
+		const manifestFile = path.join(directory, "manifest.json")
+		await writeFile(
+			manifestFile,
+			JSON.stringify({ version: 1, goal: "continue", handoff: "handoff", parentSession: "/tmp/source.jsonl" }),
+			{ mode: 0o600 },
+		)
+
+		expect(await consumeHandoffManifestFile(manifestFile)).toEqual({
+			version: 1,
+			goal: "continue",
+			handoff: "handoff",
+			parentSession: "/tmp/source.jsonl",
+		})
+		expect((await stat(manifestFile)).isFile()).toBe(true)
+	})
+
+	test("rejects an invalid manifest and leaves it for cleanup", async () => {
+		const { manifestFile } = await createRawManifest("null")
 
 		await expect(consumeHandoffManifestFile(manifestFile)).rejects.toThrow("Invalid split-handoff manifest")
-		await expect(stat(directory)).rejects.toThrow()
+		expect((await stat(manifestFile)).isFile()).toBe(true)
 	})
 
-	test("rejects an oversized manifest and removes it", async () => {
-		const { directory, manifestFile } = await createRawManifest("x".repeat(1024 * 1024 + 1))
+	test("rejects an oversized manifest and leaves it for cleanup", async () => {
+		const { manifestFile } = await createRawManifest("x".repeat(1024 * 1024 + 1))
 
 		await expect(consumeHandoffManifestFile(manifestFile)).rejects.toThrow("Split-handoff manifest is too large")
-		await expect(stat(directory)).rejects.toThrow()
+		expect((await stat(manifestFile)).isFile()).toBe(true)
 	})
 })
