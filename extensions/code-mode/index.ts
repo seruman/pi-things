@@ -48,6 +48,7 @@ import * as ts from "typescript"
 
 const TRACE_ENTRY_TYPE = "code-mode-trace"
 const OPERATION_ENTRY_TYPE = "code-mode-operation"
+const LIVE_OPERATION_ENTRY_TYPE = "code-mode-operation-live"
 const FINAL_ENTRY_TYPE = "code-mode-final-result"
 const TRACE_KIND = "pi-code-mode.trace"
 const TRACE_VERSION = 1
@@ -244,6 +245,14 @@ interface CodeModeOperationEntryV1 {
 	readonly operation: CodeExecRenderOperation
 }
 
+interface CodeModeLiveOperationEntryV1 {
+	readonly kind: "pi-code-mode.operation-live"
+	readonly version: typeof TRACE_VERSION
+	readonly executionId: string
+	readonly parentToolCallId: string
+	readonly sequence: number
+}
+
 interface CodeModeFinalEntryV1 {
 	readonly kind: "pi-code-mode.final-result"
 	readonly version: typeof TRACE_VERSION
@@ -299,7 +308,20 @@ interface CodeModeRenderState {
 	startedAt?: number
 	endedAt?: number
 	interval?: ReturnType<typeof setInterval>
+	invalidate?: () => void
+	showImages?: boolean
 }
+
+interface LiveOperationRenderState {
+	operation: CodeExecRenderOperation
+	readonly parentToolCallId: string
+	readonly cwd: string
+	readonly slot: NestedRendererSlot
+	invalidate: () => void
+	showImages: boolean
+}
+
+type LiveOperationRegistry = Map<string, LiveOperationRenderState>
 
 interface ToolCatalogEntry {
 	readonly definition: CapturedToolDefinition
@@ -1782,6 +1804,9 @@ const runInQuickJs = async (input: {
 	activeToolNames: readonly string[] | undefined
 	configuredToolNames: readonly string[] | undefined
 	appendOperation?: (operation: CodeExecRenderOperation) => void | Promise<void>
+	onOperationStart?: (operation: CodeExecRenderOperation) => void
+	onOperationUpdate?: (operation: CodeExecRenderOperation) => void
+	onOperationFinish?: (operation: CodeExecRenderOperation) => void
 	onPartial?: (snapshot: {
 		prints: readonly string[]
 		operations: readonly CodeExecRenderOperation[]
@@ -1828,6 +1853,23 @@ const runInQuickJs = async (input: {
 	const operationCount = (): number => droppedOperationCount + operations.length
 	const renderOperationSnapshots = (): CodeExecRenderOperation[] =>
 		[...renderOperations.values()].sort((left, right) => left.sequence - right.sequence)
+	const notifyOperation = (
+		callback: ((operation: CodeExecRenderOperation) => void) | undefined,
+		operation: CodeExecRenderOperation,
+	): void => {
+		try {
+			callback?.(operation)
+		} catch {
+			// Rendering and transcript persistence must not change the nested tool result.
+		}
+	}
+	const appendRenderedOperation = async (operation: CodeExecRenderOperation): Promise<void> => {
+		try {
+			await input.appendOperation?.(operation)
+		} catch {
+			// Rendering and transcript persistence must not change the nested tool result.
+		}
+	}
 	const emitPartial = (): void =>
 		input.onPartial?.({
 			prints: boundPrints(prints),
@@ -1836,10 +1878,13 @@ const runInQuickJs = async (input: {
 			droppedOperationCount,
 		})
 	const setRenderOperation = (operation: CodeExecRenderOperation): void => {
-		renderOperations.set(
-			operation.sequence,
-			assertTypeBox<CodeExecRenderOperation>(renderOperationSchema, operation, "Invalid code-mode render operation"),
+		const checked = assertTypeBox<CodeExecRenderOperation>(
+			renderOperationSchema,
+			operation,
+			"Invalid code-mode render operation",
 		)
+		renderOperations.set(operation.sequence, checked)
+		notifyOperation(input.onOperationUpdate, checked)
 		while (renderOperations.size > MAX_TRACE_COUNT) {
 			const firstKey = [...renderOperations.keys()].sort((left, right) => left - right)[0]
 			if (firstKey === undefined) break
@@ -1901,14 +1946,16 @@ const runInQuickJs = async (input: {
 					)
 					if (!entry) throw new CodeModeBoundaryError("guard", `code-mode does not expose ${call.ref}`)
 					toolCallId = `${input.toolCallId}:code:${opSequence}:${call.ref}`
-					setRenderOperation({
+					const runningOperation: CodeExecRenderOperation = {
 						sequence: opSequence,
 						toolCallId,
 						ref: call.ref,
 						outcome: "running",
 						startedAt: opStartedAt,
 						args: sanitizeForUi(sanitizeTraceValue(call.args, { remaining: MAX_TRACE_INPUT_CHARS })),
-					})
+					}
+					setRenderOperation(runningOperation)
+					notifyOperation(input.onOperationStart, runningOperation)
 					const response = validateHostResponse(
 						await invokePiTool({
 							call,
@@ -1955,7 +2002,8 @@ const runInQuickJs = async (input: {
 					const storedOperation = pushOperation(operation)
 					const renderOperation = renderOperationFromTrace(storedOperation)
 					setRenderOperation(renderOperation)
-					await input.appendOperation?.(renderOperation)
+					notifyOperation(input.onOperationFinish, renderOperation)
+					await appendRenderedOperation(renderOperation)
 					const responseHandle = vm.newString(JSON.stringify(response))
 					promise.resolve(responseHandle)
 					responseHandle.dispose()
@@ -1979,7 +2027,8 @@ const runInQuickJs = async (input: {
 					const storedOperation = pushOperation(operation)
 					const renderOperation = renderOperationFromTrace(storedOperation)
 					setRenderOperation(renderOperation)
-					await input.appendOperation?.(renderOperation)
+					notifyOperation(input.onOperationFinish, renderOperation)
+					await appendRenderedOperation(renderOperation)
 					const responseHandle = vm.newString(JSON.stringify(failure))
 					promise.resolve(responseHandle)
 					responseHandle.dispose()
@@ -2011,14 +2060,16 @@ const runInQuickJs = async (input: {
 			const task = (async () => {
 				try {
 					request = decodeAgentSpawnRequest(rawEnvelope)
-					setRenderOperation({
+					const runningOperation: CodeExecRenderOperation = {
 						sequence: opSequence,
 						toolCallId,
 						ref: "agents.spawn",
 						outcome: "running",
 						startedAt: opStartedAt,
 						args: sanitizeForUi(sanitizeTraceValue(request, { remaining: MAX_TRACE_INPUT_CHARS })),
-					})
+					}
+					setRenderOperation(runningOperation)
+					notifyOperation(input.onOperationStart, runningOperation)
 					const value = toolResultValue(
 						await spawnPiAgent({
 							request,
@@ -2061,7 +2112,8 @@ const runInQuickJs = async (input: {
 					const storedOperation = pushOperation(operation)
 					const renderOperation = renderOperationFromTrace(storedOperation)
 					setRenderOperation(renderOperation)
-					await input.appendOperation?.(renderOperation)
+					notifyOperation(input.onOperationFinish, renderOperation)
+					await appendRenderedOperation(renderOperation)
 					const responseHandle = vm.newString(JSON.stringify(response))
 					promise.resolve(responseHandle)
 					responseHandle.dispose()
@@ -2086,7 +2138,8 @@ const runInQuickJs = async (input: {
 					const storedOperation = pushOperation(operation)
 					const renderOperation = renderOperationFromTrace(storedOperation)
 					setRenderOperation(renderOperation)
-					await input.appendOperation?.(renderOperation)
+					notifyOperation(input.onOperationFinish, renderOperation)
+					await appendRenderedOperation(renderOperation)
 					const responseHandle = vm.newString(JSON.stringify(failure))
 					promise.resolve(responseHandle)
 					responseHandle.dispose()
@@ -2733,8 +2786,22 @@ const renderPiToolOperation = (input: {
 	const renderShell = definition.renderShell ?? native?.renderShell ?? "default"
 	const bgFn = operationBg(operation, theme)
 	const args = operation.args as Record<string, unknown> | undefined
-	const result = operation.result
+	const result =
+		operation.result ??
+		(operation.outcome === "error" && operation.error
+			? { content: [{ type: "text" as const, text: operation.error }] }
+			: undefined)
 	const isPartial = operation.outcome === "running"
+	if (definition.name === "bash") {
+		const startedAt = Date.parse(operation.startedAt)
+		if (Number.isFinite(startedAt) && input.slot.state.startedAt === undefined) {
+			input.slot.state.startedAt = startedAt
+		}
+		const endedAt = operation.endedAt ? Date.parse(operation.endedAt) : Number.NaN
+		if (!isPartial && Number.isFinite(endedAt) && input.slot.state.endedAt === undefined) {
+			input.slot.state.endedAt = endedAt
+		}
+	}
 	const renderContext = (lastComponent: Component | undefined) => ({
 		args: args ?? {},
 		toolCallId: operation.toolCallId,
@@ -2816,6 +2883,80 @@ const renderPiToolOperation = (input: {
 	return outer
 }
 
+const liveOperationKey = (executionId: string, sequence: number): string => `${executionId}:${sequence}`
+
+const clearLiveOperation = (operations: LiveOperationRegistry, key: string): void => {
+	const live = operations.get(key)
+	if (!live) return
+	const interval = live.slot.state.interval as ReturnType<typeof setInterval> | undefined
+	if (interval) clearInterval(interval)
+	live.slot.state.interval = undefined
+	operations.delete(key)
+}
+
+const settleLiveOperation = (
+	operations: LiveOperationRegistry,
+	key: string,
+	operation: CodeExecRenderOperation,
+): void => {
+	const live = operations.get(key)
+	if (!live) return
+	live.operation = operation
+	const interval = live.slot.state.interval as ReturnType<typeof setInterval> | undefined
+	if (interval) clearInterval(interval)
+	live.slot.state.interval = undefined
+}
+
+const clearLiveOperations = (
+	operations: LiveOperationRegistry,
+	options: { parentToolCallId?: string; runningOnly?: boolean } = {},
+): void => {
+	for (const [key, live] of [...operations]) {
+		if (options.parentToolCallId !== undefined && live.parentToolCallId !== options.parentToolCallId) continue
+		if (options.runningOnly && live.operation.outcome !== "running") continue
+		clearLiveOperation(operations, key)
+	}
+}
+
+const renderLiveOperationEntry = (
+	entry: CustomEntry<CodeModeLiveOperationEntryV1>,
+	operations: LiveOperationRegistry,
+	catalog: ToolCatalog,
+	expanded: boolean,
+	theme: Theme,
+): Component | undefined => {
+	const data = entry.data
+	if (!data || data.kind !== "pi-code-mode.operation-live") return undefined
+	const key = liveOperationKey(data.executionId, data.sequence)
+	if (!operations.has(key)) return undefined
+	return {
+		invalidate() {
+			const live = operations.get(key)
+			live?.slot.call?.invalidate()
+			live?.slot.result?.invalidate()
+		},
+		render(width) {
+			const live = operations.get(key)
+			if (!live) return []
+			const operation = live.operation
+			if (operation.ref === "agents.spawn") {
+				return renderAgentSpawnOperation(operation, theme, expanded).render(width)
+			}
+			const definition = toolDefinitionForRef(live.cwd, catalog, operation.ref)?.definition
+			if (!definition) return []
+			return renderPiToolOperation({
+				operation,
+				definition,
+				theme,
+				expanded,
+				cwd: live.cwd,
+				outerContext: { invalidate: live.invalidate, showImages: live.showImages },
+				slot: live.slot,
+			}).render(width)
+		},
+	}
+}
+
 const renderAgentSpawnOperation = (operation: CodeExecRenderOperation, theme: Theme, expanded: boolean): Component => {
 	const box = new Box(1, 1, operationBg(operation, theme))
 	box.addChild(new Text(theme.fg("dim", operationTitle(operation)), 0, 0))
@@ -2852,11 +2993,13 @@ const renderAgentSpawnOperation = (operation: CodeExecRenderOperation, theme: Th
 const renderOperationEntry = (
 	entry: CustomEntry<CodeModeOperationEntryV1>,
 	catalog: ToolCatalog,
+	liveOperations: LiveOperationRegistry,
 	expanded: boolean,
 	theme: Theme,
 ): Component | undefined => {
 	const data = entry.data
 	if (!data || data.kind !== "pi-code-mode.operation") return undefined
+	if (liveOperations.has(liveOperationKey(data.executionId, data.operation.sequence))) return undefined
 	if (data.operation.ref === "agents.spawn") {
 		return renderAgentSpawnOperation(data.operation, theme, expanded)
 	}
@@ -2870,6 +3013,7 @@ const renderOperationEntry = (
 		if (callArgs !== undefined) text += `\n\n${JSON.stringify(sanitizeForUi(callArgs), null, 2)}`
 		const output = data.operation.result ? textOutputForResult(data.operation.result, true) : ""
 		if (output) text += `\n${output}`
+		else if (data.operation.outcome === "error" && data.operation.error) text += `\n${data.operation.error}`
 		box.addChild(new Text(text, 0, 0))
 		return box
 	}
@@ -2960,7 +3104,24 @@ const imagesFromRun = (
 	}
 }
 
+type CodeModeTimerRegistry = Map<string, CodeModeRenderState>
+
 const formatDuration = (ms: number): string => `${(ms / 1000).toFixed(1)}s`
+
+const clearCodeModeTimer = (timers: CodeModeTimerRegistry, toolCallId: string): void => {
+	const state = timers.get(toolCallId)
+	if (!state) return
+	state.endedAt ??= Date.now()
+	if (state.interval) {
+		clearInterval(state.interval)
+		state.interval = undefined
+	}
+	timers.delete(toolCallId)
+}
+
+const clearCodeModeTimers = (timers: CodeModeTimerRegistry): void => {
+	for (const toolCallId of [...timers.keys()]) clearCodeModeTimer(timers, toolCallId)
+}
 
 const formatCodeCallMarkdown = (args: unknown, expanded: boolean): string => {
 	const code =
@@ -3024,9 +3185,14 @@ const summarizeTrace = (trace: CodeModeTraceV1): string => {
 	return lines.join("\n")
 }
 
-const codeModeTool = (pi: ExtensionAPI, catalog: ToolCatalog) =>
+const codeModeTool = (
+	pi: ExtensionAPI,
+	catalog: ToolCatalog,
+	timers: CodeModeTimerRegistry,
+	liveOperations: LiveOperationRegistry,
+) =>
 	defineTool({
-		name: "codemode",
+		name: CODEMODE_TOOL_NAME,
 		label: "Codemode",
 		description:
 			"Run a small TypeScript/JavaScript program in a QuickJS sandbox. The program can call currently active Pi builtins and registered extension tools through the code-mode API.",
@@ -3050,15 +3216,28 @@ const codeModeTool = (pi: ExtensionAPI, catalog: ToolCatalog) =>
 		],
 		parameters: codeExecSchema,
 		executionMode: "sequential",
-		renderCall(args, _theme, context) {
+		renderCall(args, theme, context) {
 			const state = context.state as CodeModeRenderState
+			state.invalidate = context.invalidate
+			state.showImages = context.showImages
 			if (context.executionStarted && state.startedAt === undefined) {
 				state.startedAt = Date.now()
 				state.endedAt = undefined
+				timers.set(context.toolCallId, state)
 			}
+			if (state.startedAt !== undefined && context.isPartial && !state.interval) {
+				state.interval = setInterval(() => context.invalidate(), 1000)
+			}
+			if (!context.isPartial || context.isError) clearCodeModeTimer(timers, context.toolCallId)
+
 			const component = (context.lastComponent as Container | undefined) ?? new Container()
 			component.clear()
 			component.addChild(new Markdown(formatCodeCallMarkdown(args, context.expanded), 0, 0, getMarkdownTheme()))
+			if (state.startedAt !== undefined && context.isPartial) {
+				component.addChild(
+					new Text(`\n${theme.fg("muted", `Elapsed ${formatDuration(Date.now() - state.startedAt)}`)}`, 0, 0),
+				)
+			}
 			return component
 		},
 		async execute(toolCallId, params: CodeExecInput, _signal, onUpdate, context) {
@@ -3123,15 +3302,49 @@ const codeModeTool = (pi: ExtensionAPI, catalog: ToolCatalog) =>
 					catalog,
 					activeToolNames,
 					configuredToolNames,
-					appendOperation: async (operation) =>
+					appendOperation: async (operation) => {
+						const renderedOperation = await convertOperationImagesForKitty(operation)
+						const live = liveOperations.get(liveOperationKey(executionId, operation.sequence))
+						if (live) live.operation = renderedOperation
 						pi.appendEntry<CodeModeOperationEntryV1>(OPERATION_ENTRY_TYPE, {
 							kind: "pi-code-mode.operation",
 							version: TRACE_VERSION,
 							executionId,
 							parentToolCallId: toolCallId,
 							cwd: context.cwd,
-							operation: await convertOperationImagesForKitty(operation),
-						}),
+							operation: renderedOperation,
+						})
+					},
+					onOperationStart: (operation) => {
+						const key = liveOperationKey(executionId, operation.sequence)
+						const parentRenderState = timers.get(toolCallId)
+						liveOperations.set(key, {
+							operation,
+							parentToolCallId: toolCallId,
+							cwd: context.cwd,
+							slot: { state: {} },
+							invalidate: parentRenderState?.invalidate ?? (() => {}),
+							showImages: parentRenderState?.showImages ?? true,
+						})
+						try {
+							pi.appendEntry<CodeModeLiveOperationEntryV1>(LIVE_OPERATION_ENTRY_TYPE, {
+								kind: "pi-code-mode.operation-live",
+								version: TRACE_VERSION,
+								executionId,
+								parentToolCallId: toolCallId,
+								sequence: operation.sequence,
+							})
+						} catch (error) {
+							clearLiveOperation(liveOperations, key)
+							throw error
+						}
+					},
+					onOperationUpdate: (operation) => {
+						const live = liveOperations.get(liveOperationKey(executionId, operation.sequence))
+						if (live) live.operation = operation
+					},
+					onOperationFinish: (operation) =>
+						settleLiveOperation(liveOperations, liveOperationKey(executionId, operation.sequence), operation),
 					onPartial: emitPartial,
 				})
 				result = run.result
@@ -3208,28 +3421,25 @@ const codeModeTool = (pi: ExtensionAPI, catalog: ToolCatalog) =>
 		},
 		renderResult(result, options, theme, context) {
 			const state = context.state as CodeModeRenderState
-			if (state.startedAt !== undefined && options.isPartial && !state.interval) {
-				state.interval = setInterval(() => context.invalidate(), 1000)
-			}
-			if (!options.isPartial || context.isError) {
-				state.endedAt ??= Date.now()
-				if (state.interval) {
-					clearInterval(state.interval)
-					state.interval = undefined
+			const details = result.details as CodeExecResultDetails | undefined
+			if (details?.kind === RESULT_KIND) {
+				for (const operation of details.operations ?? []) {
+					const live = liveOperations.get(liveOperationKey(details.executionId, operation.sequence))
+					if (!live) continue
+					live.operation = operation
+					live.invalidate = context.invalidate
+					live.showImages = context.showImages
 				}
 			}
-
-			const details = result.details as CodeExecResultDetails | undefined
 			const component = (context.lastComponent as Container | undefined) ?? new Container()
 			component.clear()
 			const markdown =
 				details?.kind === RESULT_KIND ? formatUiResultMarkdown(details, options.expanded) : textContent(result.content)
 			component.addChild(new Markdown(markdown, 0, 0, getMarkdownTheme()))
-			if (state.startedAt !== undefined) {
-				const label = options.isPartial ? "Elapsed" : "Took"
+			if (state.startedAt !== undefined && !options.isPartial) {
 				const endTime = state.endedAt ?? Date.now()
 				component.addChild(
-					new Text(`\n${theme.fg("muted", `${label} ${formatDuration(endTime - state.startedAt)}`)}`, 0, 0),
+					new Text(`\n${theme.fg("muted", `Took ${formatDuration(endTime - state.startedAt)}`)}`, 0, 0),
 				)
 			}
 			return component
@@ -3238,11 +3448,30 @@ const codeModeTool = (pi: ExtensionAPI, catalog: ToolCatalog) =>
 
 export default async function codeMode(pi: ExtensionAPI): Promise<void> {
 	const catalog = new InMemoryToolCatalog()
-	const tool = codeModeTool(pi, catalog)
+	const timers: CodeModeTimerRegistry = new Map()
+	const liveOperations: LiveOperationRegistry = new Map()
+	const tool = codeModeTool(pi, catalog, timers, liveOperations)
 	const disposeCapture = await installToolCapture(tool, catalog)
-	pi.on("session_shutdown", () => disposeCapture())
+	pi.on("tool_execution_end", (event) => {
+		if (event.toolName !== CODEMODE_TOOL_NAME) return
+		clearCodeModeTimer(timers, event.toolCallId)
+		clearLiveOperations(liveOperations, { parentToolCallId: event.toolCallId, runningOnly: true })
+	})
+	pi.on("agent_end", () => {
+		clearCodeModeTimers(timers)
+		clearLiveOperations(liveOperations, { runningOnly: true })
+	})
+	pi.on("session_before_switch", () => clearLiveOperations(liveOperations))
+	pi.on("session_shutdown", () => {
+		clearCodeModeTimers(timers)
+		clearLiveOperations(liveOperations)
+		disposeCapture()
+	})
+	pi.registerEntryRenderer<CodeModeLiveOperationEntryV1>(LIVE_OPERATION_ENTRY_TYPE, (entry, options, theme) =>
+		renderLiveOperationEntry(entry, liveOperations, catalog, options.expanded, theme),
+	)
 	pi.registerEntryRenderer<CodeModeOperationEntryV1>(OPERATION_ENTRY_TYPE, (entry, options, theme) =>
-		renderOperationEntry(entry, catalog, options.expanded, theme),
+		renderOperationEntry(entry, catalog, liveOperations, options.expanded, theme),
 	)
 	pi.registerEntryRenderer<CodeModeFinalEntryV1>(FINAL_ENTRY_TYPE, (entry, options, theme) =>
 		renderFinalEntry(entry, options.expanded, theme),
