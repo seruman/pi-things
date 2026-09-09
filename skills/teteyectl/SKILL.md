@@ -131,12 +131,16 @@ inferring the new object from focus or ordering.
 teteyectl send-text "text without Enter" --pane <pane-id> --json
 teteyectl send-keys enter --pane <pane-id> --json
 teteyectl send-keys ctrl+c --pane <pane-id> --json
+teteyectl send-keys 'shift+;' --pane <pane-id> --json # sends a colon
 teteyectl dump --scope viewport --format text --pane <pane-id> --json
 ```
 
 Common key tokens include `enter`, `tab`, `escape`, `up`, `down`, `left`,
-`right`, `home`, `end`, `pageup`, `pagedown`, `f1` through `f12`, and
-`ctrl+<key>`.
+`right`, `home`, `end`, `pageup`, `pagedown`, `f1` through `f12`,
+`ctrl+<key>`, and shifted printable keys such as `shift+a`, `shift+1`,
+`shift+;`, or `shift+semicolon`. Quote punctuation-bearing tokens so the shell
+does not interpret them. Unsupported modifier combinations fail rather than
+being typed literally.
 
 Prefer a viewport text dump. Request scrollback or ANSI/HTML only when needed,
 and keep extracted output bounded. After sending a command, verify the pane with
