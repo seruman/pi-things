@@ -33,7 +33,7 @@ test("Pi SDK dependencies exactly match the installed Pi release used for Bash p
 	const sdkManifest = readJson(
 		path.join(repository, "node_modules", "@earendil-works", "pi-coding-agent", "package.json"),
 	) as { version: string }
-	assert.equal(sdkManifest.version, "0.80.5")
+	assert.equal(sdkManifest.version, "0.85.1")
 	for (const dependency of [
 		"@earendil-works/pi-agent-core",
 		"@earendil-works/pi-ai",
