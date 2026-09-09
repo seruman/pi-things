@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { mkdtemp, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import { buildPiStartupInput, parseSplitForkArgs, resolvePiInvocation } from "./split-fork.ts"
+import { buildPiStartupInput, parseSplitForkArgs, resolveAppName, resolvePiInvocation } from "./split-fork.ts"
 import {
 	buildHandoffRequest,
 	buildReceivingDraft,
@@ -75,6 +75,26 @@ describe("Pi child startup", () => {
 		expect(resolvePiInvocation("/nix/store/example/bin/pi", "/$bunfs/root/pi", true)).toEqual([
 			"/nix/store/example/bin/pi",
 		])
+	})
+
+	test("spawns a rebranded Pi by name so the new pane goes through its wrapper", () => {
+		expect(resolvePiInvocation("/nix/store/example/lib/pi/pi", "/$bunfs/root/pi", true, "piw")).toEqual(["piw"])
+	})
+
+	test("reads the app name from the package directory, defaulting to pi", async () => {
+		const directory = await mkdtemp(path.join(tmpdir(), "pi-app-name-"))
+		temporaryDirectories.push(directory)
+
+		expect(resolveAppName(directory)).toBe("pi")
+
+		await writeFile(path.join(directory, "package.json"), JSON.stringify({ piConfig: { configDir: ".pi" } }))
+		expect(resolveAppName(directory)).toBe("pi")
+
+		await writeFile(path.join(directory, "package.json"), JSON.stringify({ piConfig: { name: "piw" } }))
+		expect(resolveAppName(directory)).toBe("piw")
+
+		await writeFile(path.join(directory, "package.json"), "not json")
+		expect(resolveAppName(directory)).toBe("pi")
 	})
 
 	test("keeps handoff text out of argv", async () => {

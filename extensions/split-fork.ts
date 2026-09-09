@@ -1,9 +1,14 @@
 // Adapted from https://github.com/mitsuhiko/agent-stuff/blob/main/pi-extensions/split-fork.ts
 // Original work licensed under the Apache License 2.0 (Apache-2.0).
 
-import { existsSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import * as path from "node:path"
-import { type ExtensionAPI, type ExtensionCommandContext, SessionManager } from "@earendil-works/pi-coding-agent"
+import {
+	type ExtensionAPI,
+	type ExtensionCommandContext,
+	SessionManager,
+	getPackageDir,
+} from "@earendil-works/pi-coding-agent"
 import type { AutocompleteItem } from "@earendil-works/pi-tui"
 
 const VALID_DIRECTIONS = ["right", "left", "down", "up"] as const
@@ -72,24 +77,42 @@ function getPaneIdFromTeteyeResponse(stdout: string | undefined): string | undef
 	return typeof response.result?.pane_id === "string" ? response.result.pane_id : undefined
 }
 
+/** Pi takes its command name from `piConfig.name` in its package.json, but does not export it. */
+export function resolveAppName(packageDir: string): string {
+	try {
+		const pkg = JSON.parse(readFileSync(path.join(packageDir, "package.json"), "utf8")) as {
+			piConfig?: { name?: unknown }
+		}
+		const name = pkg.piConfig?.name
+		return typeof name === "string" && name.length > 0 ? name : "pi"
+	} catch {
+		return "pi"
+	}
+}
+
 export function resolvePiInvocation(
 	execPath: string,
 	currentScript: string | undefined,
 	currentScriptExists: boolean,
+	appName = "pi",
 ): string[] {
+	if (appName !== "pi") return [appName]
 	const execName = path.basename(execPath).toLowerCase()
 	const isGenericRuntime = /^(node|bun)(\.exe)?$/.test(execName)
 	if (!isGenericRuntime) return [execPath]
 	if (currentScript && currentScriptExists) return [execPath, currentScript]
-	return ["pi"]
+	return [appName]
 }
 
 function getPiInvocationParts(): string[] {
-	const override = process.env.PI_SPLIT_FORK_COMMAND?.trim()
-	if (override) return [override]
-
 	const currentScript = process.argv[1]
-	return resolvePiInvocation(process.execPath, currentScript, Boolean(currentScript && existsSync(currentScript)))
+	const appName = resolveAppName(getPackageDir())
+	return resolvePiInvocation(
+		process.execPath,
+		currentScript,
+		Boolean(currentScript && existsSync(currentScript)),
+		appName,
+	)
 }
 
 export function buildPiStartupInput(
