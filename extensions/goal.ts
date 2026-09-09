@@ -780,9 +780,9 @@ export default function goalExtension(pi: ExtensionAPI) {
 				}
 				case "pause": {
 					try {
-						setGoalStatus("paused")
+						const pausedGoal = setGoalStatus("paused")
 						persist("status")
-						showGoalMessage(`Goal paused\n\n${goalSummary(goal!)}`)
+						showGoalMessage(`Goal paused\n\n${goalSummary(pausedGoal)}`)
 						updateStatus(ctx)
 					} catch (err) {
 						showGoalMessage(`Failed to update thread goal: ${err instanceof Error ? err.message : String(err)}`)
@@ -791,9 +791,9 @@ export default function goalExtension(pi: ExtensionAPI) {
 				}
 				case "resume": {
 					try {
-						setGoalStatus("active")
+						const activeGoal = setGoalStatus("active")
 						persist("status")
-						showGoalMessage(`Goal active\n\n${goalSummary(currentGoalSnapshot()!)}`)
+						showGoalMessage(`Goal active\n\n${goalSummary(currentGoalSnapshot() ?? activeGoal)}`)
 						updateStatus(ctx)
 						queueContinuation(ctx)
 					} catch (err) {
@@ -816,11 +816,13 @@ export default function goalExtension(pi: ExtensionAPI) {
 						return
 					}
 					try {
-						editGoalObjective(edited)
+						const editedGoal = editGoalObjective(edited)
 						persist("edit")
-						showGoalMessage(`Goal ${statusLabel(goal!.status)}\n\n${goalSummary(currentGoalSnapshot()!)}`)
+						showGoalMessage(
+							`Goal ${statusLabel(editedGoal.status)}\n\n${goalSummary(currentGoalSnapshot() ?? editedGoal)}`,
+						)
 						updateStatus(ctx)
-						if (goal?.status === "active") queueContinuation(ctx)
+						if (editedGoal.status === "active") queueContinuation(ctx)
 					} catch (err) {
 						showGoalMessage(`Failed to edit thread goal: ${err instanceof Error ? err.message : String(err)}`)
 					}
@@ -847,9 +849,9 @@ export default function goalExtension(pi: ExtensionAPI) {
 				if (!replace) return
 			}
 
-			setGoal(objective)
+			const activeGoal = setGoal(objective)
 			persist("set")
-			showGoalMessage(`Goal active\n\n${goalSummary(goal!)}`)
+			showGoalMessage(`Goal active\n\n${goalSummary(activeGoal)}`)
 			updateStatus(ctx)
 			queueContinuation(ctx)
 		},
