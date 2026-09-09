@@ -37,7 +37,8 @@ export function main(args: readonly string[]): number {
 			cwd: projectRoot,
 			home,
 			stateHome,
-			piConfigDir: process.env.PI_CODING_AGENT_DIR ?? path.join(home, ".pi", "agent"),
+			piConfigDir:
+				process.env.PI_SAFETY_AGENT_DIR ?? process.env.PI_CODING_AGENT_DIR ?? path.join(home, ".pi", "agent"),
 			additionalNoAccessPatterns: projectConfiguration.value.additionalNoAccessPatterns,
 		})
 	}

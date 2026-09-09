@@ -5,6 +5,7 @@ import {
 	type ExtensionContext,
 	FooterComponent,
 	createBashTool,
+	getAgentDir,
 } from "@earendil-works/pi-coding-agent"
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui"
 import { createSandboxedBashOperations } from "./bash-launcher"
@@ -50,6 +51,7 @@ export default function piSafety(pi: ExtensionAPI): void {
 				const cwd = toolContext.cwd
 				const environment = () => ({
 					PI_SAFETY_CHECKPOINT_READY: "1",
+					PI_SAFETY_AGENT_DIR: getAgentDir(),
 					...(initialization.kind === "ready" ? initialization.session.bashEnvironment() : {}),
 				})
 				const invocationTool = features.protection
@@ -152,7 +154,7 @@ export default function piSafety(pi: ExtensionAPI): void {
 			cwd: context.cwd,
 			home,
 			stateHome: process.env.XDG_STATE_HOME ?? path.join(home, ".local", "state"),
-			piConfigDir: process.env.PI_CODING_AGENT_DIR ?? path.join(home, ".pi", "agent"),
+			piConfigDir: getAgentDir(),
 			additionalNoAccessPatterns: projectConfiguration.value.additionalNoAccessPatterns,
 			gopath: process.env.GOPATH,
 			privateTemp: process.env.TMPDIR ?? os.tmpdir(),
