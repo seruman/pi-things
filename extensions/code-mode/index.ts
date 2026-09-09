@@ -3,20 +3,22 @@ import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs"
 import * as path from "node:path"
 import { pathToFileURL } from "node:url"
 import {
+	type AgentSessionRuntimeDiagnostic,
 	type AgentToolResult,
 	type CustomEntry,
-	DefaultResourceLoader,
 	type ExtensionAPI,
 	type ExtensionContext,
 	type ExtensionRunner,
 	ExtensionRunner as ImportedExtensionRunner,
+	type ModelRuntime,
 	type RegisteredTool,
 	SessionManager,
 	SettingsManager,
 	type Theme,
 	type ToolDefinition,
 	convertToPng,
-	createAgentSession,
+	createAgentSessionFromServices,
+	createAgentSessionServices,
 	createBashToolDefinition,
 	createEditToolDefinition,
 	createFindToolDefinition,
@@ -1616,13 +1618,16 @@ const decodeAgentSpawnRequest = (rawEnvelope: string): AgentSpawnInput => {
 	}
 }
 
-const resolveAgentModel = (request: AgentSpawnInput, context: ExtensionContext) => {
+const resolveAgentModel = (request: AgentSpawnInput, context: ExtensionContext, modelRuntime: ModelRuntime) => {
 	const selection = request.model
-	if (!selection) return context.model
+	if (!selection) {
+		const parentModel = context.model
+		return parentModel ? (modelRuntime.getModel(parentModel.provider, parentModel.id) ?? parentModel) : undefined
+	}
 	if (typeof selection === "string") {
 		const slash = selection.indexOf("/")
-		if (slash > 0) return context.modelRegistry.find(selection.slice(0, slash), selection.slice(slash + 1))
-		const matches = context.modelRegistry.getAll().filter((model) => model.id === selection)
+		if (slash > 0) return modelRuntime.getModel(selection.slice(0, slash), selection.slice(slash + 1))
+		const matches = modelRuntime.getModels().filter((model) => model.id === selection)
 		if (matches.length === 1) return matches[0]
 		throw new CodeModeBoundaryError(
 			"validate",
@@ -1631,7 +1636,7 @@ const resolveAgentModel = (request: AgentSpawnInput, context: ExtensionContext) 
 	}
 	const modelId = selection.id ?? selection.modelId
 	if (!modelId) throw new CodeModeBoundaryError("validate", "agents.spawn model object requires id or modelId")
-	const model = context.modelRegistry.find(selection.provider, modelId)
+	const model = modelRuntime.getModel(selection.provider, modelId)
 	if (!model) throw new CodeModeBoundaryError("validate", `unknown model ${selection.provider}/${modelId}`)
 	return model
 }
@@ -1639,35 +1644,37 @@ const resolveAgentModel = (request: AgentSpawnInput, context: ExtensionContext) 
 const concreteParentExtensionPaths = (runner: ExtensionRunner | undefined): string[] =>
 	runner?.getExtensionPaths().filter((extensionPath) => !extensionPath.startsWith("<")) ?? []
 
-const createInheritedResourceLoader = async (input: {
-	cwd: string
-	agentDir: string
-	settingsManager: SettingsManager
-	parentRunner: ExtensionRunner | undefined
-}): Promise<{
-	loader: DefaultResourceLoader | undefined
+const inheritedResourceOptions = (
+	parentRunner: ExtensionRunner | undefined,
+): {
+	resourceLoaderOptions: { additionalExtensionPaths?: string[]; noExtensions?: boolean } | undefined
+	extensionFlagValues: Map<string, boolean | string> | undefined
 	extensionPathCount: number
 	inheritedFlagCount: number
-}> => {
-	const additionalExtensionPaths = concreteParentExtensionPaths(input.parentRunner)
-	if (additionalExtensionPaths.length === 0) return { loader: undefined, extensionPathCount: 0, inheritedFlagCount: 0 }
-
-	const loader = new DefaultResourceLoader({
-		cwd: input.cwd,
-		agentDir: input.agentDir,
-		settingsManager: input.settingsManager,
-		additionalExtensionPaths,
-		noExtensions: true,
-	})
-	await loader.reload()
-
-	let inheritedFlagCount = 0
-	const extensionsResult = loader.getExtensions()
-	for (const [name, value] of input.parentRunner?.getFlagValues() ?? []) {
-		extensionsResult.runtime.flagValues.set(name, value)
-		inheritedFlagCount++
+} => {
+	const additionalExtensionPaths = concreteParentExtensionPaths(parentRunner)
+	const extensionFlagValues = parentRunner ? new Map(parentRunner.getFlagValues()) : undefined
+	return {
+		resourceLoaderOptions:
+			additionalExtensionPaths.length > 0
+				? {
+						additionalExtensionPaths,
+						noExtensions: true,
+					}
+				: undefined,
+		extensionFlagValues,
+		extensionPathCount: additionalExtensionPaths.length,
+		inheritedFlagCount: extensionFlagValues?.size ?? 0,
 	}
-	return { loader, extensionPathCount: additionalExtensionPaths.length, inheritedFlagCount }
+}
+
+const assertNoAgentSessionDiagnosticErrors = (diagnostics: readonly AgentSessionRuntimeDiagnostic[]): void => {
+	const errors = diagnostics.filter((diagnostic) => diagnostic.type === "error")
+	if (errors.length === 0) return
+	throw new CodeModeBoundaryError(
+		"lifecycle",
+		`failed to create child agent services:\n${errors.map((diagnostic) => `- ${diagnostic.message}`).join("\n")}`,
+	)
 }
 
 const resolveRequestedAgentTools = (tools: AgentSpawnInput["tools"]): readonly string[] | undefined =>
@@ -1722,26 +1729,27 @@ const spawnPiAgent = async (input: {
 	const cwd = input.request.cwd ? path.resolve(input.context.cwd, input.request.cwd) : input.context.cwd
 	const agentDir = getAgentDir()
 	const settingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted: input.context.isProjectTrusted() })
-	const inheritedResources = await createInheritedResourceLoader({
-		cwd,
-		agentDir,
-		settingsManager,
-		parentRunner: input.parentRunner,
-	})
+	const inheritedResources = inheritedResourceOptions(input.parentRunner)
 	const requestedTools = resolveRequestedAgentTools(input.request.tools)
 	validateRequestedAgentTools(requestedTools, undefined)
-	const model = resolveAgentModel(input.request, input.context)
-	const thinkingLevel = input.request.thinkingLevel ?? input.parentThinkingLevel
-	const excludeTools = childAgentExcludeTools(input.request)
-	const { session } = await createAgentSession({
+	const services = await createAgentSessionServices({
 		cwd,
 		agentDir,
+		settingsManager,
+		...(inheritedResources.extensionFlagValues ? { extensionFlagValues: inheritedResources.extensionFlagValues } : {}),
+		...(inheritedResources.resourceLoaderOptions
+			? { resourceLoaderOptions: inheritedResources.resourceLoaderOptions }
+			: {}),
+	})
+	assertNoAgentSessionDiagnosticErrors(services.diagnostics)
+	const model = resolveAgentModel(input.request, input.context, services.modelRuntime)
+	const thinkingLevel = input.request.thinkingLevel ?? input.parentThinkingLevel
+	const excludeTools = childAgentExcludeTools(input.request)
+	const { session } = await createAgentSessionFromServices({
+		services,
+		sessionManager: SessionManager.inMemory(cwd),
 		model,
 		thinkingLevel,
-		modelRegistry: input.context.modelRegistry,
-		settingsManager,
-		...(inheritedResources.loader ? { resourceLoader: inheritedResources.loader } : {}),
-		sessionManager: SessionManager.inMemory(cwd),
 		...(requestedTools ? { tools: [...requestedTools] } : {}),
 		excludeTools,
 		...(input.request.noTools ? { noTools: input.request.noTools } : {}),
@@ -1779,6 +1787,7 @@ const spawnPiAgent = async (input: {
 					extensionPathCount: inheritedResources.extensionPathCount,
 					inheritedFlagCount: inheritedResources.inheritedFlagCount,
 				},
+				serviceDiagnostics: services.diagnostics,
 				tools: session.getActiveToolNames(),
 			},
 		}

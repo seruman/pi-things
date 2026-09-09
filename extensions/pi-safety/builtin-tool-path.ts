@@ -11,7 +11,7 @@ export type BuiltinToolPathError =
 	| { readonly kind: "path-syntax"; readonly input: string; readonly reason: string }
 	| { readonly kind: "canonical-path"; readonly input: string; readonly cause: CanonicalPathError }
 
-/** Resolve a prepared built-in path with the same lexical rules used by Pi 0.80.5. */
+/** Resolve a prepared built-in path with the same lexical rules used by Pi's built-in tools. */
 export function resolveBuiltinToolPath(
 	input: string,
 	cwd: CanonicalPath,
