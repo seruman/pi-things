@@ -1653,7 +1653,9 @@ const inheritedResourceOptions = (
 	inheritedFlagCount: number
 } => {
 	const additionalExtensionPaths = concreteParentExtensionPaths(parentRunner)
-	const extensionFlagValues = parentRunner ? new Map(parentRunner.getFlagValues()) : undefined
+	const extensionFlagValues = parentRunner
+		? new Map([...parentRunner.getFlagValues()].filter(([, value]) => value !== false))
+		: undefined
 	return {
 		resourceLoaderOptions:
 			additionalExtensionPaths.length > 0
