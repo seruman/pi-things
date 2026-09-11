@@ -149,6 +149,71 @@ test("headless Pi defaults protection off while retaining checkpoints", () => {
 	})
 })
 
+test("headless Pi initializes and checkpoints linked worktrees", () => {
+	withTestTempDirectory("headless-pi-worktree-", (root) => {
+		const fixture = createFixture(root)
+		const main = path.join(root, "main")
+		fs.mkdirSync(main)
+		const git = (...args: string[]) => {
+			const result = spawnSync("/usr/bin/git", ["-C", main, ...args], { encoding: "utf8" })
+			assert.equal(result.status, 0, result.stderr)
+		}
+		git("init", "-q")
+		git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-qm", "init")
+		git("worktree", "add", "--detach", fixture.workspace)
+		try {
+			const events = runHeadlessPi(fixture, [
+				{ kind: "tool", id: "write", name: "write", arguments: { path: "file.txt", content: "created" } },
+				{ kind: "tool", id: "bash", name: "bash", arguments: { command: "printf bash > bash.txt" } },
+				{ kind: "text", text: "done" },
+			])
+			const toolEnds = events.filter((event) => event.type === "tool_execution_end")
+			assert.equal(toolEnds.length, 2)
+			assert.ok(
+				toolEnds.every((event) => event.isError === false),
+				JSON.stringify(toolEnds),
+			)
+			assert.equal(fs.readFileSync(path.join(fixture.workspace, "file.txt"), "utf8"), "created")
+			assert.equal(fs.readFileSync(path.join(fixture.workspace, "bash.txt"), "utf8"), "bash")
+			assert.equal(fs.existsSync(path.join(fixture.stateHome, "pi-safety", "snapshots")), true)
+		} finally {
+			git("worktree", "remove", "--force", fixture.workspace)
+		}
+	})
+})
+
+test("headless Pi reports a failed checkpoint once and continues without weakening Seatbelt", () => {
+	for (const protection of [false, true]) {
+		withTestTempDirectory("headless-pi-checkpoint-failure-", (root) => {
+			const fixture = createFixture(root)
+			assert.equal(spawnSync("/usr/bin/mkfifo", [path.join(fixture.workspace, "pipe")]).status, 0)
+			const outside = path.join(fixture.home, "outside.txt")
+			const events = runHeadlessPi(
+				fixture,
+				[
+					{ kind: "tool", id: "first", name: "bash", arguments: { command: "printf first > first.txt" } },
+					{ kind: "tool", id: "second", name: "write", arguments: { path: "second.txt", content: "second" } },
+					{ kind: "tool", id: "outside", name: "write", arguments: { path: outside, content: "outside" } },
+					{ kind: "text", text: "done" },
+				],
+				{ protection },
+			)
+			assert.equal(fs.readFileSync(path.join(fixture.workspace, "first.txt"), "utf8"), "first")
+			assert.equal(fs.readFileSync(path.join(fixture.workspace, "second.txt"), "utf8"), "second")
+			assert.equal(fs.existsSync(outside), !protection)
+			const toolEnds = events.filter((event) => event.type === "tool_execution_end")
+			assert.equal(toolEnds[0].isError, false)
+			assert.equal(toolEnds[1].isError, false)
+			assert.equal(toolEnds[2].isError, protection)
+			const warnings = toolEnds.filter((event) =>
+				JSON.stringify(event.result).includes("continuing without rollback protection"),
+			)
+			assert.equal(warnings.length, 1)
+			assert.match(JSON.stringify(warnings[0].result), /checkpoint failed/)
+		})
+	}
+})
+
 test("headless Pi blocks denied calls before execution or checkpoint creation", () => {
 	withTestTempDirectory("headless-pi-denied-", (root) => {
 		const fixture = createFixture(root)
@@ -244,7 +309,7 @@ test("headless Pi preserves built-in offsets, parent creation, multi-edit, BOM, 
 			toolEnds.every((event) => event.isError === false),
 			true,
 		)
-		assert.match(JSON.stringify(toolEnds[0].result), /Successfully wrote 7 bytes/)
+		assert.match(JSON.stringify(toolEnds[0].result), /Successfully wrote to nested\/directory\/file\.txt/)
 		assert.match(JSON.stringify(toolEnds[1].result), /Successfully replaced 2 block\(s\)/)
 		assert.match(JSON.stringify(toolEnds[1].result), /firstChangedLine/)
 		assert.match(JSON.stringify(toolEnds[2].result), /two\\nthree/)
@@ -550,13 +615,18 @@ test("child Pi processes launched by Bash inherit the active Seatbelt", () => {
 			"deterministic",
 			"run child script",
 		]
-		const command = `PI_SAFETY_TEST_SCRIPT=${JSON.stringify(childScript)} ${JSON.stringify(resolveInstalledPi())} ${childArgs.map((argument) => JSON.stringify(argument)).join(" ")}`
+		// SDK credential reads acquire a lock. Keep the child's own runtime state
+		// writable so the test reaches the denied tool call, rather than failing bootstrap.
+		const childAgentDir = path.join(fixture.workspace, "child-agent")
+		fs.mkdirSync(childAgentDir)
+		const command = `PI_CODING_AGENT_DIR=${JSON.stringify(childAgentDir)} PI_SAFETY_TEST_SCRIPT=${JSON.stringify(childScript)} ${JSON.stringify(resolveInstalledPi())} ${childArgs.map((argument) => JSON.stringify(argument)).join(" ")}`
 		const events = runHeadlessPi(fixture, [
 			{ kind: "tool", id: "parent-bash-1", name: "bash", arguments: { command } },
 			{ kind: "text", text: "done" },
 		])
 		const toolEnd = events.find((event) => event.type === "tool_execution_end")
 		assert.equal(toolEnd?.isError, false, JSON.stringify(toolEnd?.result))
+		assert.match(JSON.stringify(toolEnd?.result), /child-bash-1/)
 		assert.match(JSON.stringify(toolEnd?.result), /Operation not permitted/)
 		assert.equal(fs.existsSync(outside), false)
 	})
@@ -665,7 +735,7 @@ test("headless Pi preserves built-in write, edit, and read while creating one ch
 				type: "tool_execution_end",
 				toolCallId: "write-1",
 				toolName: "write",
-				result: { content: [{ type: "text", text: "Successfully wrote 5 bytes to created.txt" }] },
+				result: { content: [{ type: "text", text: "Successfully wrote to created.txt" }] },
 				isError: false,
 			},
 			{

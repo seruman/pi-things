@@ -164,13 +164,32 @@ test("a new run cannot replace a checkpoint while creation is in flight", async 
 	})
 })
 
-test("tool calls fail closed before an agent run starts", async () => {
+test("checkpoint failures are warnings, remain cached for the run, and retry on the next run", async () => {
+	await withTestTempDirectoryAsync("safety-session-checkpoint-failure-", async (root) => {
+		const session = fixture(root)
+		const obstruction = path.join(root, "state", "pi-safety")
+		fs.writeFileSync(obstruction, "not a directory")
+		unwrap(session.beginAgentRun())
+		const first = await session.checkpoint("bash")
+		assert.equal(first.kind, "warning")
+		assert.equal(session.checkpointStatus().kind, "failed")
+		fs.unlinkSync(obstruction)
+		assert.deepEqual(await session.checkpoint("write"), first)
+		assert.equal(fs.existsSync(session.snapshotStore.projectDirectory), false)
+		assert.equal(session.guard("write", { path: path.join(root, "outside.txt"), content: "x" }).kind, "block")
+		unwrap(session.beginAgentRun())
+		assert.equal((await session.checkpoint("bash")).kind, "allow")
+		assert.equal(session.checkpointStatus().kind, "ready")
+	})
+})
+
+test("tool calls warn when a checkpoint run has not started", async () => {
 	await withTestTempDirectoryAsync("safety-session-uninitialized-", async (root) => {
 		const session = fixture(root)
 		const decision = await session.checkpoint("write")
 		assert.deepEqual(decision, {
-			kind: "block",
-			reason: "pi-safety: checkpoint run has not started",
+			kind: "warning",
+			reason: "pi-safety: checkpoint run has not started; continuing without rollback protection",
 		})
 	})
 })

@@ -1,5 +1,6 @@
 import { test } from "bun:test"
 import assert from "node:assert/strict"
+import { execFileSync } from "node:child_process"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { createDefaultPolicy, createSnapshotPolicy } from "./default-policy"
@@ -9,6 +10,90 @@ import { emitSeatbelt } from "./seatbelt"
 import { canonicalExecutable, canonicalPath } from "./test-domain-values"
 import { assertDenied, runWithSeatbeltProfile } from "./test-seatbelt"
 import { withTestTempDirectory } from "./test-temp-directory"
+
+test("linked worktrees protect shared Git config and hooks and per-worktree config", () => {
+	withTestTempDirectory("default-policy-worktree-", (root) => {
+		const main = path.join(root, "main")
+		const workspace = path.join(root, "worktree")
+		fs.mkdirSync(main)
+		const git = (cwd: string, ...args: string[]) =>
+			execFileSync("/usr/bin/git", ["-C", cwd, ...args], { encoding: "utf8" }).trim()
+		git(main, "init", "-q")
+		git(main, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-qm", "init")
+		git(main, "worktree", "add", "--detach", workspace)
+		try {
+			assert.equal(fs.statSync(path.join(workspace, ".git")).isFile(), true)
+			const paths = {
+				workspace: canonicalPath(workspace),
+				home: canonicalPath(path.join(root, "home")),
+				stateHome: canonicalPath(path.join(root, "state")),
+				piConfigDirectory: canonicalPath(path.join(root, "agent")),
+			}
+			const gitExecutable = canonicalExecutable("/usr/bin/git")
+			for (const sandbox of [
+				{ kind: "disabled" } as const,
+				{
+					kind: "enabled" as const,
+					privateTemp: canonicalPath(path.join(root, "tmp")),
+					integrations: {
+						gitExecutable,
+						nix: { kind: "disabled" as const },
+						sshAgent: { kind: "disabled" as const },
+						docker: { kind: "disabled" as const },
+						wb: { kind: "disabled" as const },
+					},
+				},
+			]) {
+				const policy = unwrap(createDefaultPolicy({ paths, additionalNoAccessPatterns: [], sandbox }))
+				for (const name of ["hooks", "config", "config.worktree"]) {
+					const target = canonicalPath(git(workspace, "rev-parse", "--path-format=absolute", "--git-path", name))
+					assert.equal(
+						evaluatePolicy(policy, {
+							kind: "file-access",
+							operation: "read",
+							subject: { kind: "builtin" },
+							path: target,
+						}).effect,
+						"allow",
+					)
+					assert.equal(
+						evaluatePolicy(policy, {
+							kind: "file-access",
+							operation: "write",
+							subject: { kind: "builtin" },
+							path: target,
+						}).effect,
+						"deny",
+					)
+					// The explicit rule must name the real path, not a fictional child of the .git file.
+					assert.ok(
+						policy.rules.some(
+							(rule) =>
+								rule.kind === "file-access" &&
+								rule.subject.kind === "shared" &&
+								rule.access === "read-only" &&
+								rule.selector.kind === "tree" &&
+								rule.selector.path === target,
+						),
+					)
+					if (sandbox.kind === "enabled") {
+						assert.equal(
+							evaluatePolicy(policy, {
+								kind: "file-access",
+								operation: "write",
+								subject: { kind: "executable", executable: gitExecutable },
+								path: target,
+							}).effect,
+							"allow",
+						)
+					}
+				}
+			}
+		} finally {
+			git(main, "worktree", "remove", "--force", workspace)
+		}
+	})
+})
 
 test("a final shared denial constrains sandbox runtime capabilities", () => {
 	withTestTempDirectory("default-policy-capability-ceiling-", (root) => {
