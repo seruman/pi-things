@@ -48,6 +48,7 @@ export type SafetySessionError =
 	| { readonly kind: "snapshot-store"; readonly cause: SnapshotError }
 
 export type SafetyDecision = { readonly kind: "allow" } | { readonly kind: "block"; readonly reason: string }
+export type CheckpointDecision = { readonly kind: "allow" } | { readonly kind: "warning"; readonly reason: string }
 
 export type SafetySessionCheckpointStatus = CheckpointStatus | { readonly kind: "run-not-started" }
 
@@ -69,7 +70,7 @@ export interface SafetySession {
 	): Result<SessionPathGrant, SessionPathError | DefaultPolicyError>
 	removeSessionPath(path: string): Result<boolean, SessionPathError | DefaultPolicyError>
 	guard(toolName: string, input: unknown): SafetyDecision
-	checkpoint(toolName: string): Promise<SafetyDecision>
+	checkpoint(toolName: string): Promise<CheckpointDecision>
 }
 
 class ManagedSafetySession implements SafetySession {
@@ -180,16 +181,19 @@ class ManagedSafetySession implements SafetySession {
 			: { kind: "block", reason: formatAuthorizationError(authorization.error) }
 	}
 
-	async checkpoint(toolName: string): Promise<SafetyDecision> {
+	async checkpoint(toolName: string): Promise<CheckpointDecision> {
 		if (toolName !== "bash" && toolName !== "write" && toolName !== "edit") return { kind: "allow" }
 		if (!this.#checkpointRun) {
-			return { kind: "block", reason: "pi-safety: checkpoint run has not started" }
+			return {
+				kind: "warning",
+				reason: "pi-safety: checkpoint run has not started; continuing without rollback protection",
+			}
 		}
 		const checkpoint = await this.#checkpointRun.ensureCheckpoint()
 		if (!checkpoint.ok) {
 			return {
-				kind: "block",
-				reason: `pi-safety: checkpoint failed (${formatCheckpointError(checkpoint.error)})`,
+				kind: "warning",
+				reason: `pi-safety: checkpoint failed (${formatCheckpointError(checkpoint.error)}); continuing without rollback protection`,
 			}
 		}
 		return { kind: "allow" }

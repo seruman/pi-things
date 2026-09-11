@@ -37,6 +37,8 @@ interface CheckpointEntryData {
 export default function piSafety(pi: ExtensionAPI): void {
 	let initialization: SessionInitialization = { kind: "not-started" }
 	let recordedCheckpointId: SnapshotId | undefined
+	let checkpointWarningReported = false
+	const checkpointWarnings = new Map<string, string>()
 	const features = { protection: false, checkpoints: true }
 	let bashWrapperRegistered = false
 	const registerBashWrapper = (context: ExtensionContext): void => {
@@ -141,6 +143,8 @@ export default function piSafety(pi: ExtensionAPI): void {
 
 	pi.on("session_start", async (_event, context) => {
 		recordedCheckpointId = undefined
+		checkpointWarningReported = false
+		checkpointWarnings.clear()
 		features.protection = process.env.PI_SAFETY_PROTECTION === "1"
 		features.checkpoints = true
 		if (context.hasUI) updateSeatbeltFooter(pi, context, features.protection)
@@ -174,6 +178,8 @@ export default function piSafety(pi: ExtensionAPI): void {
 	})
 
 	pi.on("before_agent_start", async (_event, context) => {
+		checkpointWarningReported = false
+		checkpointWarnings.clear()
 		if (initialization.kind !== "ready" || !features.checkpoints) return
 		const sessionId = parseSnapshotSessionId(context.sessionManager.getSessionId())
 		if (!sessionId.ok) {
@@ -210,7 +216,11 @@ export default function piSafety(pi: ExtensionAPI): void {
 		}
 		if (features.checkpoints) {
 			const checkpointDecision = await initialization.session.checkpoint(event.toolName)
-			if (checkpointDecision.kind === "block") return { block: true, reason: checkpointDecision.reason }
+			if (checkpointDecision.kind === "warning" && !checkpointWarningReported) {
+				checkpointWarningReported = true
+				checkpointWarnings.set(event.toolCallId, checkpointDecision.reason)
+				if (context.hasUI) context.ui.notify(checkpointDecision.reason, "warning")
+			}
 		}
 		const checkpoint = initialization.session.checkpointStatus()
 		if (checkpoint.kind === "ready" && checkpoint.snapshot.id !== recordedCheckpointId) {
@@ -231,6 +241,13 @@ export default function piSafety(pi: ExtensionAPI): void {
 			}
 		}
 		return undefined
+	})
+
+	pi.on("tool_result", (event) => {
+		const warning = checkpointWarnings.get(event.toolCallId)
+		if (!warning) return
+		checkpointWarnings.delete(event.toolCallId)
+		return { content: [...event.content, { type: "text", text: `Warning: ${warning}` }] }
 	})
 }
 

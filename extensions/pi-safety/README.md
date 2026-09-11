@@ -11,6 +11,8 @@ Use `/pi-safety` to toggle either feature immediately. Seatbelt can also start e
 
 When enabled, the host and HOME are read-only by default and the workspace is read-write. Standard writable tool locations include the macOS and XDG cache roots, npm and Bun caches, all of `~/.cargo`, default or configured GOPATH `pkg` directories, the configured temporary container, `/private/tmp`, `~/.xdg`, and `~/Library/Keychains`. Mach service lookup is unrestricted. Keychain item ACLs still determine which credentials a program may access.
 
+Linked Git worktrees and submodules resolve hooks and configuration through their gitfile, including shared Git configuration and per-worktree `config.worktree`.
+
 Private SSH material, `~/.env`, `~/.netrc`, `~/.gitcookies`, `~/.config/opnix`, cloud credentials, Pi authentication data, project `.env` conventions, snapshot protected storage, and configured project secrets remain inaccessible. Public SSH keys and ordinary SSH client metadata remain readable.
 
 The complete policy is listed in evaluation order in `default-policy.ts`. In `/pi-safety`, press `p` to browse the resolved Seatbelt ACL read-only, or use `/pi-safety policy` for its text form. `/pi-safety add [path]` grants a confirmed read-only or read-write session directory; `/pi-safety remove [path]` revokes one. Read-write session paths are not checkpointed. Headless sessions can set `PI_SAFETY_SESSION_PATHS` to strict JSON such as `[{
@@ -22,7 +24,9 @@ When Seatbelt is disabled, Bash and built-in file tools run with the user's ordi
 
 ## Checkpoints
 
-Before the first Bash, `write`, or `edit` call in a turn, Pi Safety creates a fast APFS snapshot when checkpoints are enabled. It records the checkpoint as session metadata without sending it to the model, keeps up to 20 snapshots per project, and excludes generated directories such as `.git`, `.pi`, `.wb`, `node_modules`, `dist`, and `target`.
+Before the first Bash, `write`, or `edit` call in an agent run, Pi Safety attempts a fast APFS snapshot when checkpoints are enabled. It records successful checkpoints as session metadata without sending them to the model, keeps up to 20 snapshots per project, and excludes generated directories such as `.git`, `.pi`, `.wb`, `node_modules`, `dist`, and `target`.
+
+Checkpoints are best effort: if creation fails, tools continue without rollback protection. The failure is reported once per agent run in tool output (and as a UI warning when available), with no further attempts until the next run. Enabled Seatbelt authorization remains fail-closed.
 
 The `pi-snapshot` command can create, list, inspect, verify, compare, export, garbage-collect, and restore snapshots. Restore starts as a dry run; use `--apply` to mutate the project.
 

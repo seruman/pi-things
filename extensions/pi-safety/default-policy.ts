@@ -1,3 +1,5 @@
+import { execFileSync } from "node:child_process"
+import { statSync } from "node:fs"
 import * as path from "node:path"
 import type { CanonicalPath, CanonicalPathError, SeatbeltPath } from "./canonical-path"
 import { parseCanonicalPath, parseLexicalAbsolutePath, seatbeltPathAliases } from "./canonical-path"
@@ -68,6 +70,7 @@ export interface DefaultPolicyPaths {
 
 export type DefaultPolicyError =
 	| { readonly kind: "fixed-path"; readonly path: string }
+	| { readonly kind: "git-path"; readonly path: string; readonly message: string }
 	| { readonly kind: "rule-path"; readonly path: string; readonly cause: CanonicalPathError }
 	| {
 			readonly kind: "pattern"
@@ -110,6 +113,11 @@ function createDefaultPolicyFromParsedRoots(input: {
 	if (!root.ok) return err({ kind: "fixed-path", path: "/" })
 	const sshDirectory = pathValue(input.paths.home, ".ssh")
 	const snapshotStore = pathValue(input.paths.stateHome, "pi-safety", "snapshots")
+	const gitPaths = resolveGitPolicyPaths(
+		input.paths.workspace,
+		input.sandbox.kind === "enabled" ? input.sandbox.integrations.gitExecutable : "/usr/bin/git",
+	)
+	if (!gitPaths.ok) return gitPaths
 	const rules: PolicyRule[] = []
 
 	// Host and workspace.
@@ -127,9 +135,7 @@ function createDefaultPolicyFromParsedRoots(input: {
 
 	// Project configuration is readable but only its owning integration may change it.
 	rules.push(
-		readOnly(shared(), tree(pathValue(input.paths.workspace, ".git", "hooks"))),
-		readOnly(shared(), tree(pathValue(input.paths.workspace, ".git", "config"))),
-		readOnly(shared(), tree(pathValue(input.paths.workspace, ".git", "config.worktree"))),
+		...gitPaths.value.map((pathname) => readOnly(shared(), tree(pathname))),
 		readOnly(shared(), tree(pathValue(input.paths.workspace, ".pi"))),
 		readOnly(shared(), tree(pathValue(input.paths.workspace, ".mcp.json"))),
 		readOnly(shared(), tree(pathValue(input.paths.workspace, ".claude"))),
@@ -181,12 +187,7 @@ function createDefaultPolicyFromParsedRoots(input: {
 			),
 			readWrite(sandbox(), seatbeltPrefix(fixedPath("/dev/ttys"))),
 			readWrite(sandbox(), seatbeltPrefix(fixedPath("/dev/pty"))),
-			readWrite(executable(integrations.gitExecutable), tree(pathValue(input.paths.workspace, ".git", "hooks"))),
-			readWrite(executable(integrations.gitExecutable), tree(pathValue(input.paths.workspace, ".git", "config"))),
-			readWrite(
-				executable(integrations.gitExecutable),
-				tree(pathValue(input.paths.workspace, ".git", "config.worktree")),
-			),
+			...gitPaths.value.map((pathname) => readWrite(executable(integrations.gitExecutable), tree(pathname))),
 		)
 		if (integrations.nix.kind === "enabled") {
 			rules.push(readWrite(executable(integrations.nix.executable), tree(integrations.nix.cacheDirectory)))
@@ -488,6 +489,44 @@ function temporaryContainer(privateTemp: CanonicalPath): CanonicalPath {
 	const parsed = parseCanonicalPath(container)
 	if (!parsed.ok) throw new DefaultPolicyPathFailure(container, parsed.error)
 	return parsed.value
+}
+
+function resolveGitPolicyPaths(
+	workspace: CanonicalPath,
+	gitExecutable: string,
+): Result<readonly CanonicalPath[], DefaultPolicyError> {
+	const gitDirectory = pathValue(workspace, ".git")
+	const names = ["hooks", "config", "config.worktree"]
+	let isGitFile: boolean
+	try {
+		isGitFile = statSync(gitDirectory).isFile()
+	} catch (cause) {
+		if (!(cause instanceof Error && "code" in cause && cause.code === "ENOENT")) {
+			return err({ kind: "git-path", path: gitDirectory, message: String(cause) })
+		}
+		isGitFile = false
+	}
+	if (!isGitFile) return ok(names.map((name) => pathValue(gitDirectory, name)))
+
+	// Linked worktrees and submodules use a gitfile. Git knows which paths are
+	// shared through commondir (hooks/config) and which are worktree-local.
+	const paths: CanonicalPath[] = []
+	for (const name of names) {
+		let resolved: string
+		try {
+			resolved = execFileSync(
+				gitExecutable,
+				["--git-dir", gitDirectory, "rev-parse", "--path-format=absolute", "--git-path", name],
+				{ cwd: workspace, encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "pipe"] },
+			).replace(/\n$/, "")
+		} catch (cause) {
+			return err({ kind: "git-path", path: gitDirectory, message: String(cause) })
+		}
+		const parsed = parseCanonicalPath(resolved)
+		if (!parsed.ok) return err({ kind: "rule-path", path: resolved, cause: parsed.error })
+		paths.push(parsed.value)
+	}
+	return ok(paths)
 }
 
 function pathValue(root: CanonicalPath, ...components: string[]): CanonicalPath {
