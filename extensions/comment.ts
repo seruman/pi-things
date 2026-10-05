@@ -82,7 +82,7 @@ export default function (pi: ExtensionAPI): void {
 	pi.registerCommand("comment", {
 		description: "Open the last assistant message in $EDITOR and load the edited quote into the prompt editor",
 		handler: async (_args, ctx) => {
-			if (!ctx.hasUI) {
+			if (ctx.mode !== "tui") {
 				ctx.ui.notify("/comment requires interactive mode", "error")
 				return
 			}
@@ -94,7 +94,16 @@ export default function (pi: ExtensionAPI): void {
 			}
 
 			try {
-				const editedText = editWithExternalEditor(formatQuotedEditorText(lastAssistantText))
+				const editedText = await ctx.ui.custom<string>((tui, _theme, _keys, done) => {
+					tui.stop()
+					try {
+						done(editWithExternalEditor(formatQuotedEditorText(lastAssistantText)))
+					} finally {
+						tui.start()
+						tui.requestRender(true)
+					}
+					return { render: () => [], invalidate: () => {} }
+				})
 				ctx.ui.setEditorText(editedText)
 				ctx.ui.notify("Loaded edited quoted assistant text into the editor", "info")
 			} catch (error) {

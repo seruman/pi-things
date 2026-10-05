@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
+import { type Static, Type } from "typebox"
 import { z } from "zod"
 import { isRetryableNetworkError, isRetryableStatus, parseJson, withExponentialRetries } from "./providers/shared"
 import {
@@ -12,6 +13,37 @@ import {
 type RetryableError = Error & { retryable?: boolean }
 
 const MAX_TOTAL_OUTPUT_CHARS = 120_000
+
+const searchSuccessSchema = Type.Object(
+	{
+		status: Type.Literal("success"),
+		error: Type.Null(),
+		query: Type.String({ maxLength: 4096 }),
+		alteredQuery: Type.Union([Type.String({ maxLength: 4096 }), Type.Null()]),
+		moreResultsAvailable: Type.Boolean(),
+		reRankedByGoggles: Type.Boolean(),
+		operatorsApplied: Type.Boolean(),
+		truncated: Type.Boolean(),
+		results: Type.Array(
+			Type.Object(
+				{
+					title: Type.String({ maxLength: 4096 }),
+					url: Type.String({ maxLength: 8192 }),
+					source: Type.String({ maxLength: 512 }),
+					language: Type.String({ maxLength: 64 }),
+					age: Type.String({ maxLength: 128 }),
+					published: Type.String({ maxLength: 128 }),
+					snippet: Type.String({ maxLength: 500 }),
+					extraSnippets: Type.Array(Type.String({ maxLength: 220 }), { maxItems: 5 }),
+					typeHints: Type.Array(Type.String({ maxLength: 16 }), { maxItems: 8 }),
+				},
+				{ additionalProperties: false },
+			),
+			{ maxItems: 20 },
+		),
+	},
+	{ additionalProperties: false },
+)
 
 const braveWebResultSchema = z
 	.object({
@@ -59,6 +91,18 @@ const braveResponseSchema = z
 			.optional(),
 	})
 	.passthrough()
+
+const searchOutputSchema = Type.Union([
+	searchSuccessSchema,
+	Type.Object(
+		{
+			status: Type.Literal("error"),
+			error: Type.String({ maxLength: 4096 }),
+			query: Type.String({ maxLength: 4096 }),
+		},
+		{ additionalProperties: false },
+	),
+])
 
 type BraveWebResult = z.infer<typeof braveWebResultSchema>
 type BraveResponse = z.infer<typeof braveResponseSchema>
@@ -155,6 +199,52 @@ function formatResults(
 	return lines.join("\n").trimEnd()
 }
 
+function structuredSearchResults(
+	query: string,
+	response: BraveResponse,
+	results: BraveWebResult[],
+	includeExtraSnippets: boolean,
+	textTruncated: boolean,
+): Static<typeof searchSuccessSchema> {
+	let truncated = textTruncated
+	const bounded = (text: string, maxChars: number) => {
+		if (text.length > maxChars) truncated = true
+		return clip(text, maxChars)
+	}
+	const boundedExtras = (snippets: string[]) => {
+		const extras = snippets.map(clean).filter(Boolean)
+		if (extras.length > 5) truncated = true
+		return extras.slice(0, 5).map((extra) => bounded(extra, 220))
+	}
+	const data: Static<typeof searchSuccessSchema> = {
+		status: "success",
+		error: null,
+		query: bounded(query, 4096),
+		alteredQuery: response.query?.altered ? bounded(clean(response.query.altered), 4096) : null,
+		moreResultsAvailable: response.query?.more_results_available === true,
+		reRankedByGoggles: response.web?.mutated_by_goggles === true,
+		operatorsApplied: response.query?.search_operators?.applied === true,
+		truncated: false,
+		results: results.map((item) => ({
+			title: bounded(clean(item.title || item.url || "Untitled"), 4096),
+			url: bounded(clean(item.url || ""), 8192),
+			source: bounded(pickSourceName(item), 512),
+			language: bounded(clean(item.language || ""), 64),
+			age: bounded(clean(item.age || ""), 128),
+			published: bounded(clean(item.page_age || ""), 128),
+			snippet: bounded(clean(item.description || ""), 500),
+			extraSnippets: includeExtraSnippets ? boundedExtras(item.extra_snippets || []) : [],
+			typeHints: collectTypeHints(item),
+		})),
+	}
+	while (JSON.stringify(data).length > MAX_TOTAL_OUTPUT_CHARS && data.results.length) {
+		data.results.pop()
+		truncated = true
+	}
+	data.truncated = truncated
+	return data
+}
+
 function parseBraveErrorMessage(bodyText: string): string {
 	const parsed = parseJson(bodyText)
 	if (!parsed || typeof parsed !== "object") return bodyText
@@ -240,6 +330,7 @@ export function registerBraveSearchTool(pi: ExtensionAPI) {
 		description: "Search the web using Brave Search API.",
 		promptSnippet: "Search the web using Brave Search API",
 		parameters: braveSearchParams,
+		outputSchema: searchOutputSchema,
 		async execute(_toolCallId, params, signal, onUpdate) {
 			if (signal?.aborted) throw new DOMException("aborted", "AbortError")
 			const startedAt = Date.now()
@@ -247,6 +338,7 @@ export function registerBraveSearchTool(pi: ExtensionAPI) {
 			if (!query) {
 				return {
 					content: [{ type: "text", text: "Error: query is required" }],
+					structuredContent: { status: "error", query, error: "query is required" },
 					isError: true,
 					details: { error: "query is required", phase: "error", label: "search", provider: "brave" },
 				}
@@ -286,6 +378,7 @@ export function registerBraveSearchTool(pi: ExtensionAPI) {
 				const normalized = normalizeError(error)
 				return {
 					content: [{ type: "text", text: `search failed\n\nError: ${normalized.message}` }],
+					structuredContent: { status: "error", query: clip(query, 4096), error: clip(normalized.message, 4096) },
 					isError: true,
 					details: {
 						error: normalized.message,
@@ -318,6 +411,13 @@ export function registerBraveSearchTool(pi: ExtensionAPI) {
 
 			return {
 				content: [{ type: "text", text: output }],
+				structuredContent: structuredSearchResults(
+					query,
+					response,
+					results,
+					params.extraSnippets === true,
+					content.length > MAX_TOTAL_OUTPUT_CHARS,
+				),
 				isError: false,
 				details: {
 					phase: "done",
