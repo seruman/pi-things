@@ -2,6 +2,7 @@ import * as path from "node:path"
 import {
 	type AssistantMessage,
 	type AssistantMessageEventStream,
+	type JsonValue,
 	type Model,
 	type SimpleStreamOptions,
 	createAssistantMessageEventStream,
@@ -10,13 +11,24 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 import { z } from "zod"
 import { readJsonFile } from "./json-file"
 
+const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
+	z.union([
+		z.null(),
+		z.boolean(),
+		z.number().finite(),
+		z.string(),
+		z.array(jsonValueSchema),
+		z.record(jsonValueSchema),
+	]),
+)
+
 const scriptedResponseSchema = z.discriminatedUnion("kind", [
 	z.object({ kind: z.literal("text"), text: z.string() }),
 	z.object({
 		kind: z.literal("tool"),
 		id: z.string(),
 		name: z.string(),
-		arguments: z.record(z.unknown()),
+		arguments: z.record(jsonValueSchema),
 	}),
 ])
 const scriptSchema = z.array(scriptedResponseSchema).min(1)

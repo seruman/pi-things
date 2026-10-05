@@ -3,8 +3,7 @@ import * as path from "node:path"
 import {
 	type ExtensionAPI,
 	type ExtensionContext,
-	FooterComponent,
-	createBashTool,
+	createBashToolDefinition,
 	getAgentDir,
 } from "@earendil-works/pi-coding-agent"
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui"
@@ -45,10 +44,9 @@ export default function piSafety(pi: ExtensionAPI): void {
 		if (bashWrapperRegistered) return
 		if (!pi.getAllTools().some((tool) => tool.name === "bash")) return
 		bashWrapperRegistered = true
-		const bashTool = createBashTool(context.cwd)
+		const bashTool = createBashToolDefinition(context.cwd)
 		pi.registerTool({
 			...bashTool,
-			promptSnippet: "Execute bash commands (ls, grep, find, etc.)",
 			execute: async (id, params, signal, onUpdate, toolContext) => {
 				const cwd = toolContext.cwd
 				const environment = () => ({
@@ -57,7 +55,7 @@ export default function piSafety(pi: ExtensionAPI): void {
 					...(initialization.kind === "ready" ? initialization.session.bashEnvironment() : {}),
 				})
 				const invocationTool = features.protection
-					? createBashTool(cwd, {
+					? createBashToolDefinition(cwd, {
 							operations: createSandboxedBashOperations(() => {
 								if (initialization.kind !== "ready") {
 									throw new Error("pi-safety: Bash sandbox requested before session initialization")
@@ -65,11 +63,11 @@ export default function piSafety(pi: ExtensionAPI): void {
 								return initialization.session.seatbeltProfile()
 							}, environment),
 						})
-					: createBashTool(cwd, {
+					: createBashToolDefinition(cwd, {
 							shellPath: "/bin/bash",
 							spawnHook: (context) => ({ ...context, env: { ...context.env, ...environment() } }),
 						})
-				return invocationTool.execute(id, params, signal, onUpdate)
+				return invocationTool.execute(id, params, signal, onUpdate, toolContext)
 			},
 		})
 	}
@@ -147,7 +145,7 @@ export default function piSafety(pi: ExtensionAPI): void {
 		checkpointWarnings.clear()
 		features.protection = process.env.PI_SAFETY_PROTECTION === "1"
 		features.checkpoints = true
-		if (context.hasUI) updateSeatbeltFooter(pi, context, features.protection)
+		if (context.mode === "tui") updateSeatbeltFooter(pi, context, features.protection)
 		const projectConfiguration = loadProjectSafetyConfiguration(context.cwd)
 		if (!projectConfiguration.ok) {
 			initialization = { kind: "failed", error: { kind: "configuration", cause: projectConfiguration.error } }
@@ -193,7 +191,7 @@ export default function piSafety(pi: ExtensionAPI): void {
 	})
 
 	pi.on("session_shutdown", async (_event, context) => {
-		if (context.hasUI) context.ui.setFooter(undefined)
+		if (context.mode === "tui") context.ui.setFooter(undefined)
 		if (initialization.kind !== "ready") return
 		const cleaned = initialization.session.cleanup()
 		if (!cleaned.ok) throw new Error(`pi-safety: integration cleanup failed (${cleaned.error.kind})`)
@@ -247,7 +245,10 @@ export default function piSafety(pi: ExtensionAPI): void {
 		const warning = checkpointWarnings.get(event.toolCallId)
 		if (!warning) return
 		checkpointWarnings.delete(event.toolCallId)
-		return { content: [...event.content, { type: "text", text: `Warning: ${warning}` }] }
+		return {
+			content: [...event.content, { type: "text", text: `Warning: ${warning}` }],
+			structuredContent: event.structuredContent,
+		}
 	})
 }
 
@@ -327,42 +328,108 @@ async function removeSessionPath(context: ExtensionContext, session: SafetySessi
 }
 
 function updateSeatbeltFooter(pi: ExtensionAPI, context: ExtensionContext, enabled: boolean): void {
+	if (context.mode !== "tui") return
 	if (!enabled) {
 		context.ui.setFooter(undefined)
 		return
 	}
 	context.ui.setFooter((tui, theme, footerData) => {
-		const footer = new FooterComponent(
-			{
-				get state() {
-					return { model: context.model, thinkingLevel: pi.getThinkingLevel() }
-				},
-				sessionManager: context.sessionManager,
-				modelRegistry: context.modelRegistry,
-				getContextUsage: () => context.getContextUsage(),
-			} as never,
-			footerData,
-		)
 		const unsubscribe = footerData.onBranchChange(() => tui.requestRender())
 		return {
-			dispose: () => {
-				unsubscribe()
-				footer.dispose()
-			},
-			invalidate: () => footer.invalidate(),
+			dispose: unsubscribe,
+			invalidate: () => {},
 			render: (width: number) => {
-				const label = "Seatbelt enabled"
-				const separator = " · "
-				const compact = footer.render(Math.max(1, width - visibleWidth(label + separator)))
-				const full = footer.render(width)
-				return [
-					full[0] ?? "",
-					truncateToWidth(theme.fg("accent", label) + theme.fg("dim", separator) + (compact[1] ?? ""), width, ""),
-					...full.slice(2),
+				if (width <= 0) return ["", ""]
+				const totals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }
+				let cacheHit: number | undefined
+				for (const entry of context.sessionManager.getEntries()) {
+					const usage =
+						entry.type === "usage" || entry.type === "compaction" || entry.type === "branch_summary"
+							? entry.usage
+							: entry.type === "message" && (entry.message.role === "assistant" || entry.message.role === "toolResult")
+								? entry.message.usage
+								: undefined
+					if (!usage) continue
+					totals.input += usage.input
+					totals.output += usage.output
+					totals.cacheRead += usage.cacheRead
+					totals.cacheWrite += usage.cacheWrite
+					totals.cost += usage.cost.total
+					if (entry.type === "message" && entry.message.role === "assistant") {
+						const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite
+						cacheHit = promptTokens > 0 ? (100 * usage.cacheRead) / promptTokens : undefined
+					}
+				}
+				const home = process.env.HOME ?? os.homedir()
+				const relative = path.relative(home, context.cwd)
+				const insideHome =
+					relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
+				let cwd = insideHome ? (relative ? `~${path.sep}${relative}` : "~") : context.cwd
+				const branch = footerData.getGitBranch()
+				if (branch) cwd += ` (${branch})`
+				const sessionName = context.sessionManager.getSessionName()
+				if (sessionName) cwd += ` • ${sessionName}`
+				const stats: string[] = []
+				if (totals.input) stats.push(`↑${formatFooterTokens(totals.input)}`)
+				if (totals.output) stats.push(`↓${formatFooterTokens(totals.output)}`)
+				if (totals.cacheRead) stats.push(`R${formatFooterTokens(totals.cacheRead)}`)
+				if (totals.cacheWrite) stats.push(`W${formatFooterTokens(totals.cacheWrite)}`)
+				if ((totals.cacheRead || totals.cacheWrite) && cacheHit !== undefined) stats.push(`CH${cacheHit.toFixed(1)}%`)
+				const subscription =
+					context.model &&
+					context.modelRegistry.isUsingOAuth(context.model) &&
+					context.modelRegistry.getProvider(context.model.provider)?.auth.oauth?.isSubscription === true
+				if (totals.cost || subscription) stats.push(`$${totals.cost.toFixed(3)}${subscription ? " (sub)" : ""}`)
+				const usage = context.getContextUsage()
+				const percent = usage?.percent
+				const contextText = `${percent == null ? "?" : `${percent.toFixed(1)}%`}/${formatFooterTokens(usage?.contextWindow ?? context.model?.contextWindow ?? 0)}`
+				const contextColor =
+					percent != null && percent > 90 ? "error" : percent != null && percent > 70 ? "warning" : "dim"
+				const left =
+					theme.fg("accent", "Seatbelt enabled") +
+					theme.fg("dim", ` · ${stats.join(" ")}${stats.length ? " " : ""}`) +
+					theme.fg(contextColor, contextText)
+				let right = context.model?.id ?? "no-model"
+				if (context.model?.reasoning) right += ` • ${context.thinkingLevel ?? pi.getThinkingLevel()}`
+				if (context.model && footerData.getAvailableProviderCount() > 1) {
+					const withProvider = `(${context.model.provider}) ${right}`
+					if (visibleWidth(left) + 2 + visibleWidth(withProvider) <= width) right = withProvider
+				}
+				const available = width - visibleWidth(left) - 2
+				const modelText = available > 0 ? truncateToWidth(theme.fg("dim", right), available, "") : ""
+				const padding = modelText ? " ".repeat(Math.max(2, width - visibleWidth(left) - visibleWidth(modelText))) : ""
+				const lines = [
+					truncateToWidth(theme.fg("dim", cwd), width, ""),
+					truncateToWidth(left + padding + modelText, width, ""),
 				]
+				const statuses = [...footerData.getExtensionStatuses()].sort(([a], [b]) => a.localeCompare(b))
+				if (statuses.length)
+					lines.push(
+						truncateToWidth(
+							statuses
+								.map(([, text]) =>
+									text
+										.replace(/[\r\n\t]/g, " ")
+										.replace(/ +/g, " ")
+										.trim(),
+								)
+								.join(" "),
+							width,
+							"",
+						),
+					)
+				return lines
 			},
 		}
 	})
+}
+
+function formatFooterTokens(count: number): string {
+	if (count < 1000) return String(count)
+	if (count < 10000) return `${(count / 1000).toFixed(1)}k`
+	if (count < 1000000) return `${Math.round(count / 1000)}k`
+	if (count < 10000000) return `${(count / 1000000).toFixed(1)}M`
+	return `${Math.round(count / 1000000)}M`
 }
 
 function formatCheckpointStatus(status: ReturnType<SafetySession["checkpointStatus"]>): string {

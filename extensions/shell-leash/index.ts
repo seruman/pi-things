@@ -54,6 +54,10 @@ export default function (pi: ExtensionAPI) {
 		description: "Manage shell-leash approvals for this session",
 		handler: async (_args, ctx) => {
 			if (!ctx.hasUI) return
+			if (ctx.mode !== "tui") {
+				ctx.ui.notify("/shell-leash requires TUI mode", "error")
+				return
+			}
 
 			await ctx.ui.custom((tui, theme, _kb, done) => {
 				const items: SettingItem[] = DEFAULT_CAPABILITIES.map((cap) => ({

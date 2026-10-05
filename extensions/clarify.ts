@@ -1,4 +1,4 @@
-import { type Api, type Model, type UserMessage, complete } from "@earendil-works/pi-ai/compat"
+import type { UserMessage } from "@earendil-works/pi-ai"
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent"
 
 const USAGE = "Usage: /clarify <rough prompt> | /clarify with editor text | add -clarify anywhere in a message"
@@ -15,7 +15,7 @@ Rules:
 - If it is already clear, only lightly clean it up.
 - Do not answer the request. Only output the rewritten prompt.`
 
-type RewriteContext = Pick<ExtensionContext, "hasUI" | "model" | "modelRegistry" | "ui">
+type RewriteContext = Pick<ExtensionContext, "hasUI" | "model" | "modelRegistry" | "ui" | "signal">
 
 function hasClarifyMarker(text: string): boolean {
 	const value = String(text ?? "")
@@ -37,8 +37,8 @@ function notify(ctx: RewriteContext, message: string, type: "info" | "warning" |
 	if (ctx.hasUI) ctx.ui.notify(message, type)
 }
 
-function currentModel(ctx: RewriteContext): Model<Api> | null {
-	if (ctx.model) return ctx.model as Model<Api>
+function currentModel(ctx: RewriteContext): ExtensionContext["model"] | null {
+	if (ctx.model) return ctx.model
 	notify(ctx, "No current model selected for /clarify.", "error")
 	return null
 }
@@ -55,29 +55,22 @@ async function rewritePrompt(text: string, ctx: RewriteContext): Promise<string 
 
 	ctx.ui.setStatus(STATUS_KEY, `Clarifying with ${model.provider}/${model.id}…`)
 	try {
-		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model)
-		if (!auth.ok) throw new Error(auth.error)
-		if (!auth.apiKey) throw new Error(`No API key for ${model.provider}`)
-
 		const message: UserMessage = {
 			role: "user",
 			content: [{ type: "text", text: raw }],
 			timestamp: Date.now(),
 		}
 
-		const response = await complete(
-			model,
-			{ systemPrompt: SYSTEM_PROMPT, messages: [message] },
-			{
-				apiKey: auth.apiKey,
-				headers: auth.headers,
-				env: auth.env,
-				cacheRetention: "none",
-				maxTokens: 2_000,
-			},
-		)
+		const response = await ctx.modelRegistry
+			.streamSimple(
+				model,
+				{ systemPrompt: SYSTEM_PROMPT, messages: [message] },
+				{ signal: ctx.signal, cacheRetention: "none", maxTokens: 2_000 },
+			)
+			.result()
 
 		if (response.stopReason === "aborted") return null
+		if (response.stopReason === "error") throw new Error(response.errorMessage ?? "/clarify failed")
 
 		const rewritten = response.content
 			.filter((part): part is { type: "text"; text: string } => part.type === "text" && typeof part.text === "string")

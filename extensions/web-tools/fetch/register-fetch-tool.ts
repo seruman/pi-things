@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent"
+import { Type } from "typebox"
 import { type FetchDetails, type FetchFormat, type FetchMode, fetchParams } from "./fetch-lib"
 import { renderFetchCall, renderFetchResult } from "./fetch-ui"
 
@@ -10,6 +11,37 @@ type FetchExecutor = (
 ) => Promise<{ url: string; title: string; content: string; error: string | null }>
 
 const MAX_TOTAL_OUTPUT_CHARS = 150_000
+
+const fetchSuccessSchema = Type.Object(
+	{
+		status: Type.Literal("success"),
+		error: Type.Null(),
+		mode: Type.Union([Type.Literal("http"), Type.Literal("rendered")]),
+		url: Type.String({ maxLength: 8192 }),
+		title: Type.String({ maxLength: 4096 }),
+		content: Type.String({ maxLength: 30_000 }),
+		truncated: Type.Boolean(),
+		originalChars: Type.Integer({ minimum: 0 }),
+	},
+	{ additionalProperties: false },
+)
+
+const fetchOutputSchema = Type.Union([
+	fetchSuccessSchema,
+	Type.Object(
+		{
+			status: Type.Literal("error"),
+			error: Type.String({ maxLength: 4096 }),
+			mode: Type.Union([Type.Literal("http"), Type.Literal("rendered")]),
+			url: Type.String({ maxLength: 8192 }),
+		},
+		{ additionalProperties: false },
+	),
+])
+
+function fetchError(url: string, mode: FetchMode, error: string) {
+	return { status: "error" as const, error: error.slice(0, 4096), mode, url: url.slice(0, 8192) }
+}
 
 function createAbortError(): Error {
 	return new DOMException("aborted", "AbortError")
@@ -55,6 +87,7 @@ export function registerFetchTool(
 				? "Fetch URL content through browser rendering"
 				: "Fetch URL content with regular HTTP",
 		parameters: fetchParams,
+		outputSchema: fetchOutputSchema,
 		async execute(_toolCallId, params, signal, onUpdate, _ctx: ExtensionContext) {
 			if (signal?.aborted) throw createAbortError()
 
@@ -62,6 +95,7 @@ export function registerFetchTool(
 			if (!url) {
 				return {
 					content: [{ type: "text", text: "Error: url is required" }],
+					structuredContent: fetchError(url, config.mode, "url is required"),
 					isError: true,
 					details: { error: "url is required", mode: config.mode },
 				}
@@ -86,6 +120,7 @@ export function registerFetchTool(
 				const message = error instanceof Error ? error.message : String(error)
 				return {
 					content: [{ type: "text", text: `Error: ${message}` }],
+					structuredContent: fetchError(url, config.mode, message),
 					isError: true,
 					details: { error: message, mode: config.mode, durationMs: Date.now() - startedAt, urlCount: 1 },
 				}
@@ -112,6 +147,19 @@ export function registerFetchTool(
 			const durationMs = Date.now() - startedAt
 			return {
 				content: [{ type: "text", text: output }],
+				structuredContent: result.error
+					? fetchError(result.url, config.mode, result.error)
+					: {
+							status: "success",
+							error: null,
+							mode: config.mode,
+							url: result.url.slice(0, 8192),
+							title: result.title.slice(0, 4096),
+							content: result.content,
+							truncated:
+								result.truncated || aggregateTruncated || result.url.length > 8192 || result.title.length > 4096,
+							originalChars,
+						},
 				isError: Boolean(result.error),
 				details: {
 					mode: config.mode,

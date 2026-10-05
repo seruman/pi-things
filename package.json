@@ -14,20 +14,20 @@
     "format": "biome format --write .",
     "check": "biome check .",
     "check:write": "biome check --write .",
-    "test:pi-safety": "bun test ./extensions/pi-safety/*.integration.ts && bun test extensions/pi-safety/*.test.ts",
+    "test:pi-safety": "bun --no-env-file test extensions/pi-safety/*.test.ts",
     "test:shell-leash": "bun test extensions/shell-leash/*.test.ts",
     "test:split-handoff": "bun test extensions/split-handoff.test.ts",
     "typecheck:web-tools": "bunx tsc -p extensions/web-tools/tsconfig.json",
     "typecheck:pi-safety": "bunx tsc -p extensions/pi-safety/tsconfig.json",
     "typecheck:shell-leash": "bunx tsc -p extensions/shell-leash/tsconfig.json",
-    "typecheck:code-mode": "bunx tsc -p extensions/code-mode/tsconfig.json",
+    "typecheck:subagents": "bunx tsc -p extensions/subagents/tsconfig.json",
     "typecheck:single-extensions": "bunx tsc -p extensions/tsconfig.json",
-    "typecheck": "bun run typecheck:web-tools && bun run typecheck:pi-safety && bun run typecheck:shell-leash && bun run typecheck:code-mode && bun run typecheck:single-extensions"
+    "typecheck": "bun run typecheck:web-tools && bun run typecheck:pi-safety && bun run typecheck:shell-leash && bun run typecheck:subagents && bun run typecheck:single-extensions"
   },
   "pi": {
     "extensions": [
       "./extensions/web-tools/index.ts",
-      "./extensions/code-mode/index.ts",
+      "./extensions/subagents/index.ts",
       "./extensions/split-fork.ts",
       "./extensions/split-handoff.ts",
       "./extensions/goal.ts",
@@ -39,7 +39,6 @@
     "skills": ["./skills", "./extensions/web-tools/skills"]
   },
   "dependencies": {
-    "@jitl/quickjs-singlefile-mjs-release-sync": "^0.32.0",
     "defuddle": "^0.15.0",
     "diff": "8.0.4",
     "glob-to-regexp": "0.4.1",
@@ -47,8 +46,6 @@
     "just-bash": "^2.14.2",
     "linkedom": "^0.18.12",
     "minimatch": "10.2.5",
-    "quickjs-emscripten-core": "^0.32.0",
-    "typescript": "^6.0.0-dev.20260416",
     "yaml": "^2.8.1",
     "zod": "^3.24.1"
   },
@@ -61,13 +58,14 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
-    "@earendil-works/pi-agent-core": "0.85.1",
-    "@earendil-works/pi-ai": "0.85.1",
-    "@earendil-works/pi-coding-agent": "0.85.1",
-    "@earendil-works/pi-tui": "0.85.1",
+    "@earendil-works/pi-agent-core": "1.0.3",
+    "@earendil-works/pi-ai": "1.0.3",
+    "@earendil-works/pi-coding-agent": "1.0.3",
+    "@earendil-works/pi-tui": "1.0.3",
     "@types/bun": "1.3.13",
     "@types/glob-to-regexp": "0.4.4",
     "@types/node": "^24.4.0",
-    "typebox": "1.3.7"
+    "typebox": "1.3.7",
+    "typescript": "^6.0.0-dev.20260416"
   }
 }

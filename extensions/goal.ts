@@ -180,20 +180,21 @@ function formatElapsedSeconds(totalSeconds: number): string {
 	return `${remainingSeconds}s`
 }
 
-function assistantUsageTokens(messages: unknown[]): number {
+function operationUsageTokens(messages: unknown[]): number {
 	let total = 0
 	for (const message of messages) {
 		if (!message || typeof message !== "object") continue
 		const msg = message as {
 			role?: string
-			usage?: { input?: number; output?: number; cacheRead?: number; totalTokens?: number }
+			usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; totalTokens?: number }
 		}
-		if (msg.role !== "assistant" || !msg.usage) continue
-		const input = Math.max(0, msg.usage.input ?? 0)
-		const cacheRead = Math.max(0, msg.usage.cacheRead ?? 0)
-		const output = Math.max(0, msg.usage.output ?? 0)
-		const measured = Math.max(0, input - cacheRead) + output
-		total += measured > 0 ? measured : Math.max(0, msg.usage.totalTokens ?? 0)
+		if ((msg.role !== "assistant" && msg.role !== "toolResult") || !msg.usage) continue
+		// input excludes cached tokens; nested usage is on its top-level tool result.
+		total += Math.max(
+			0,
+			msg.usage.totalTokens ??
+				(msg.usage.input ?? 0) + (msg.usage.output ?? 0) + (msg.usage.cacheRead ?? 0) + (msg.usage.cacheWrite ?? 0),
+		)
 	}
 	return total
 }
@@ -388,10 +389,6 @@ function lastAssistantMessage(messages: Array<{ role?: string; stopReason?: stri
 	return undefined
 }
 
-function wasLastAssistantAborted(messages: Array<{ role?: string; stopReason?: string }>): boolean {
-	return lastAssistantMessage(messages)?.stopReason === "aborted"
-}
-
 function goalStopStatusForAssistantError(message: { errorMessage?: string } | undefined): GoalStatus {
 	const errorMessage = message?.errorMessage ?? ""
 	return /\b(usage|rate|quota|limit)\b/i.test(errorMessage) ? "usageLimited" : "blocked"
@@ -403,6 +400,8 @@ export default function goalExtension(pi: ExtensionAPI) {
 	let activeGoalIdAtAgentStart: string | null = null
 	let continuationQueued = false
 	let goalCompactionInFlight = false
+	let settlementBoundaryReached = false
+	let lastAssistantAtAgentEnd: ReturnType<typeof lastAssistantMessage>
 
 	function currentGoalSnapshot(): Goal | null {
 		if (!goal) return null
@@ -666,14 +665,16 @@ export default function goalExtension(pi: ExtensionAPI) {
 
 	pi.on("agent_start", async (_event, _ctx) => {
 		continuationQueued = false
+		settlementBoundaryReached = false
 		activeGoalIdAtAgentStart = goal?.status === "active" ? goal.id : null
 	})
 
 	pi.on("agent_end", async (event, ctx) => {
+		lastAssistantAtAgentEnd = lastAssistantMessage(event.messages)
 		if (!goal) return
 		let changed = false
 		if (activeGoalIdAtAgentStart === goal.id) {
-			const tokens = assistantUsageTokens(event.messages as unknown[])
+			const tokens = operationUsageTokens(event.messages)
 			if (tokens > 0) {
 				goal.tokensUsed += tokens
 				goal.updatedAt = nowSeconds()
@@ -683,19 +684,24 @@ export default function goalExtension(pi: ExtensionAPI) {
 		if (goal.status === "active" && accountElapsed()) {
 			changed = true
 		}
-		if (maybeApplyBudgetLimit()) {
-			changed = true
-			showGoalMessage(budgetLimitMessage(goal))
-		}
 		if (changed) persist("account")
 		updateStatus(ctx)
 		activeGoalIdAtAgentStart = null
+	})
 
-		if (goal.status !== "active") return
-
-		const lastAssistant = lastAssistantMessage(event.messages)
-		if (lastAssistant?.stopReason === "error") {
-			const status = goalStopStatusForAssistantError(lastAssistant)
+	// Recovery can continue after agent_end.
+	pi.on("agent_before_settle", async (event, ctx) => {
+		settlementBoundaryReached = true
+		if (!goal || goal.status !== "active") return
+		if (maybeApplyBudgetLimit()) {
+			persist("account")
+			showGoalMessage(budgetLimitMessage(goal))
+			updateStatus(ctx)
+			return
+		}
+		if (event.outcome === "error") {
+			// Recovery may omit the failed assistant from projected context.
+			const status = goalStopStatusForAssistantError(lastAssistantAtAgentEnd)
 			setGoalStatus(status)
 			persist("status")
 			showGoalMessage(
@@ -705,27 +711,30 @@ export default function goalExtension(pi: ExtensionAPI) {
 			return
 		}
 
-		if (wasLastAssistantAborted(event.messages)) {
-			if (!ctx.hasUI) {
-				setGoalStatus("paused")
-				persist("status")
-				updateStatus(ctx)
-				return
-			}
-			const pause = await ctx.ui.confirm(
+		if (event.outcome === "aborted" && (await pauseAfterAbort(ctx))) return
+		queueContinuation(ctx)
+	})
+
+	async function pauseAfterAbort(ctx: ExtensionContext): Promise<boolean> {
+		if (!goal || goal.status !== "active") return false
+		const pause =
+			!ctx.hasUI ||
+			(await ctx.ui.confirm(
 				"Pause active goal?",
 				"Operation aborted. Pause this goal instead of automatically continuing?",
-			)
-			if (pause) {
-				setGoalStatus("paused")
-				persist("status")
-				showGoalMessage(`Goal paused\n\n${goalSummary(goal)}`)
-				updateStatus(ctx)
-				return
-			}
-		}
+			))
+		if (!pause) return false
+		setGoalStatus("paused")
+		persist("status")
+		showGoalMessage(`Goal paused\n\n${goalSummary(goal)}`)
+		updateStatus(ctx)
+		return true
+	}
 
-		queueContinuation(ctx)
+	pi.on("agent_settled", async (_event, ctx) => {
+		// Explicit abort (including during retry/compaction) bypasses before-settle.
+		if (settlementBoundaryReached || !goal || goal.status !== "active") return
+		if (!(await pauseAfterAbort(ctx))) queueContinuation(ctx)
 	})
 
 	pi.on("context", async (event) => {
