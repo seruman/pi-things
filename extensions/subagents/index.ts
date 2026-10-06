@@ -1,7 +1,6 @@
 import { realpathSync } from "node:fs"
-import { dirname, resolve } from "node:path"
-import { fileURLToPath } from "node:url"
-import { type Api, Type } from "@earendil-works/pi-ai"
+import { resolve } from "node:path"
+import { Type } from "@earendil-works/pi-ai"
 import {
 	type AgentSession,
 	type ExtensionAPI,
@@ -19,7 +18,6 @@ import {
 import { assertConfiguredExtensionsExist } from "./resources"
 import { childUsage } from "./usage"
 
-const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..")
 const parameters = Type.Object({
 	prompt: Type.String({ minLength: 1 }),
 	cwd: Type.Optional(Type.String()),
@@ -134,7 +132,6 @@ export function createSubagentsExtension(options: { createServices?: typeof crea
 								settingsManager,
 								modelRuntimeSignal: controller.signal,
 								resourceLoaderOptions: {
-									additionalExtensionPaths: [packageRoot],
 									extensionFactories: [
 										{ name: "codemode", factory: createCodemodeExtension(), builtin: true, replaceable: true },
 										{ name: "tool-search", factory: createToolSearchExtension(), builtin: true, replaceable: true },
@@ -152,37 +149,11 @@ export function createSubagentsExtension(options: { createServices?: typeof crea
 							]
 							if (errors.length) throw new Error(errors.join("\n"))
 							if (!selection) throw new Error("No parent model selected")
-							const selectedProvider = selection.slice(0, selection.indexOf("/"))
-							const delegatedProviders = new Set<string>()
-							for (const id of new Set([...parentRegistry.getRegisteredProviderIds(), selectedProvider])) {
-								const provider = parentRegistry.getProvider(id)
-								const parentModel = parentRegistry.getAll().find((model) => model.provider === id)
-								if (provider && parentModel) {
-									// Keep request-time auth and model headers in the parent registry.
-									delegatedProviders.add(id)
-									services.modelRuntime.registerNativeProvider({
-										...provider,
-										auth: {
-											apiKey: {
-												name: "Parent registry delegation",
-												async check() {
-													return { type: "api_key" }
-												},
-												async resolve({ signal }) {
-													signal.throwIfAborted()
-													return { auth: {} }
-												},
-											},
-										},
-										stream: (model, context, request) => parentRegistry.stream<Api>(model, context, request),
-										streamSimple: (model, context, request) => parentRegistry.streamSimple(model, context, request),
-									})
-								} else {
-									const native = parentRegistry.getRegisteredNativeProvider(id)
-									const config = parentRegistry.getRegisteredProviderConfig(id)
-									if (native) services.modelRuntime.registerNativeProvider(native)
-									if (config) services.modelRuntime.registerProvider(id, config)
-								}
+							for (const id of parentRegistry.getRegisteredProviderIds()) {
+								const native = parentRegistry.getRegisteredNativeProvider(id)
+								const config = parentRegistry.getRegisteredProviderConfig(id)
+								if (native) services.modelRuntime.registerNativeProvider(native)
+								if (config) services.modelRuntime.registerProvider(id, config)
 							}
 							await services.modelRuntime.refresh({ allowNetwork: false, signal: controller.signal })
 							controller.signal.throwIfAborted()
@@ -206,23 +177,6 @@ export function createSubagentsExtension(options: { createServices?: typeof crea
 								noTools: params.noTools,
 							})
 							session = created.session
-							const child = session
-							const localStream = child.agent.streamFunction
-							child.agent.streamFunction = (model, context, request) => {
-								if (!delegatedProviders.has(model.provider)) return localStream(model, context, request)
-								// Model header expressions need the parent's credential environment.
-								const retry = services.settingsManager.getProviderRetrySettings()
-								const idleTimeout = services.settingsManager.getHttpIdleTimeoutMs()
-								return parentRegistry.streamSimple(model, context, {
-									...request,
-									timeoutMs: request?.timeoutMs ?? retry.timeoutMs ?? (idleTimeout === 0 ? 2147483647 : idleTimeout),
-									websocketConnectTimeoutMs:
-										request?.websocketConnectTimeoutMs ?? services.settingsManager.getWebSocketConnectTimeoutMs(),
-									maxRetries: request?.maxRetries ?? retry.maxRetries,
-									maxRetryDelayMs: request?.maxRetryDelayMs ?? retry.maxRetryDelayMs,
-									transformHeaders: (headers) => child.extensionRunner.emitBeforeProviderHeaders(headers),
-								})
-							}
 							controller.signal.throwIfAborted()
 							await session.bindExtensions({
 								mode: "print",
