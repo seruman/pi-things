@@ -1,6 +1,16 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import type { ClassifierResult } from "@earendil-works/pi-ai"
+import { type ClassifierResult, InMemoryCredentialStore } from "@earendil-works/pi-ai"
+import { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent"
 import { PROMPT_LIMIT, TASK_LIMIT, classificationContext, classifyTier, parseClassification } from "./classifier"
+
+const registry = new ModelRegistry(
+	await ModelRuntime.create({
+		credentials: new InMemoryCredentialStore(),
+		modelsPath: null,
+		allowModelNetwork: false,
+		refreshOnCreate: false,
+	}),
+)
 
 const servers: Array<ReturnType<typeof Bun.serve>> = []
 afterEach(() => {
@@ -70,7 +80,7 @@ describe("local classifier", () => {
 			})
 			return Response.json(wire())
 		})
-		const result = await classifyTier(config, input)
+		const result = await classifyTier(config, input, registry)
 		expect(result).toMatchObject({ kind: "classified", tier: "standard", confidence: 0.01, newTask: false })
 		expect(requests).toHaveLength(1)
 		expect(requests[0].url).toBe(`${config.baseUrl}/systemone`)
@@ -87,14 +97,14 @@ describe("local classifier", () => {
 			requests++
 			return new Response("unavailable", { status })
 		})
-		expect(await classifyTier(config, input)).toMatchObject({ kind: "fallback", reason: "classifier-error" })
+		expect(await classifyTier(config, input, registry)).toMatchObject({ kind: "fallback", reason: "classifier-error" })
 		expect(requests).toBe(1)
 	})
 
 	test("a stopped local server records the connection error", async () => {
 		const config = serve(() => new Response("unused"))
 		servers.at(-1)?.stop(true)
-		const result = await classifyTier(config, input)
+		const result = await classifyTier(config, input, registry)
 		expect(result).toMatchObject({
 			kind: "fallback",
 			reason: "classifier-error",
@@ -109,7 +119,7 @@ describe("local classifier", () => {
 				{ status: 404 },
 			),
 		)
-		const result = await classifyTier(config, input)
+		const result = await classifyTier(config, input, registry)
 		expect(result).toMatchObject({
 			kind: "fallback",
 			reason: "classifier-error",
@@ -130,7 +140,7 @@ describe("local classifier", () => {
 			await Bun.sleep(200)
 			return Response.json(wire())
 		})
-		const result = await classifyTier({ ...config, timeoutMs: 30 }, input)
+		const result = await classifyTier({ ...config, timeoutMs: 30 }, input, registry)
 		expect(result).toMatchObject({
 			kind: "fallback",
 			reason: "timeout",
@@ -151,7 +161,7 @@ describe("local classifier", () => {
 			await Bun.sleep(100)
 			return Response.json(wire())
 		})
-		const request = classifyTier(config, input, controller.signal)
+		const request = classifyTier(config, input, registry, controller.signal)
 		await started
 		controller.abort(new Error("caller cancelled"))
 		await expect(request).rejects.toThrow("caller cancelled")
@@ -163,11 +173,13 @@ describe("local classifier", () => {
 			requests++
 			return Response.json(wire())
 		})
-		expect(await classifyTier(config, { ...input, hasImages: true })).toMatchObject({
+		expect(await classifyTier(config, { ...input, hasImages: true }, registry)).toMatchObject({
 			kind: "fallback",
 			reason: "attachments",
 		})
-		await expect(classifyTier(config, input, AbortSignal.abort(new Error("cancelled")))).rejects.toThrow("cancelled")
+		await expect(classifyTier(config, input, registry, AbortSignal.abort(new Error("cancelled")))).rejects.toThrow(
+			"cancelled",
+		)
 		expect(requests).toBe(0)
 	})
 
@@ -180,13 +192,34 @@ describe("local classifier", () => {
 		const config = serve(
 			() => new Response(null, { status: 307, headers: { location: `${destination.baseUrl}/systemone` } }),
 		)
-		expect(await classifyTier(config, input)).toMatchObject({ kind: "fallback", reason: "classifier-error" })
+		expect(await classifyTier(config, input, registry)).toMatchObject({ kind: "fallback", reason: "classifier-error" })
 		expect(redirected).toBe(0)
+	})
+
+	test("provider endpoint overrides cannot send prompts outside the configured local endpoint", async () => {
+		let requests = 0
+		const destination = serve(() => {
+			requests++
+			return Response.json(wire())
+		})
+		const config = serve(() => Response.json(wire()))
+		const overridden = new ModelRegistry(
+			await ModelRuntime.create({
+				credentials: new InMemoryCredentialStore(),
+				modelsPath: null,
+				allowModelNetwork: false,
+				refreshOnCreate: false,
+			}),
+		)
+		overridden.registerProvider("typesafe", { baseUrl: destination.baseUrl })
+		const result = await classifyTier(config, input, overridden)
+		expect(requests).toBe(0)
+		expect(result).toMatchObject({ kind: "classified", tier: "standard" })
 	})
 
 	test("malformed native responses fall back", async () => {
 		const config = serve(() => new Response("not JSON"))
-		expect(await classifyTier(config, input)).toMatchObject({ kind: "fallback", reason: "classifier-error" })
+		expect(await classifyTier(config, input, registry)).toMatchObject({ kind: "fallback", reason: "classifier-error" })
 	})
 })
 

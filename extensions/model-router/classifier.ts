@@ -1,5 +1,5 @@
 import type { ClassifierContext, ClassifierResult, Usage } from "@earendil-works/pi-ai"
-import { classify } from "@earendil-works/pi-ai/api/typesafe-system-one"
+import type { ModelRegistry } from "@earendil-works/pi-coding-agent"
 import { type RouterConfig, TIERS, type Tier } from "./config"
 
 export const PROMPT_LIMIT = 12_000
@@ -41,6 +41,7 @@ export type Classification = {
 export type ClassifyTier = (
 	config: RouterConfig["classifier"],
 	input: RoutingInput,
+	registry: Pick<ModelRegistry, "classify">,
 	signal?: AbortSignal,
 ) => Promise<Classification>
 
@@ -159,20 +160,22 @@ export function parseClassification(
 }
 
 /** Native Pi System One transport, pointed only at the explicitly configured local runtime. */
-export const classifyTier: ClassifyTier = async (config, input, signal) => {
+export const classifyTier: ClassifyTier = async (config, input, registry, signal) => {
 	signal?.throwIfAborted()
 	if (input.hasImages) return { kind: "fallback", reason: "attachments", durationMs: 0 }
 	const start = performance.now()
-	const deadline = AbortSignal.timeout(config.timeoutMs)
+	const timeout = new AbortController()
+	const deadline = timeout.signal
+	const timer = setTimeout(() => timeout.abort(), config.timeoutMs)
 	const requestSignal = signal ? AbortSignal.any([signal, deadline]) : deadline
 	let transportError: ClassifierError | undefined
 	let status: number | undefined
 	const timeoutError = () => ({ message: `Local classification timed out after ${config.timeoutMs} ms` })
 	try {
-		const result = await classify(
+		const result = await registry.classify(
 			{
 				type: "classifier",
-				provider: "model-router-local",
+				provider: "typesafe",
 				id: config.model,
 				name: "Local routing classifier",
 				api: "typesafe-system-one",
@@ -185,7 +188,6 @@ export const classifyTier: ClassifyTier = async (config, input, signal) => {
 			{
 				apiKey: "local",
 				maxRetries: 0,
-				timeoutMs: config.timeoutMs,
 				signal: requestSignal,
 				// Do not let an endpoint redirect local prompt data to a hosted service.
 				fetch: (async (url, options) => {
@@ -216,5 +218,7 @@ export const classifyTier: ClassifyTier = async (config, input, signal) => {
 			durationMs: Math.round(performance.now() - start),
 			error: { ...(deadline.aborted ? timeoutError() : errorDetails(error, input)), status },
 		}
+	} finally {
+		clearTimeout(timer)
 	}
 }
