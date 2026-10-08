@@ -5,6 +5,7 @@ Me just prompting the shit out of LLMs to create things I want in pi.
 ## Things
 
 - [web-search / web-fetch](./extensions/web-tools/README.md)
+- [model-router](./extensions/model-router/README.md)
 - `/split-fork` — clone the current active branch into a new terminal split
 - `/split-handoff <goal>` — open a focused handoff as an editable draft in a fresh, parent-linked split; its first turn performs read-only orientation and waits for approval
 - `/goal`
