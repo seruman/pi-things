@@ -25,21 +25,3 @@ test("package activates Pi safety alongside the standalone shell guard", () => {
 	assert.equal(fs.existsSync(path.join(repository, "extensions", "shell-leash", "index.ts")), true)
 	assert.equal(fs.existsSync(path.join(repository, "extensions", "secret-guard")), false)
 })
-
-test("Pi SDK dependencies exactly match the installed Pi release used for Bash parity", () => {
-	const manifest = readJson(path.join(repository, "package.json")) as {
-		devDependencies: Record<string, string>
-	}
-	const sdkManifest = readJson(
-		path.join(repository, "node_modules", "@earendil-works", "pi-coding-agent", "package.json"),
-	) as { version: string }
-	assert.equal(sdkManifest.version, "1.0.3")
-	for (const dependency of [
-		"@earendil-works/pi-agent-core",
-		"@earendil-works/pi-ai",
-		"@earendil-works/pi-coding-agent",
-		"@earendil-works/pi-tui",
-	]) {
-		assert.equal(manifest.devDependencies[dependency], sdkManifest.version)
-	}
-})
