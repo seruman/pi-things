@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { randomUUID } from "node:crypto"
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
 import {
 	type AssistantMessage,
 	InMemoryCredentialStore,
@@ -74,7 +75,7 @@ function classified(tier: Tier, newTask = true): Classification {
 
 function classifierSequence(...answers: Classification[]) {
 	const inputs: RoutingInput[] = []
-	const classify: ClassifyTier = async (_config, input, signal) => {
+	const classify: ClassifyTier = async (_config, input, _registry, signal) => {
 		signal?.throwIfAborted()
 		inputs.push(structuredClone(input))
 		const answer = answers.shift()
@@ -102,6 +103,7 @@ async function harness(
 		toolFailures?: boolean[]
 		tiers?: TestTiers
 		configFile?: boolean
+		loadFromDisk?: boolean
 		routers?: (providers: { primary: string; alternate: string }) => Record<string, { tiers: RouterConfig["tiers"] }>
 	} = {},
 ) {
@@ -236,6 +238,21 @@ async function harness(
 	await runtime.refresh({ allowNetwork: false })
 	for (const id of [providerId, alternateProviderId]) expect(runtime.hasConfiguredAuth(id)).toBe(true)
 
+	let extensionPath: string | undefined
+	if (options.loadFromDisk) {
+		const extensionDir = join(root, "extension")
+		mkdirSync(join(extensionDir, "node_modules"), { recursive: true })
+		symlinkSync(dirname(fileURLToPath(import.meta.resolve("zod/package.json"))), join(extensionDir, "node_modules/zod"))
+		for (const file of ["index.ts", "router.ts", "classifier.ts", "config.ts"]) {
+			copyFileSync(join(import.meta.dir, file), join(extensionDir, file))
+		}
+		extensionPath = join(extensionDir, "test-entry.ts")
+		writeFileSync(
+			extensionPath,
+			`import { createModelRouterExtension } from "./index.ts"\nexport default createModelRouterExtension({ configPath: ${JSON.stringify(configPath)} })\n`,
+		)
+	}
+
 	const boundaries: string[] = []
 	const extensionErrors: unknown[] = []
 	let toolExecutions = 0
@@ -263,8 +280,9 @@ async function harness(
 			noThemes: true,
 			noContextFiles: true,
 			systemPrompt: "You are an isolated SDK test agent.",
+			additionalExtensionPaths: extensionPath ? [extensionPath] : [],
 			extensionFactories: [
-				createModelRouterExtension({ configPath, classify: options.classify }),
+				...(extensionPath ? [] : [createModelRouterExtension({ configPath, classify: options.classify })]),
 				(pi) => {
 					pi.on("before_agent_start", (event) => {
 						boundaries.push(event.prompt)
@@ -890,7 +908,7 @@ describe("model-router SDK integration", () => {
 		h.assertHealthy()
 	})
 
-	test("uses Pi's native System One transport on loopback and falls back to strong for an invalid answer", async () => {
+	test("loads from disk without a local Pi SDK, classifies on loopback, and falls back for an invalid answer", async () => {
 		const requests: Array<{ method: string; path: string; body: unknown }> = []
 		const answers = [
 			{
@@ -928,8 +946,7 @@ describe("model-router SDK integration", () => {
 		})
 		cleanups.push(() => server.stop(true))
 		const h = await harness({
-			// No injected classify: exercise config -> classifyTier -> installed
-			// pi-ai HTTP transport -> parsing -> real agent dispatch.
+			loadFromDisk: true,
 			classifier: { baseUrl: `http://127.0.0.1:${server.port}/v1`, model: "local-test-classifier", timeoutMs: 2000 },
 			steps: [{}, {}, {}],
 		})

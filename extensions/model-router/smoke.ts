@@ -3,6 +3,8 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
+import { InMemoryCredentialStore } from "@earendil-works/pi-ai"
+import { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent"
 import { classifyTier } from "./classifier"
 import { configSchema } from "./config"
 import { DECISION_ENTRY } from "./router"
@@ -34,9 +36,16 @@ writeFileSync(
 	join(agentDir, "settings.json"),
 	JSON.stringify({ cacheWarming: "off", retry: { enabled: false }, compaction: { enabled: false } }),
 )
+const runtime = await ModelRuntime.create({
+	credentials: new InMemoryCredentialStore(),
+	modelsPath: null,
+	allowModelNetwork: false,
+	refreshOnCreate: false,
+})
 const prewarm = await classifyTier(
 	{ ...config.classifier, timeoutMs: 30_000 },
 	{ prompt: "Prewarm the local classifier", hasImages: false },
+	new ModelRegistry(runtime),
 )
 assert.equal(prewarm.kind, "classified", `Local classifier unavailable: ${JSON.stringify(prewarm)}`)
 const directory = fileURLToPath(new URL(".", import.meta.url))

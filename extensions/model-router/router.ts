@@ -103,6 +103,7 @@ export function createRouter(config: RouterConfig, record: RecordDecision, class
 				const decision = await classify(
 					config.classifier,
 					{ ...input, currentTier: state?.tier, task: state?.task },
+					ctx.modelRegistry,
 					request.signal,
 				)
 				request.signal?.throwIfAborted()
