@@ -86,7 +86,7 @@ function classifierSequence(...answers: Classification[]) {
 	return { classify, inputs }
 }
 
-type Step = { tool?: boolean; wait?: Promise<void>; started?: () => void; error?: string }
+type Step = { tool?: boolean; wait?: Promise<void>; started?: () => void; error?: string; text?: string }
 type Dispatch = {
 	model: string
 	provider: string
@@ -211,9 +211,10 @@ async function harness(
 				} else {
 					message.content.push({ type: "text", text: "" })
 					output.push({ type: "text_start", contentIndex: 0, partial: message })
-					message.content[0] = { type: "text", text: "done" }
-					output.push({ type: "text_delta", contentIndex: 0, delta: "done", partial: message })
-					output.push({ type: "text_end", contentIndex: 0, content: "done", partial: message })
+					const text = step.text ?? "done"
+					message.content[0] = { type: "text", text }
+					output.push({ type: "text_delta", contentIndex: 0, delta: text, partial: message })
+					output.push({ type: "text_end", contentIndex: 0, content: text, partial: message })
 					message.stopReason = "stop"
 				}
 				output.push({ type: "done", reason: message.stopReason, message })
@@ -246,7 +247,7 @@ async function harness(
 		const extensionDir = join(root, "extension")
 		mkdirSync(join(extensionDir, "node_modules"), { recursive: true })
 		symlinkSync(dirname(fileURLToPath(import.meta.resolve("zod/package.json"))), join(extensionDir, "node_modules/zod"))
-		for (const file of ["index.ts", "router.ts", "classifier.ts", "config.ts"]) {
+		for (const file of ["index.ts", "router.ts", "classifier.ts", "config.ts", "context.ts"]) {
 			copyFileSync(join(import.meta.dir, file), join(extensionDir, file))
 		}
 		extensionPath = join(extensionDir, "test-entry.ts")
@@ -449,7 +450,7 @@ describe("model-router SDK integration", () => {
 			expect(h.session.model?.id).toBe(name)
 			expect(h.session.thinkingLevel).toBe("off")
 		}
-		expect(classifier.inputs).toEqual([
+		expect(classifier.inputs).toMatchObject([
 			{ prompt: "Test router task", hasImages: false },
 			{ prompt: "Other router task", hasImages: false },
 			{ prompt: "Continue test at standard", hasImages: false, currentTier: "trivial", task: "Test router task" },
@@ -505,7 +506,9 @@ describe("model-router SDK integration", () => {
 					throw new Error(`Run ended before the queue boundary: ${JSON.stringify(h.session.messages)}`)
 				}),
 			])
-			expect(classifier.inputs).toEqual([{ prompt: "Implement the original task", hasImages: false }])
+			expect(classifier.inputs).toEqual([
+				{ prompt: "Implement the original task", hasImages: false, recentConversation: "" },
+			])
 			expect(h.toolExecutions).toBe(1)
 			expect(await h.session.steer("Use the existing helper")).toBe("queued")
 			expect(await h.session.followUp("Also check the result")).toBe("queued")
@@ -530,14 +533,19 @@ describe("model-router SDK integration", () => {
 		])
 		await h.session.prompt("Now review that implementation")
 		expect(classifier.inputs).toEqual([
-			{ prompt: "Implement the original task", hasImages: false },
+			{ prompt: "Implement the original task", hasImages: false, recentConversation: "" },
 			{
 				prompt: "Now review that implementation",
 				hasImages: false,
 				currentTier: "trivial",
 				task: "Implement the original task",
+				recentConversation: expect.stringContaining("assistant:\ndone"),
 			},
 		])
+		expect(classifier.inputs[1].recentConversation).toContain("user:\nUse the existing helper")
+		expect(classifier.inputs[1].recentConversation).toContain("user:\nAlso check the result")
+		expect(classifier.inputs[1].recentConversation).toContain("toolResult (probe)")
+		expect(classifier.inputs[1].recentConversation).not.toContain("Now review that implementation")
 		expect(h.boundaries).toEqual(["Implement the original task", "Now review that implementation"])
 		expect(routes(h.dispatches).at(-1)).toEqual(["middle", "medium"])
 		expect(h.dispatches.every((dispatch) => dispatch.provider === h.providerId)).toBe(true)
@@ -616,6 +624,7 @@ describe("model-router SDK integration", () => {
 		await h.session.prompt("Continue A")
 		expect(classifier.inputs[2]).toEqual({
 			prompt: "Continue A",
+			recentConversation: "user:\nTask A: update a label\n\nassistant:\ndone",
 			hasImages: false,
 			currentTier: "trivial",
 			task: "Task A: update a label",
@@ -638,6 +647,7 @@ describe("model-router SDK integration", () => {
 		await resumed.prompt("Continue after resume")
 		expect(classifier.inputs[3]).toEqual({
 			prompt: "Continue after resume",
+			recentConversation: "user:\nTask A: update a label\n\nassistant:\ndone\n\nuser:\nContinue A\n\nassistant:\ndone",
 			hasImages: false,
 			currentTier: "standard",
 			task: "Task A: update a label",
@@ -647,6 +657,8 @@ describe("model-router SDK integration", () => {
 		await resumed.prompt("Continue B")
 		expect(classifier.inputs[4]).toEqual({
 			prompt: "Continue B",
+			recentConversation:
+				"user:\nTask A: update a label\n\nassistant:\ndone\n\nuser:\nTask B: redesign the architecture\n\nassistant:\ndone",
 			hasImages: false,
 			currentTier: "strong",
 			task: "Task B: redesign the architecture",
@@ -816,6 +828,7 @@ describe("model-router SDK integration", () => {
 		await h.session.prompt("Fresh follow-up")
 		expect(classifier.inputs[1]).toEqual({
 			prompt: "Fresh follow-up",
+			recentConversation: "user:\nInitial task\n\nassistant:\ndone",
 			hasImages: false,
 			currentTier: "trivial",
 			task: "Initial task",
@@ -907,6 +920,8 @@ describe("model-router SDK integration", () => {
 		await h.session.prompt("Return to routing")
 		expect(classifier.inputs[1]).toEqual({
 			prompt: "Return to routing",
+			recentConversation:
+				"user:\nPinned physical task\n\nassistant:\ndone\n\nuser:\nRouted task\n\nassistant:\ndone\n\nuser:\nPinned again\n\nassistant:\ndone",
 			hasImages: false,
 			currentTier: "trivial",
 			task: "Routed task",
@@ -1035,7 +1050,7 @@ describe("model-router SDK integration", () => {
 			loadFromDisk: true,
 			minConfidence: 0.85,
 			classifier: { baseUrl: `http://127.0.0.1:${server.port}/v1`, model: "local-test-classifier", timeoutMs: 2000 },
-			steps: [{}, {}, {}],
+			steps: [{ text: "I propose a two-step migration with rollback." }, {}, {}],
 		})
 		await h.session.prompt("Implement the local task")
 		await h.session.prompt("Yes, continue")
@@ -1048,11 +1063,17 @@ describe("model-router SDK integration", () => {
 		])
 		expect(requests[0].body).toMatchObject({
 			model: "local-test-classifier",
-			state: { prompt: "Implement the local task", currentTier: null, establishingTask: null },
+			state: { prompt: "Implement the local task", currentTier: null, establishingTask: null, recentConversation: "" },
 			questions: { tier: { type: "choice" }, newTask: { type: "noul" } },
 		})
 		expect(requests[1].body).toMatchObject({
-			state: { prompt: "Yes, continue", currentTier: "standard", establishingTask: "Implement the local task" },
+			state: {
+				prompt: "Yes, continue",
+				currentTier: "standard",
+				establishingTask: "Implement the local task",
+				recentConversation:
+					"user:\nImplement the local task\n\nassistant:\nI propose a two-step migration with rollback.",
+			},
 		})
 		expect(requests[2].body).toMatchObject({
 			state: { currentTier: "strong", establishingTask: "Implement the local task" },
@@ -1063,6 +1084,9 @@ describe("model-router SDK integration", () => {
 			["big", "high"],
 		])
 		const decisions = customEntries(h.session, DECISION_ENTRY)
+		expect(JSON.stringify(decisions)).not.toContain("recentConversation")
+		expect(JSON.stringify(decisions)).not.toContain("I propose a two-step migration")
+		expect(JSON.stringify(decisions)).not.toContain("Yes, continue")
 		expect(decisions[0].data).toMatchObject({
 			action: "classified",
 			tier: "standard",

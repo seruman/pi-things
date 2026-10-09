@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { type ClassifierResult, InMemoryCredentialStore } from "@earendil-works/pi-ai"
 import { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent"
 import { PROMPT_LIMIT, TASK_LIMIT, classificationContext, classifyTier, parseClassification } from "./classifier"
+import { HISTORY_LIMIT } from "./context"
 
 const registry = new ModelRegistry(
 	await ModelRuntime.create({
@@ -61,7 +62,13 @@ const input = { prompt: "continue", hasImages: false, currentTier: "standard" as
 
 describe("local classifier", () => {
 	test("bounds prompt/task and sends abstract tiers, not physical-model names", () => {
-		const context = classificationContext({ ...input, prompt: "p".repeat(30_000), task: "t".repeat(30_000) })
+		const context = classificationContext({
+			...input,
+			prompt: "p".repeat(30_000),
+			task: "t".repeat(30_000),
+			recentConversation: "h".repeat(30_000),
+		})
+		expect((context.state.recentConversation as string).length).toBe(HISTORY_LIMIT)
 		expect((context.state.prompt as string).length).toBe(PROMPT_LIMIT)
 		expect((context.state.establishingTask as string).length).toBe(TASK_LIMIT)
 		expect(context.state.currentTier).toBe("standard")
@@ -131,6 +138,17 @@ describe("local classifier", () => {
 		expect(JSON.stringify(result)).not.toContain(input.prompt)
 		expect(JSON.stringify(result)).not.toContain(input.task)
 		expect(JSON.stringify(result)).not.toContain("secret-token")
+	})
+
+	test("classifier errors redact echoed history and individual transcript lines", async () => {
+		const recentConversation = "user:\nPrivate clarification\n\nassistant:\nPrivate proposal"
+		const config = serve(() =>
+			Response.json({ error: `Rejected ${recentConversation}; Private proposal` }, { status: 500 }),
+		)
+		const result = await classifyTier(config, { ...input, recentConversation }, registry)
+		expect(result).toMatchObject({ kind: "fallback", reason: "classifier-error" })
+		expect(JSON.stringify(result)).not.toContain("Private clarification")
+		expect(JSON.stringify(result)).not.toContain("Private proposal")
 	})
 
 	test("timeout falls back and does not retry", async () => {
