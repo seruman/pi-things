@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { type ClassifierResult, InMemoryCredentialStore } from "@earendil-works/pi-ai"
 import { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent"
 import { PROMPT_LIMIT, TASK_LIMIT, classificationContext, classifyTier, parseClassification } from "./classifier"
+import { configSchema } from "./config"
 import { HISTORY_LIMIT } from "./context"
 
 const registry = new ModelRegistry(
@@ -61,6 +62,18 @@ function wire() {
 const input = { prompt: "continue", hasImages: false, currentTier: "standard" as const, task: "Build a CLI" }
 
 describe("local classifier", () => {
+	test("default deadline allows a cold response beyond the former two-second limit", async () => {
+		const endpoint = serve(async () => {
+			await Bun.sleep(2100)
+			return Response.json(wire())
+		})
+		const { classifier } = configSchema.parse({ classifier: { baseUrl: endpoint.baseUrl, model: endpoint.model } })
+		const result = await classifyTier(classifier, input, registry)
+		expect(classifier.timeoutMs).toBe(10000)
+		expect(result.kind).toBe("classified")
+		expect(result.durationMs).toBeGreaterThanOrEqual(2000)
+	})
+
 	test("bounds prompt/task and sends abstract tiers, not physical-model names", () => {
 		const context = classificationContext({
 			...input,

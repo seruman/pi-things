@@ -18,6 +18,7 @@ import {
 	type AgentSession,
 	DefaultResourceLoader,
 	type ExtensionFactory,
+	type ExtensionUIContext,
 	ModelRuntime,
 	SessionManager,
 	SettingsManager,
@@ -106,6 +107,7 @@ async function harness(
 		tiers?: TestTiers
 		configFile?: boolean
 		loadFromDisk?: boolean
+		captureUI?: boolean
 		routers?: (providers: { primary: string; alternate: string }) => Record<string, { tiers: RouterConfig["tiers"] }>
 	} = {},
 ) {
@@ -247,7 +249,7 @@ async function harness(
 		const extensionDir = join(root, "extension")
 		mkdirSync(join(extensionDir, "node_modules"), { recursive: true })
 		symlinkSync(dirname(fileURLToPath(import.meta.resolve("zod/package.json"))), join(extensionDir, "node_modules/zod"))
-		for (const file of ["index.ts", "router.ts", "classifier.ts", "config.ts", "context.ts"]) {
+		for (const file of ["index.ts", "router.ts", "classifier.ts", "config.ts", "progress.ts", "context.ts"]) {
 			copyFileSync(join(import.meta.dir, file), join(extensionDir, file))
 		}
 		extensionPath = join(extensionDir, "test-entry.ts")
@@ -259,6 +261,8 @@ async function harness(
 
 	const boundaries: string[] = []
 	const extensionErrors: unknown[] = []
+	const widgets: (string[] | undefined)[] = []
+	const notifications: string[] = []
 	let toolExecutions = 0
 	const sessions: AgentSession[] = []
 	cleanups.push(async () => {
@@ -325,6 +329,15 @@ async function harness(
 		sessions.push(session)
 		expect(modelFallbackMessage).toBeUndefined()
 		await session.bindExtensions({
+			...(options.captureUI
+				? {
+						mode: "tui" as const,
+						uiContext: {
+							setWidget: (_key: string, lines: string[] | undefined) => widgets.push(lines),
+							notify: (message: string) => notifications.push(message),
+						} as unknown as ExtensionUIContext,
+					}
+				: {}),
 			onError: (error) => {
 				extensionErrors.push(error)
 			},
@@ -342,6 +355,8 @@ async function harness(
 		alternateProviderId,
 		dispatches,
 		boundaries,
+		widgets,
+		notifications,
 		open,
 		get toolExecutions() {
 			return toolExecutions
@@ -372,6 +387,126 @@ function routes(dispatches: Dispatch[]) {
 }
 
 describe("model-router SDK integration", () => {
+	test("shows local classification progress before physical dispatch and a brief selected-model result", async () => {
+		const started = gate()
+		const release = gate()
+		const h = await harness({
+			captureUI: true,
+			classify: async (_config, _input, _registry, signal) => {
+				started.open()
+				await waitForGate(release.promise, signal)
+				return classified("trivial")
+			},
+			steps: [{}],
+		})
+		const run = h.session.prompt("Fresh task")
+		await started.promise
+		expect(h.widgets.at(-1)?.[0]).toContain("Routing · local clef-flash:9b-mxfp8 ·")
+		expect(h.widgets.at(-1)?.[0]).toContain("/ 10.0s")
+		expect(h.dispatches).toEqual([])
+		release.open()
+		await run
+		expect(h.widgets.some((lines) => lines?.[0]?.includes(`Routing complete · ${h.providerId}/small`))).toBe(true)
+		expect(h.widgets.at(-1)).toBeUndefined()
+		h.assertHealthy()
+	})
+
+	test.each(["timeout", "classifier-error", "invalid-answer"] as const)(
+		"shows explicit strong fallback after %s and clears the pending indicator",
+		async (reason) => {
+			const h = await harness({
+				captureUI: true,
+				classify: async () => ({ kind: "fallback", reason, durationMs: reason === "timeout" ? 10000 : 5 }),
+				steps: [{}],
+			})
+			await h.session.prompt("Fresh task")
+			const expected =
+				reason === "timeout" ? "Local classifier timed out; using strong" : "Local classification failed; using strong"
+			expect(h.widgets.some((lines) => lines?.[0]?.includes(`${expected} · ${h.providerId}/big`))).toBe(true)
+			expect(h.widgets.at(-1)).toBeUndefined()
+			expect(h.notifications).toHaveLength(1)
+			h.assertHealthy()
+		},
+	)
+
+	test("reports the confidence-gated physical target, not the classifier's cheaper choice", async () => {
+		const h = await harness({
+			captureUI: true,
+			minConfidence: 0.3,
+			classify: async () => classified("trivial", true, 0.1),
+			steps: [{}],
+		})
+		await h.session.prompt("Fresh task")
+		expect(h.widgets.some((lines) => lines?.[0]?.includes(`Confidence gate; using strong · ${h.providerId}/big`))).toBe(
+			true,
+		)
+		h.assertHealthy()
+	})
+
+	test("cancellation during classification removes the widget without fallback or physical dispatch", async () => {
+		const started = gate()
+		const h = await harness({
+			captureUI: true,
+			classify: async (_config, _input, _registry, signal) => {
+				started.open()
+				await waitForGate(new Promise<void>(() => {}), signal)
+				return classified("trivial")
+			},
+		})
+		const run = h.session.prompt("Cancel this task")
+		await started.promise
+		expect(h.widgets.at(-1)?.[0]).toContain("Routing · local")
+		await h.session.abort()
+		await run
+		expect(h.widgets.at(-1)).toBeUndefined()
+		expect(h.dispatches).toEqual([])
+		expect(h.notifications).toEqual([])
+		expect(customEntries(h.session, DECISION_ENTRY)).toEqual([])
+		h.assertHealthy()
+	})
+
+	test("changing selection clears pending UI and discards even a late classifier result", async () => {
+		const started = gate()
+		const release = gate()
+		let classifySignal: AbortSignal | undefined
+		const h = await harness({
+			captureUI: true,
+			classify: async (_config, _input, _registry, signal) => {
+				classifySignal = signal
+				started.open()
+				// Deliberately ignore cancellation to check stale completion fencing.
+				await release.promise
+				return classified("trivial")
+			},
+		})
+		const run = h.session.prompt("Fresh task")
+		await started.promise
+		await h.session.setModel(requiredModel(h.runtime, h.providerId, "big"))
+		expect(classifySignal?.aborted).toBe(true)
+		expect(h.widgets.at(-1)).toBeUndefined()
+		release.open()
+		await run
+		expect(h.widgets.at(-1)).toBeUndefined()
+		expect(h.widgets.some((lines) => lines?.[0]?.includes("Routing complete"))).toBe(false)
+		expect(customEntries(h.session, DECISION_ENTRY)).toEqual([])
+		expect(h.dispatches).toEqual([])
+		h.assertHealthy()
+	})
+
+	test("unexpected classifier failure still clears progress", async () => {
+		const h = await harness({
+			captureUI: true,
+			classify: async () => {
+				throw new Error("unexpected classifier failure")
+			},
+		})
+		await h.session.prompt("Fresh task")
+		expect(h.widgets.at(-1)).toBeUndefined()
+		expect(h.widgets.some((lines) => lines?.[0]?.includes("Routing · local"))).toBe(true)
+		expect(h.dispatches).toEqual([])
+		h.assertHealthy()
+	})
+
 	test("registers auto-prefixed built-ins without a configuration file or physical requests", async () => {
 		const classifier = classifierSequence()
 		const h = await harness({ configFile: false, classify: classifier.classify })

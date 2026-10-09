@@ -2,6 +2,7 @@ import { join } from "node:path"
 import { type ExtensionAPI, getAgentDir } from "@earendil-works/pi-coding-agent"
 import type { ClassifyTier } from "./classifier"
 import { loadConfig } from "./config"
+import { createRoutingProgress } from "./progress"
 import { DECISION_ENTRY, ROUTER_PROVIDER, type RouterState, createRouter } from "./router"
 
 export function createModelRouterExtension(options: { configPath?: string; classify?: ClassifyTier } = {}) {
@@ -13,6 +14,7 @@ export function createModelRouterExtension(options: { configPath?: string; class
 				{ ...settings, ...definition },
 				(data) => pi.appendEntry(DECISION_ENTRY, { ...data, router: id }),
 				options.classify,
+				createRoutingProgress(`model-router.routing.${id}`),
 			)
 			pi.on("before_agent_start", (event, ctx) => {
 				if (ctx.model?.provider === ROUTER_PROVIDER && ctx.model.id === id) {
@@ -24,6 +26,7 @@ export function createModelRouterExtension(options: { configPath?: string; class
 			pi.on("session_start", () => router.resetRun())
 			pi.on("session_tree", () => router.resetRun())
 			pi.on("session_shutdown", () => router.resetRun())
+			pi.on("model_select", () => router.resetRun())
 
 			pi.registerVirtualModel<RouterState>({
 				provider: ROUTER_PROVIDER,

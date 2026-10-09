@@ -3,6 +3,7 @@ import { z } from "zod"
 import { type ClassifyTier, type RoutingInput, TASK_LIMIT, classifyTier } from "./classifier"
 import { type RouterConfig, TIERS, type Tier, thinkingSchema } from "./config"
 import { recentConversation } from "./context"
+import { createRoutingProgress, seconds } from "./progress"
 
 export const ROUTER_PROVIDER = "model-router"
 export const DECISION_ENTRY = "model-router.decision"
@@ -66,7 +67,13 @@ function toolFailures(state: RouterState, branch: readonly SessionEntry[], thres
 export type RecordDecision = (data: Record<string, unknown>) => void
 
 /** Only run-boundary bookkeeping is in memory; decisions live in Pi's branch-persistent state. */
-export function createRouter(config: RouterConfig, record: RecordDecision, classify: ClassifyTier = classifyTier) {
+export function createRouter(
+	config: RouterConfig,
+	record: RecordDecision,
+	classify: ClassifyTier = classifyTier,
+	progress = createRoutingProgress(),
+) {
+	let activeClassification: AbortController | undefined
 	let freshInput: Pick<RoutingInput, "prompt" | "hasImages"> | undefined
 	let warnedUnavailable = false
 
@@ -76,6 +83,9 @@ export function createRouter(config: RouterConfig, record: RecordDecision, class
 		},
 		resetRun() {
 			freshInput = undefined
+			activeClassification?.abort()
+			activeClassification = undefined
+			progress.clear()
 		},
 		async route(request: RouteRequest, ctx: ExtensionContext): Promise<ModelRoute<RouterState>> {
 			request.signal?.throwIfAborted()
@@ -101,54 +111,76 @@ export function createRouter(config: RouterConfig, record: RecordDecision, class
 			}
 
 			if (input && request.reason === "user") {
-				const decision = await classify(
-					config.classifier,
-					{
-						...input,
-						currentTier: state?.tier,
-						task: state?.task,
-						recentConversation: recentConversation(request.messages),
-					},
-					ctx.modelRegistry,
-					request.signal,
-				)
-				request.signal?.throwIfAborted()
-				const confidenceGated =
-					decision.kind === "classified" && decision.tier !== "strong" && decision.confidence < config.minConfidence
-				let tier = decision.kind === "classified" && !confidenceGated ? decision.tier : "strong"
-				const continuing = state && decision.kind === "classified" && !decision.newTask && tier === state.tier
-				const failures = continuing ? toolFailures(state, branch, config.toolFailureThreshold) : undefined
-				const escalated = failures?.escalate && tier !== "strong"
-				if (escalated) tier = TIERS[TIERS.indexOf(tier) + 1]
-				const route = target(config, tier, ctx)
-				route.state = {
-					version: 1,
-					tier,
-					selection: selection(route),
-					task:
-						decision.kind === "classified" && !decision.newTask && state?.task
-							? state.task
-							: input.prompt.slice(0, TASK_LIMIT),
-					toolCursor: branch.at(-1)?.id ?? null,
-					failures: failures?.failures ?? 0,
+				activeClassification?.abort()
+				const controller = new AbortController()
+				activeClassification = controller
+				const signal = request.signal ? AbortSignal.any([request.signal, controller.signal]) : controller.signal
+				const feedback = progress.start(ctx, config.classifier, signal)
+				try {
+					const decision = await classify(
+						config.classifier,
+						{
+							...input,
+							currentTier: state?.tier,
+							task: state?.task,
+							recentConversation: recentConversation(request.messages),
+						},
+						ctx.modelRegistry,
+						signal,
+					)
+					signal.throwIfAborted()
+					const confidenceGated =
+						decision.kind === "classified" && decision.tier !== "strong" && decision.confidence < config.minConfidence
+					let tier = decision.kind === "classified" && !confidenceGated ? decision.tier : "strong"
+					const continuing = state && decision.kind === "classified" && !decision.newTask && tier === state.tier
+					const failures = continuing ? toolFailures(state, branch, config.toolFailureThreshold) : undefined
+					const escalated = failures?.escalate && tier !== "strong"
+					if (escalated) tier = TIERS[TIERS.indexOf(tier) + 1]
+					const route = target(config, tier, ctx)
+					route.state = {
+						version: 1,
+						tier,
+						selection: selection(route),
+						task:
+							decision.kind === "classified" && !decision.newTask && state?.task
+								? state.task
+								: input.prompt.slice(0, TASK_LIMIT),
+						toolCursor: branch.at(-1)?.id ?? null,
+						failures: failures?.failures ?? 0,
+					}
+					if (decision.kind === "classified") warnedUnavailable = false
+					else if (decision.reason !== "attachments" && !warnedUnavailable) {
+						if (ctx.hasUI)
+							ctx.ui.notify(`model-router: local classification failed (${decision.reason}); using strong`, "warning")
+						warnedUnavailable = true
+					}
+					const result = recordRoute(route, {
+						action: confidenceGated ? "confidence-gated" : escalated ? "escalated" : decision.kind,
+						tier,
+						minConfidence: config.minConfidence,
+						classifier: {
+							model: config.classifier.model,
+							baseUrl: config.classifier.baseUrl,
+							timeoutMs: config.classifier.timeoutMs,
+							...decision,
+						},
+					})
+					const outcome =
+						decision.kind === "fallback"
+							? decision.reason === "timeout"
+								? "Local classifier timed out; using strong"
+								: decision.reason === "attachments"
+									? "Images attached; using strong"
+									: "Local classification failed; using strong"
+							: confidenceGated
+								? "Confidence gate; using strong"
+								: "Routing complete"
+					feedback.finish(`${outcome} · ${route.model.provider}/${route.model.id} · ${seconds(decision.durationMs)}`)
+					return result
+				} finally {
+					feedback.stop()
+					if (activeClassification === controller) activeClassification = undefined
 				}
-				if (decision.kind === "classified") warnedUnavailable = false
-				else if (decision.reason !== "attachments" && !warnedUnavailable) {
-					if (ctx.hasUI)
-						ctx.ui.notify(`model-router: local classification failed (${decision.reason}); using strong`, "warning")
-					warnedUnavailable = true
-				}
-				return recordRoute(route, {
-					action: confidenceGated ? "confidence-gated" : escalated ? "escalated" : decision.kind,
-					tier,
-					minConfidence: config.minConfidence,
-					classifier: {
-						model: config.classifier.model,
-						baseUrl: config.classifier.baseUrl,
-						timeoutMs: config.classifier.timeoutMs,
-						...decision,
-					},
-				})
 			}
 
 			// `previous` skips failed requests and may belong to an older task—even on the same model
