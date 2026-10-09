@@ -7,7 +7,8 @@ import { DECISION_ENTRY, ROUTER_PROVIDER, type RouterState, createRouter } from 
 export function createModelRouterExtension(options: { configPath?: string; classify?: ClassifyTier } = {}) {
 	return (pi: ExtensionAPI) => {
 		const { routers, ...settings } = loadConfig(options.configPath ?? join(getAgentDir(), "model-router.json"))
-		for (const [id, definition] of Object.entries(routers)) {
+		for (const [name, definition] of Object.entries(routers)) {
+			const id = `auto-${name}`
 			const router = createRouter(
 				{ ...settings, ...definition },
 				(data) => pi.appendEntry(DECISION_ENTRY, { ...data, router: id }),
@@ -27,7 +28,7 @@ export function createModelRouterExtension(options: { configPath?: string; class
 			pi.registerVirtualModel<RouterState>({
 				provider: ROUTER_PROVIDER,
 				id,
-				name: `Auto: ${id}`,
+				name: `Auto: ${name}`,
 				// Thinking comes from each configured tier, not a separate virtual-level override.
 				thinkingLevels: ["off"],
 				route: (request, ctx) => router.route(request, ctx),

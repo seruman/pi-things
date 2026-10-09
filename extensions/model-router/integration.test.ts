@@ -29,7 +29,8 @@ import type { RouterConfig, Tier } from "./config"
 import { createModelRouterExtension } from "./index"
 import { DECISION_ENTRY, ROUTER_PROVIDER } from "./router"
 
-const ROUTER_MODEL = "test"
+const ROUTER_NAME = "test"
+const ROUTER_MODEL = "auto-test"
 type TestTiers = Record<Tier, Omit<RouterConfig["tiers"][Tier], "provider"> & { provider?: string }>
 
 // Only the classifier and physical transport are fakes. Routing, extension events,
@@ -127,7 +128,7 @@ async function harness(
 			configPath,
 			JSON.stringify({
 				routers: {
-					[ROUTER_MODEL]: {
+					[ROUTER_NAME]: {
 						tiers: Object.fromEntries(
 							Object.entries(tiers).map(([tier, target]) => [tier, { provider: providerId, ...target }]),
 						),
@@ -370,7 +371,7 @@ function routes(dispatches: Dispatch[]) {
 }
 
 describe("model-router SDK integration", () => {
-	test("registers codex and bedrock without a configuration file or physical requests", async () => {
+	test("registers auto-prefixed built-ins without a configuration file or physical requests", async () => {
 		const classifier = classifierSequence()
 		const h = await harness({ configFile: false, classify: classifier.classify })
 		expect(
@@ -378,12 +379,14 @@ describe("model-router SDK integration", () => {
 				.getAllModels(ROUTER_PROVIDER)
 				.map((model) => model.id)
 				.sort(),
-		).toEqual(["bedrock", "codex"])
+		).toEqual(["auto-bedrock", "auto-codex"])
 		expect((await h.runtime.getAvailable(ROUTER_PROVIDER)).map((model) => model.id).sort()).toEqual([
-			"bedrock",
-			"codex",
+			"auto-bedrock",
+			"auto-codex",
 		])
-		for (const id of ["codex", "bedrock"]) {
+		for (const name of ["codex", "bedrock"]) {
+			const id = `auto-${name}`
+			expect(requiredModel(h.runtime, ROUTER_PROVIDER, id).name).toBe(`Auto: ${name}`)
 			await h.session.setModel(requiredModel(h.runtime, ROUTER_PROVIDER, id))
 			expect(h.session.model?.id).toBe(id)
 			expect(h.session.model?.provider).toBe(ROUTER_PROVIDER)
@@ -397,7 +400,7 @@ describe("model-router SDK integration", () => {
 	})
 
 	test("routes custom tiers across providers and isolates state when switching named routers", async () => {
-		const otherRouter = "other"
+		const otherRouter = "auto-other"
 		const classifier = classifierSequence(
 			classified("trivial"),
 			classified("strong"),
@@ -409,14 +412,14 @@ describe("model-router SDK integration", () => {
 			classify: classifier.classify,
 			steps: [{}, {}, {}, {}, {}],
 			routers: ({ primary, alternate }) => ({
-				[ROUTER_MODEL]: {
+				[ROUTER_NAME]: {
 					tiers: {
 						trivial: { provider: primary, model: "small", thinking: "low" },
 						standard: { provider: alternate, model: "middle", thinking: "medium" },
 						strong: { provider: primary, model: "big", thinking: "high" },
 					},
 				},
-				[otherRouter]: {
+				other: {
 					tiers: {
 						trivial: { provider: alternate, model: "small", thinking: "medium" },
 						standard: { provider: primary, model: "middle", thinking: "low" },
@@ -430,7 +433,7 @@ describe("model-router SDK integration", () => {
 				.getAllModels(ROUTER_PROVIDER)
 				.map((model) => model.id)
 				.sort(),
-		).toEqual(["bedrock", "codex", otherRouter, ROUTER_MODEL])
+		).toEqual(["auto-bedrock", "auto-codex", otherRouter, ROUTER_MODEL])
 		await h.session.prompt("Test router task")
 		for (const [name, prompt] of [
 			[otherRouter, "Other router task"],
