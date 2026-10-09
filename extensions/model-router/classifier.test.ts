@@ -70,7 +70,7 @@ describe("local classifier", () => {
 		expect(JSON.stringify(context)).not.toContain("claude")
 	})
 
-	test("native transport sends exactly one local request and accepts a low-confidence choice", async () => {
+	test("native transport sends exactly one local request and preserves a valid low-confidence choice", async () => {
 		const requests: { url: string; body: unknown; authorization: string | null }[] = []
 		const config = serve(async (request) => {
 			requests.push({
@@ -224,7 +224,7 @@ describe("local classifier", () => {
 })
 
 describe("answer validation", () => {
-	test("confidence is recorded, not used as a correctness threshold", () => {
+	test("parsing preserves low confidence for the router to apply its policy", () => {
 		expect(parseClassification(valid(), 17)).toMatchObject({
 			kind: "classified",
 			tier: "standard",
@@ -249,6 +249,15 @@ describe("answer validation", () => {
 		result.answers.tier = tier as ClassifierResult["answers"][string]
 		expect(parseClassification(result, 0)).toMatchObject({ kind: "fallback", reason: "invalid-answer" })
 	})
+
+	test.each([undefined, null, "0.85", -0.01, 1.01, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(
+		"rejects malformed confidence %s rather than treating it as low confidence",
+		(confidence) => {
+			const result = valid()
+			result.answers.tier = { ...result.answers.tier, confidence } as ClassifierResult["answers"][string]
+			expect(parseClassification(result, 0)).toMatchObject({ kind: "fallback", reason: "invalid-answer" })
+		},
+	)
 
 	test("native classifier error messages are preserved rather than replaced by the generic reason", () => {
 		const result = {

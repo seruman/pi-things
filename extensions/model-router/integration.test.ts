@@ -61,14 +61,14 @@ async function waitForGate(promise: Promise<void>, signal?: AbortSignal) {
 	}
 }
 
-function classified(tier: Tier, newTask = true): Classification {
+function classified(tier: Tier, newTask = true, confidence = 0.95): Classification {
 	return {
 		kind: "classified",
 		tier,
 		newTask,
 		durationMs: 1,
-		probabilities: { trivial: 0.1, standard: 0.1, strong: 0.1, [tier]: 0.8 },
-		confidence: 0.8,
+		probabilities: { trivial: 0.005, standard: 0.005, strong: 0.005, [tier]: 0.99 },
+		confidence,
 		newTaskProbability: newTask ? 0.9 : 0.1,
 	}
 }
@@ -97,6 +97,7 @@ async function harness(
 	options: {
 		classify?: ClassifyTier
 		classifier?: RouterConfig["classifier"]
+		minConfidence?: number
 		steps?: Step[]
 		extraExtension?: ExtensionFactory
 		retry?: boolean
@@ -134,6 +135,7 @@ async function harness(
 					...options.routers?.({ primary: providerId, alternate: alternateProviderId }),
 				},
 				classifier: options.classifier,
+				minConfidence: options.minConfidence,
 			}),
 		)
 	}
@@ -573,7 +575,7 @@ describe("model-router SDK integration", () => {
 			model: "small",
 			thinking: "low",
 			userEntryId: userA.id,
-			classifier: { kind: "classified", probabilities: { trivial: 0.8 } },
+			classifier: { kind: "classified", probabilities: { trivial: 0.99 } },
 		})
 
 		await h.session.prompt("Task B: redesign the architecture")
@@ -645,6 +647,62 @@ describe("model-router SDK integration", () => {
 				"toolCursor",
 				"newTaskProbability",
 			]) {
+				expect(context).not.toContain(privateData)
+			}
+		}
+		h.assertHealthy()
+	})
+
+	test("a configured confidence gate dispatches strong, stays sticky through retries/tools, and persists across resume", async () => {
+		const decision = classified("standard", true, 0.89)
+		const classifier = classifierSequence(decision, classified("trivial", false, 0.9))
+		const h = await harness({
+			classify: classifier.classify,
+			minConfidence: 0.9,
+			retry: true,
+			steps: [{ error: "429 rate limit exceeded" }, { tool: true }, {}, {}],
+		})
+		await h.session.prompt("Original task")
+		await h.session.waitForIdle()
+		expect(routes(h.dispatches)).toEqual([
+			["big", "high"],
+			["big", "high"],
+			["big", "high"],
+		])
+		expect(classifier.inputs).toHaveLength(1)
+		expect(h.toolExecutions).toBe(1)
+		const decisions = structuredClone(customEntries(h.session, DECISION_ENTRY))
+		expect(decisions[0].data).toMatchObject({
+			action: "confidence-gated",
+			tier: "strong",
+			minConfidence: 0.9,
+			classifier: decision,
+		})
+		expect(decisions[1].data).toMatchObject({ reason: "retry", action: "retained", tier: "strong" })
+		const file = h.session.sessionFile
+		if (!file) throw new Error("Missing persisted session file")
+		h.session.dispose()
+		const resumed = await h.open(SessionManager.open(file), true)
+		expect(customEntries(resumed, DECISION_ENTRY)).toEqual(decisions)
+		expect(customEntries(resumed, VIRTUAL_MODEL_STATE_ENTRY).at(-1)?.data).toMatchObject({
+			state: {
+				tier: "strong",
+				task: "Original task",
+				selection: { provider: h.providerId, model: "big", thinking: "high" },
+			},
+		})
+		await resumed.prompt("Continue after resume")
+		expect(classifier.inputs[1]).toMatchObject({ currentTier: "strong", task: "Original task" })
+		expect(routes(h.dispatches).at(-1)).toEqual(["small", "low"])
+		expect(customEntries(resumed, DECISION_ENTRY).at(-1)?.data).toMatchObject({
+			action: "classified",
+			tier: "trivial",
+			minConfidence: 0.9,
+			classifier: { confidence: 0.9 },
+		})
+		for (const dispatch of h.dispatches) {
+			const context = JSON.stringify(dispatch.context)
+			for (const privateData of [DECISION_ENTRY, "confidence-gated", "minConfidence", "probabilities"]) {
 				expect(context).not.toContain(privateData)
 			}
 		}
@@ -908,15 +966,15 @@ describe("model-router SDK integration", () => {
 		h.assertHealthy()
 	})
 
-	test("loads from disk without a local Pi SDK, classifies on loopback, and falls back for an invalid answer", async () => {
+	test("loads from disk without a local Pi SDK, gates low confidence on loopback, and distinguishes invalid answers", async () => {
 		const requests: Array<{ method: string; path: string; body: unknown }> = []
 		const answers = [
 			{
 				tier: {
 					type: "choice",
 					choice: "standard",
-					confidence: 0.8,
-					probabilities: { trivial: 0.1, standard: 0.8, strong: 0.1 },
+					confidence: 0.95,
+					probabilities: { trivial: 0.005, standard: 0.99, strong: 0.005 },
 				},
 				newTask: { type: "noul", noul: 0.9 },
 			},
@@ -924,7 +982,7 @@ describe("model-router SDK integration", () => {
 				tier: {
 					type: "choice",
 					choice: "trivial",
-					confidence: 0.8,
+					confidence: 0.51,
 					probabilities: { trivial: 0.8, standard: 0.1, strong: 0.1 },
 				},
 				newTask: { type: "noul", noul: 0.1 },
@@ -968,11 +1026,11 @@ describe("model-router SDK integration", () => {
 			state: { prompt: "Yes, continue", currentTier: "standard", establishingTask: "Implement the local task" },
 		})
 		expect(requests[2].body).toMatchObject({
-			state: { currentTier: "trivial", establishingTask: "Implement the local task" },
+			state: { currentTier: "strong", establishingTask: "Implement the local task" },
 		})
 		expect(routes(h.dispatches)).toEqual([
 			["middle", "medium"],
-			["small", "low"],
+			["big", "high"],
 			["big", "high"],
 		])
 		const decisions = customEntries(h.session, DECISION_ENTRY)
@@ -983,6 +1041,18 @@ describe("model-router SDK integration", () => {
 				kind: "classified",
 				model: "local-test-classifier",
 				usage: { input: 12, output: 3, totalTokens: 15 },
+			},
+		})
+		expect(decisions[1].data).toMatchObject({
+			action: "confidence-gated",
+			tier: "strong",
+			minConfidence: 0.85,
+			classifier: {
+				kind: "classified",
+				tier: "trivial",
+				confidence: 0.51,
+				newTask: false,
+				probabilities: { trivial: 0.8, standard: 0.1, strong: 0.1 },
 			},
 		})
 		expect(decisions[2].data).toMatchObject({

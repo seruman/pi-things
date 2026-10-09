@@ -43,6 +43,7 @@ describe("router configuration", () => {
 			timeoutMs: 2000,
 		})
 		expect(config.toolFailureThreshold).toBe(3)
+		expect(config.minConfidence).toBe(0.85)
 	})
 
 	test("partial tier overrides preserve unspecified model/provider/thinking and other tiers", () => {
@@ -69,13 +70,19 @@ describe("router configuration", () => {
 
 	test("custom routers can mix arbitrary providers, without hiding built-ins or rewriting the file", async () => {
 		const file = tempFile()
-		const contents = JSON.stringify({ routers: { mixed }, classifier: { timeoutMs: 5000 }, toolFailureThreshold: 4 })
+		const contents = JSON.stringify({
+			routers: { mixed },
+			classifier: { timeoutMs: 5000 },
+			toolFailureThreshold: 4,
+			minConfidence: 0.9,
+		})
 		writeFileSync(file, contents)
 		const config = loadConfig(file)
 		expect(Object.keys(config.routers)).toEqual(["codex", "bedrock", "mixed"])
 		expect(config.routers.mixed).toEqual(mixed)
 		expect(config.classifier.timeoutMs).toBe(5000)
 		expect(config.toolFailureThreshold).toBe(4)
+		expect(config.minConfidence).toBe(0.9)
 		expect(await Bun.file(file).text()).toBe(contents)
 	})
 
@@ -140,6 +147,17 @@ describe("router configuration", () => {
 		"accepts %s",
 		(baseUrl) => {
 			expect(configSchema.parse({ classifier: { baseUrl } }).classifier.baseUrl).toBe(baseUrl)
+		},
+	)
+
+	test.each([0, 0.5, 0.85, 1])("accepts confidence threshold %s", (minConfidence) => {
+		expect(configSchema.parse({ minConfidence }).minConfidence).toBe(minConfidence)
+	})
+
+	test.each([-0.01, 1.01, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, "0.85", null])(
+		"rejects invalid confidence threshold %s",
+		(minConfidence) => {
+			expect(configSchema.safeParse({ minConfidence }).success).toBe(false)
 		},
 	)
 

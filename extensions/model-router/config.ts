@@ -78,6 +78,7 @@ export const configSchema = z
 			.default({}),
 		classifier: classifier.default({}),
 		toolFailureThreshold: z.number().int().min(1).max(100).default(3),
+		minConfidence: z.number().finite().min(0).max(1).default(0.85),
 	})
 	.strict()
 	.transform((config, ctx) => {
@@ -99,7 +100,7 @@ export const configSchema = z
 	})
 
 export type RouterConfig = z.infer<typeof router> &
-	Pick<z.infer<typeof configSchema>, "classifier" | "toolFailureThreshold">
+	Pick<z.infer<typeof configSchema>, "classifier" | "toolFailureThreshold" | "minConfidence">
 
 export function loadConfig(path: string): z.infer<typeof configSchema> {
 	let contents = "{}"

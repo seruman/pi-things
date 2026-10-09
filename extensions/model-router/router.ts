@@ -107,7 +107,9 @@ export function createRouter(config: RouterConfig, record: RecordDecision, class
 					request.signal,
 				)
 				request.signal?.throwIfAborted()
-				let tier = decision.kind === "classified" ? decision.tier : "strong"
+				const confidenceGated =
+					decision.kind === "classified" && decision.tier !== "strong" && decision.confidence < config.minConfidence
+				let tier = decision.kind === "classified" && !confidenceGated ? decision.tier : "strong"
 				const continuing = state && decision.kind === "classified" && !decision.newTask && tier === state.tier
 				const failures = continuing ? toolFailures(state, branch, config.toolFailureThreshold) : undefined
 				const escalated = failures?.escalate && tier !== "strong"
@@ -131,8 +133,9 @@ export function createRouter(config: RouterConfig, record: RecordDecision, class
 					warnedUnavailable = true
 				}
 				return recordRoute(route, {
-					action: escalated ? "escalated" : decision.kind,
+					action: confidenceGated ? "confidence-gated" : escalated ? "escalated" : decision.kind,
 					tier,
+					minConfidence: config.minConfidence,
 					classifier: {
 						model: config.classifier.model,
 						baseUrl: config.classifier.baseUrl,
