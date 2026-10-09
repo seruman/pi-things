@@ -40,7 +40,7 @@ describe("router configuration", () => {
 		expect(config.classifier).toEqual({
 			baseUrl: "http://127.0.0.1:11434/v1",
 			model: "clef-flash:9b-mxfp8",
-			timeoutMs: 2000,
+			timeoutMs: 10000,
 		})
 		expect(config.toolFailureThreshold).toBe(3)
 		expect(config.minConfidence).toBe(0)

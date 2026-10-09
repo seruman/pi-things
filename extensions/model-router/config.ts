@@ -51,7 +51,7 @@ const classifier = z
 			}, "classifier.baseUrl must be a loopback HTTP(S) URL without credentials, query, or fragment")
 			.default("http://127.0.0.1:11434/v1"),
 		model: z.string().trim().min(1).default("clef-flash:9b-mxfp8"),
-		timeoutMs: z.number().int().min(1).max(120_000).default(2_000),
+		timeoutMs: z.number().int().min(1).max(120_000).default(10_000),
 	})
 	.strict()
 
