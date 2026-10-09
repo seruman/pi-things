@@ -10,13 +10,13 @@ function required<T>(value: T | undefined | null): T {
 	return value
 }
 
-function choice(tier: Tier, newTask = true): Classification {
+function choice(tier: Tier, newTask = true, confidence = 0.95): Classification {
 	return {
 		kind: "classified",
 		tier,
 		newTask,
-		probabilities: { trivial: 0.34, standard: 0.33, strong: 0.33 },
-		confidence: 0.001,
+		probabilities: { trivial: 0.005, standard: 0.005, strong: 0.005, [tier]: 0.99 },
+		confidence,
 		newTaskProbability: newTask ? 1 : 0,
 		durationMs: 5,
 	}
@@ -127,17 +127,88 @@ function harness(classifications: Classification[] = [choice("trivial")], thresh
 }
 
 describe("model router policy", () => {
-	test.each(["trivial", "standard", "strong"] as const)(
-		"uses selected %s even with low entropy-confidence",
-		async (tier) => {
-			const h = harness([choice(tier)])
+	test.each(["trivial", "standard"] as const)("gates low-confidence %s choices to strong", async (tier) => {
+		for (const confidence of [0, 0.51, 0.849999]) {
+			const decision = choice(tier, true, confidence)
+			const h = harness([decision])
+			const result = await h.fresh()
+			expect([result.model.id, result.thinkingLevel]).toEqual(["big", "high"])
+			expect(h.state?.tier).toBe("strong")
+			expect(h.records[0]).toMatchObject({
+				action: "confidence-gated",
+				tier: "strong",
+				minConfidence: 0.85,
+				classifier: decision,
+			})
+			expect(h.warnings).toEqual([])
+		}
+	})
+
+	test.each(["trivial", "standard", "strong"] as const)("accepts %s at or above the threshold", async (tier) => {
+		for (const confidence of [0.85, 0.95, 1]) {
+			const h = harness([choice(tier, true, confidence)])
 			const result = await h.fresh()
 			expect(result.model.id).toBe(h.config.tiers[tier].model)
 			expect(result.thinkingLevel).toBe(h.config.tiers[tier].thinking)
 			expect(h.state?.tier).toBe(tier)
-			expect(h.records[0]).toMatchObject({ action: "classified", tier, classifier: { confidence: 0.001 } })
+			expect(h.records[0]).toMatchObject({
+				action: "classified",
+				tier,
+				minConfidence: 0.85,
+				classifier: { confidence },
+			})
+		}
+	})
+
+	test("keeps strong selections even at low confidence without claiming an escalation", async () => {
+		for (const confidence of [0, 0.51, 0.849999]) {
+			const h = harness([choice("strong", true, confidence)])
+			const result = await h.fresh()
+			expect([result.model.id, result.thinkingLevel]).toEqual(["big", "high"])
+			expect(h.records[0]).toMatchObject({ action: "classified", tier: "strong", classifier: { confidence } })
+		}
+	})
+
+	test.each([
+		[0, 0, "trivial"],
+		[0.5, 0.49, "strong"],
+		[0.5, 0.5, "trivial"],
+		[1, 0.999999, "strong"],
+		[1, 1, "trivial"],
+	] as const)("threshold %s with confidence %s selects %s", async (minConfidence, confidence, tier) => {
+		const h = harness([choice("trivial", true, confidence)])
+		h.config.minConfidence = minConfidence
+		const result = await h.fresh()
+		expect(result.model.id).toBe(h.config.tiers[tier].model)
+		expect(h.records[0]).toMatchObject({ tier, minConfidence, classifier: { tier: "trivial", confidence } })
+	})
+
+	test.each(["user", "continuation", "retry"] as const)(
+		"keeps a gated selection sticky for in-run %s",
+		async (reason) => {
+			const h = harness([choice("standard", true, 0.51)])
+			await h.fresh()
+			h.tool(true)
+			const result = await h.route({
+				reason,
+				previous: { model: required(h.models.get("middle")), thinkingLevel: "medium" },
+			})
+			expect([result.model.id, result.thinkingLevel]).toEqual(["big", "high"])
+			expect(h.inputs).toHaveLength(1)
+			expect(h.records.at(-1)).toMatchObject({ action: "retained", tier: "strong" })
 		},
 	)
+
+	test("gating preserves the establishing task for a continuation and replaces it for a new task", async () => {
+		const h = harness([choice("standard"), choice("trivial", false, 0.51), choice("trivial", true, 0.51)])
+		await h.fresh("Implement feature A")
+		await h.fresh("go ahead")
+		expect(h.state?.tier).toBe("strong")
+		expect(h.state?.task).toBe("Implement feature A")
+		await h.fresh("Now implement feature B")
+		expect(h.inputs[2]).toMatchObject({ currentTier: "strong", task: "Implement feature A" })
+		expect(h.state?.task).toBe("Now implement feature B")
+	})
 
 	test("keeps establishing task for continuations; replaces it for new tasks even at the same tier", async () => {
 		const h = harness([choice("standard"), choice("standard", false), choice("standard", true)])

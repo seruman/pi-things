@@ -109,7 +109,12 @@ for (const [index, prompt] of prompts.entries()) {
 		const decisions = entries.filter((entry) => entry.type === "custom" && entry.customType === DECISION_ENTRY)
 		assert.equal(decisions.length, index + 1)
 		const decision = decisions.at(-1).data
-		assert.equal(decision.action, "classified", JSON.stringify(decision))
+		assert.equal(decision.classifier.kind, "classified", JSON.stringify(decision))
+		const confidenceGated =
+			decision.classifier.tier !== "strong" && decision.classifier.confidence < config.minConfidence
+		assert.equal(decision.action, confidenceGated ? "confidence-gated" : "classified", JSON.stringify(decision))
+		assert.equal(decision.tier, confidenceGated ? "strong" : decision.classifier.tier)
+		assert.equal(decision.minConfidence, config.minConfidence)
 		const answer = entries
 			.filter((entry) => entry.type === "message" && entry.message.role === "assistant")
 			.at(-1).message
@@ -122,6 +127,8 @@ for (const [index, prompt] of prompts.entries()) {
 		console.log(
 			JSON.stringify({
 				prompt,
+				action: decision.action,
+				minConfidence: decision.minConfidence,
 				tier: decision.tier,
 				model: answer.model,
 				thinking: answer.thinkingLevel,
