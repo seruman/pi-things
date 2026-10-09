@@ -16,6 +16,7 @@ import {
 	type SplitDirection,
 	type SplitLaunchResult,
 	buildPiStartupInput,
+	isRexSession,
 	isTeteyeSession,
 	launchTerminalSplit,
 	parseSplitForkArgs,
@@ -281,7 +282,7 @@ async function generateHandoff(
 export default function (pi: ExtensionAPI): void {
 	pi.registerCommand("split-handoff", {
 		description:
-			"Generate a focused handoff and start it in a fresh teteye or Ghostty split. Usage: /split-handoff [-d right|left|down|up] <goal>",
+			"Generate a focused handoff and start it in a fresh Rex, teteye, or Ghostty split. Usage: /split-handoff [-d right|left|down|up] <goal>",
 		getArgumentCompletions: directionCompletions,
 		handler: async (args, ctx) => {
 			const trimmedArgs = args.trim()
@@ -312,8 +313,8 @@ export default function (pi: ExtensionAPI): void {
 				ctx.ui.notify("/split-handoff requires interactive mode.", "error")
 				return
 			}
-			if (process.platform !== "darwin" && !isTeteyeSession()) {
-				ctx.ui.notify("/split-handoff currently requires teteye or macOS (Ghostty AppleScript).", "warning")
+			if (process.platform !== "darwin" && !isRexSession() && !isTeteyeSession()) {
+				ctx.ui.notify("/split-handoff currently requires Rex, teteye, or macOS (Ghostty AppleScript).", "warning")
 				return
 			}
 
