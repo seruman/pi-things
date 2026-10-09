@@ -2,6 +2,7 @@ import type { ExtensionContext, ModelRoute, ModelRouteRequest, SessionEntry } fr
 import { z } from "zod"
 import { type ClassifyTier, type RoutingInput, TASK_LIMIT, classifyTier } from "./classifier"
 import { type RouterConfig, TIERS, type Tier, thinkingSchema } from "./config"
+import { recentConversation } from "./context"
 
 export const ROUTER_PROVIDER = "model-router"
 export const DECISION_ENTRY = "model-router.decision"
@@ -102,7 +103,12 @@ export function createRouter(config: RouterConfig, record: RecordDecision, class
 			if (input && request.reason === "user") {
 				const decision = await classify(
 					config.classifier,
-					{ ...input, currentTier: state?.tier, task: state?.task },
+					{
+						...input,
+						currentTier: state?.tier,
+						task: state?.task,
+						recentConversation: recentConversation(request.messages),
+					},
 					ctx.modelRegistry,
 					request.signal,
 				)
