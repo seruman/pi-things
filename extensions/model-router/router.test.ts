@@ -128,40 +128,44 @@ function harness(classifications: Classification[] = [choice("trivial")], thresh
 
 describe("model router policy", () => {
 	test.each(["trivial", "standard"] as const)("gates low-confidence %s choices to strong", async (tier) => {
-		for (const confidence of [0, 0.51, 0.849999]) {
+		for (const confidence of [0, 0.15, 0.299999]) {
 			const decision = choice(tier, true, confidence)
 			const h = harness([decision])
+			h.config.minConfidence = 0.3
 			const result = await h.fresh()
 			expect([result.model.id, result.thinkingLevel]).toEqual(["big", "high"])
 			expect(h.state?.tier).toBe("strong")
 			expect(h.records[0]).toMatchObject({
 				action: "confidence-gated",
 				tier: "strong",
-				minConfidence: 0.85,
+				minConfidence: 0.3,
 				classifier: decision,
 			})
 			expect(h.warnings).toEqual([])
 		}
 	})
 
-	test.each(["trivial", "standard", "strong"] as const)("accepts %s at or above the threshold", async (tier) => {
-		for (const confidence of [0.85, 0.95, 1]) {
-			const h = harness([choice(tier, true, confidence)])
-			const result = await h.fresh()
-			expect(result.model.id).toBe(h.config.tiers[tier].model)
-			expect(result.thinkingLevel).toBe(h.config.tiers[tier].thinking)
-			expect(h.state?.tier).toBe(tier)
-			expect(h.records[0]).toMatchObject({
-				action: "classified",
-				tier,
-				minConfidence: 0.85,
-				classifier: { confidence },
-			})
-		}
-	})
+	test.each(["trivial", "standard", "strong"] as const)(
+		"follows the selected %s tier regardless of confidence by default",
+		async (tier) => {
+			for (const confidence of [0, 0.15, 0.3, 0.5, 1]) {
+				const h = harness([choice(tier, true, confidence)])
+				const result = await h.fresh()
+				expect(result.model.id).toBe(h.config.tiers[tier].model)
+				expect(result.thinkingLevel).toBe(h.config.tiers[tier].thinking)
+				expect(h.state?.tier).toBe(tier)
+				expect(h.records[0]).toMatchObject({
+					action: "classified",
+					tier,
+					minConfidence: 0,
+					classifier: { confidence },
+				})
+			}
+		},
+	)
 
 	test("keeps strong selections even at low confidence without claiming an escalation", async () => {
-		for (const confidence of [0, 0.51, 0.849999]) {
+		for (const confidence of [0, 0.15, 0.299999]) {
 			const h = harness([choice("strong", true, confidence)])
 			const result = await h.fresh()
 			expect([result.model.id, result.thinkingLevel]).toEqual(["big", "high"])
@@ -170,6 +174,8 @@ describe("model router policy", () => {
 	})
 
 	test.each([
+		[0.85, 0.51, "strong"],
+		[0.85, 0.85, "trivial"],
 		[0, 0, "trivial"],
 		[0.5, 0.49, "strong"],
 		[0.5, 0.5, "trivial"],
@@ -186,7 +192,8 @@ describe("model router policy", () => {
 	test.each(["user", "continuation", "retry"] as const)(
 		"keeps a gated selection sticky for in-run %s",
 		async (reason) => {
-			const h = harness([choice("standard", true, 0.51)])
+			const h = harness([choice("standard", true, 0.15)])
+			h.config.minConfidence = 0.3
 			await h.fresh()
 			h.tool(true)
 			const result = await h.route({
@@ -200,7 +207,8 @@ describe("model router policy", () => {
 	)
 
 	test("gating preserves the establishing task for a continuation and replaces it for a new task", async () => {
-		const h = harness([choice("standard"), choice("trivial", false, 0.51), choice("trivial", true, 0.51)])
+		const h = harness([choice("standard"), choice("trivial", false, 0.15), choice("trivial", true, 0.15)])
+		h.config.minConfidence = 0.3
 		await h.fresh("Implement feature A")
 		await h.fresh("go ahead")
 		expect(h.state?.tier).toBe("strong")

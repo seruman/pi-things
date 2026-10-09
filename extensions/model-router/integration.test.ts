@@ -547,6 +547,31 @@ describe("model-router SDK integration", () => {
 		h.assertHealthy()
 	})
 
+	test("the default follows classifier choices, including zero confidence, and preserves diagnostic scores", async () => {
+		// Recorded scores are policy fixtures, not a claim of calibrated accuracy.
+		const classifier = classifierSequence(
+			classified("standard", true, 0.32783072741699715),
+			classified("standard", false, 0.4629118274970362),
+			classified("trivial", false, 0),
+		)
+		const h = await harness({ classify: classifier.classify, steps: [{}, {}, {}] })
+		await h.session.prompt("Propose a simple Python script")
+		await h.session.prompt("ok implement that")
+		await h.session.prompt("An ambiguous follow-up")
+		expect(routes(h.dispatches)).toEqual([
+			["middle", "medium"],
+			["middle", "medium"],
+			["small", "low"],
+		])
+		expect(classifier.inputs[1].currentTier).toBe("standard")
+		expect(customEntries(h.session, DECISION_ENTRY).map(({ data }) => data)).toMatchObject([
+			{ action: "classified", minConfidence: 0, classifier: { tier: "standard", confidence: 0.32783072741699715 } },
+			{ action: "classified", minConfidence: 0, classifier: { tier: "standard", confidence: 0.4629118274970362 } },
+			{ action: "classified", minConfidence: 0, classifier: { tier: "trivial", confidence: 0 } },
+		])
+		h.assertHealthy()
+	})
+
 	test("persists native routing state, excludes diagnostics from context, and restores the active branch on resume", async () => {
 		const classifier = classifierSequence(
 			classified("trivial"),
@@ -1008,6 +1033,7 @@ describe("model-router SDK integration", () => {
 		cleanups.push(() => server.stop(true))
 		const h = await harness({
 			loadFromDisk: true,
+			minConfidence: 0.85,
 			classifier: { baseUrl: `http://127.0.0.1:${server.port}/v1`, model: "local-test-classifier", timeoutMs: 2000 },
 			steps: [{}, {}, {}],
 		})

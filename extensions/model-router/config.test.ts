@@ -43,7 +43,7 @@ describe("router configuration", () => {
 			timeoutMs: 2000,
 		})
 		expect(config.toolFailureThreshold).toBe(3)
-		expect(config.minConfidence).toBe(0.85)
+		expect(config.minConfidence).toBe(0)
 	})
 
 	test("partial tier overrides preserve unspecified model/provider/thinking and other tiers", () => {
