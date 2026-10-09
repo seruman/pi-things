@@ -50,6 +50,10 @@ function shellQuote(value: string): string {
 	return `'${value.replace(/'/g, `'"'"'`)}'`
 }
 
+export function isRexSession(): boolean {
+	return Boolean(process.env.REX_SERVER?.trim() && process.env.REX_BLOCK?.trim())
+}
+
 export function isTeteyeSession(): boolean {
 	return Boolean(process.env.TETEYE_SOCKET?.trim() && process.env.TETEYE_PANE_ID?.trim())
 }
@@ -242,12 +246,45 @@ async function launchTeteyeSplit(
 	return { ok: true, terminalName: "teteye" }
 }
 
+async function launchRexSplit(
+	pi: ExtensionAPI,
+	ctx: ExtensionCommandContext,
+	startupInput: string,
+	direction: SplitDirection,
+): Promise<SplitLaunchResult> {
+	const block = process.env.REX_BLOCK?.trim()
+	if (!block) return { ok: false, terminalName: "Rex", reason: "missing REX_BLOCK" }
+	const rexDirection = direction === "up" ? "above" : direction === "down" ? "below" : direction
+	const result = await pi.exec("rex", [
+		"split",
+		"--block",
+		block,
+		"--split",
+		rexDirection,
+		"--cwd",
+		ctx.cwd,
+		"--",
+		"sh",
+		"-c",
+		startupInput,
+	])
+	if (result.code !== 0) {
+		return {
+			ok: false,
+			terminalName: "Rex",
+			reason: result.stderr?.trim() || result.stdout?.trim() || "unknown rex error",
+		}
+	}
+	return { ok: true, terminalName: "Rex" }
+}
+
 export async function launchTerminalSplit(
 	pi: ExtensionAPI,
 	ctx: ExtensionCommandContext,
 	startupInput: string,
 	direction: SplitDirection,
 ): Promise<SplitLaunchResult> {
+	if (isRexSession()) return launchRexSplit(pi, ctx, startupInput, direction)
 	return isTeteyeSession()
 		? launchTeteyeSplit(pi, ctx, startupInput, direction)
 		: launchGhosttySplit(pi, ctx, startupInput, direction)
@@ -307,11 +344,11 @@ function getArgumentCompletions(prefix: string): AutocompleteItem[] | null {
 export default function (pi: ExtensionAPI): void {
 	pi.registerCommand("split-fork", {
 		description:
-			"Clone the active session branch into a new pi process in a teteye or Ghostty split. Usage: /split-fork [-d right|left|down|up] [optional prompt]",
+			"Clone the active session branch into a new pi process in a Rex, teteye, or Ghostty split. Usage: /split-fork [-d right|left|down|up] [optional prompt]",
 		getArgumentCompletions,
 		handler: async (args, ctx) => {
-			if (process.platform !== "darwin" && !isTeteyeSession()) {
-				ctx.ui.notify("/split-fork currently requires teteye or macOS (Ghostty AppleScript).", "warning")
+			if (process.platform !== "darwin" && !isRexSession() && !isTeteyeSession()) {
+				ctx.ui.notify("/split-fork currently requires Rex, teteye, or macOS (Ghostty AppleScript).", "warning")
 				return
 			}
 

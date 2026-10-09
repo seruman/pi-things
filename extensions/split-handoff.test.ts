@@ -1,8 +1,16 @@
-import { afterEach, describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
 import { mkdtemp, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import { buildPiStartupInput, parseSplitForkArgs, resolveAppName, resolvePiInvocation } from "./split-fork.ts"
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent"
+import {
+	buildPiStartupInput,
+	isRexSession,
+	launchTerminalSplit,
+	parseSplitForkArgs,
+	resolveAppName,
+	resolvePiInvocation,
+} from "./split-fork.ts"
 import {
 	buildHandoffRequest,
 	buildReceivingDraft,
@@ -67,6 +75,86 @@ describe("command arguments", () => {
 			prompt: "continue the investigation",
 		})
 		expect(() => parseSplitForkArgs("-d sideways continue")).toThrow("Invalid direction")
+	})
+})
+
+describe("Rex split launcher", () => {
+	const envKeys = ["REX_SERVER", "REX_BLOCK", "TETEYE_SOCKET", "TETEYE_PANE_ID"] as const
+	let originalEnv: (string | undefined)[]
+
+	beforeEach(() => {
+		originalEnv = envKeys.map((key) => process.env[key])
+		process.env.REX_SERVER = "unix:///tmp/rex.sock"
+		process.env.REX_BLOCK = "block:source"
+		// Rex must win even if an outer terminal's variables are inherited.
+		process.env.TETEYE_SOCKET = "/tmp/teteye.sock"
+		process.env.TETEYE_PANE_ID = "outer-pane"
+	})
+
+	afterEach(() => {
+		for (const [index, key] of envKeys.entries()) {
+			const value = originalEnv[index]
+			if (value === undefined) Reflect.deleteProperty(process.env, key)
+			else process.env[key] = value
+		}
+	})
+
+	test("requires a nonblank Rex server and block", () => {
+		expect(isRexSession()).toBe(true)
+		process.env.REX_BLOCK = " "
+		expect(isRexSession()).toBe(false)
+		process.env.REX_BLOCK = "block:source"
+		Reflect.deleteProperty(process.env, "REX_SERVER")
+		expect(isRexSession()).toBe(false)
+	})
+
+	test.each([
+		["right", "right"],
+		["left", "left"],
+		["up", "above"],
+		["down", "below"],
+	] as const)("launches %s using Rex direction %s", async (direction, rexDirection) => {
+		const exec = mock(async () => ({ code: 0, stdout: "", stderr: "", killed: false }))
+		const startupInput = "'pi' '--session' '/tmp/a b.jsonl' 'literal $(whoami)'\n"
+		const result = await launchTerminalSplit(
+			{ exec } as unknown as ExtensionAPI,
+			{ cwd: "/tmp/project with spaces" } as ExtensionCommandContext,
+			startupInput,
+			direction,
+		)
+
+		expect(result).toEqual({ ok: true, terminalName: "Rex" })
+		expect(exec).toHaveBeenCalledTimes(1)
+		expect(exec).toHaveBeenCalledWith("rex", [
+			"split",
+			"--block",
+			"block:source",
+			"--split",
+			rexDirection,
+			"--cwd",
+			"/tmp/project with spaces",
+			"--",
+			"sh",
+			"-c",
+			startupInput,
+		])
+	})
+
+	test.each([
+		[" server unavailable\n", "", "server unavailable"],
+		["", " failed\n", "failed"],
+		["", "", "unknown rex error"],
+	])("reports Rex errors without falling back to another terminal", async (stderr, stdout, reason) => {
+		const exec = mock(async () => ({ code: 1, stdout, stderr, killed: false }))
+		expect(
+			await launchTerminalSplit(
+				{ exec } as unknown as ExtensionAPI,
+				{ cwd: "/tmp" } as ExtensionCommandContext,
+				"'pi'\n",
+				"right",
+			),
+		).toEqual({ ok: false, terminalName: "Rex", reason })
+		expect(exec).toHaveBeenCalledTimes(1)
 	})
 })
 
