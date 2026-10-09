@@ -78,7 +78,7 @@ export const configSchema = z
 			.default({}),
 		classifier: classifier.default({}),
 		toolFailureThreshold: z.number().int().min(1).max(100).default(3),
-		minConfidence: z.number().finite().min(0).max(1).default(0.85),
+		minConfidence: z.number().finite().min(0).max(1).default(0),
 	})
 	.strict()
 	.transform((config, ctx) => {
