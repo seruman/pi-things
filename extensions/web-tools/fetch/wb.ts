@@ -3,12 +3,17 @@ import { randomBytes } from "node:crypto"
 import { rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { z } from "zod"
 
 const WB_COMMAND = process.env.WB_PATH || "wb"
+
 const WB_FETCH_DIR_FROM_ENV = process.env.WB_FETCH_WB_DIR
+
 const WB_FETCH_DIR =
 	WB_FETCH_DIR_FROM_ENV || join(tmpdir(), `pi-web-fetch-wb-${process.pid}-${randomBytes(4).toString("hex")}`)
+
 const DEFAULT_RESOURCE_TIMEOUT_SECONDS = 3
+
 const OUTER_HTML_SCRIPT = "return document.documentElement ? document.documentElement.outerHTML : ''"
 
 if (!WB_FETCH_DIR_FROM_ENV) {
@@ -32,10 +37,14 @@ function remainingMs(deadline: number): number {
 	return Math.max(0, deadline - Date.now())
 }
 
+const browserOutputSchema = z.object({ browser: z.string().min(1) })
+
 function browserIdFromOutput(output: string): string {
-	const parsed = JSON.parse(output) as { browser?: unknown }
-	if (typeof parsed.browser !== "string" || !parsed.browser) throw new Error("wb did not return a browser id")
-	return parsed.browser
+	const parsed = browserOutputSchema.safeParse(JSON.parse(output))
+
+	if (!parsed.success) throw new Error("wb did not return a browser id")
+
+	return parsed.data.browser
 }
 
 async function runWb(args: string[], timeoutMs: number, signal: AbortSignal | undefined): Promise<string> {
@@ -75,16 +84,18 @@ async function runWb(args: string[], timeoutMs: number, signal: AbortSignal | un
 
 		if (signal?.aborted) {
 			abort()
+
 			return
 		}
+
 		signal?.addEventListener("abort", abort, { once: true })
 
 		child.stdout.on("data", (chunk: Buffer | string) => {
-			stdoutChunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk)
+			stdoutChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
 		})
 
 		child.stderr.on("data", (chunk: Buffer | string) => {
-			stderrChunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk)
+			stderrChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
 		})
 
 		child.on("error", (error: NodeJS.ErrnoException) => {
@@ -95,10 +106,13 @@ async function runWb(args: string[], timeoutMs: number, signal: AbortSignal | un
 		child.on("close", (code) => {
 			const stdout = Buffer.concat(stdoutChunks).toString("utf8")
 			const stderr = Buffer.concat(stderrChunks).toString("utf8").trim()
+
 			if (code !== 0) {
 				settle(() => reject(new Error(stderr || stdout.trim() || `exit code ${code}`)))
+
 				return
 			}
+
 			settle(() => resolve(stdout))
 		})
 	})
@@ -118,11 +132,13 @@ export async function runWbFetch(url: string, timeoutMs: number, signal: AbortSi
 		browserId = browserIdFromOutput(await runWb([url], remainingMs(deadline), signal))
 
 		const waitBudgetMs = remainingMs(deadline)
+
 		if (waitBudgetMs >= 1_000) {
 			const resourceTimeoutSeconds = Math.max(
 				1,
 				Math.min(DEFAULT_RESOURCE_TIMEOUT_SECONDS, Math.floor(waitBudgetMs / 1000)),
 			)
+
 			await runWb(
 				["wait-resources", browserId, "--resource-timeout", String(resourceTimeoutSeconds)],
 				remainingMs(deadline),
@@ -131,6 +147,7 @@ export async function runWbFetch(url: string, timeoutMs: number, signal: AbortSi
 		}
 
 		const html = await runWb(["eval", "--body", browserId, OUTER_HTML_SCRIPT], remainingMs(deadline), signal)
+
 		return { content: html.trim() ? html : null, error: null }
 	} catch (error) {
 		return { content: null, error: error instanceof Error ? error.message : String(error) }

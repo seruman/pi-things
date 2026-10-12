@@ -4,6 +4,7 @@ import { Type } from "typebox"
 import { runWbFetch } from "./wb"
 
 export type FetchMode = "http" | "rendered"
+
 export type FetchFormat = "auto" | "markdown" | "text" | "html"
 
 export type FetchRecord = {
@@ -27,7 +28,9 @@ export type FetchDetails = {
 }
 
 export const MAX_INLINE_CONTENT = 30_000
+
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+
 const MAX_RENDERED_RESPONSE_BYTES = 10 * 1024 * 1024
 
 export function normalizeMarkdown(text: string): string {
@@ -54,21 +57,25 @@ export const fetchParams = Type.Object({
 	),
 })
 
-function normalizeError(error: unknown): string {
-	if (!(error instanceof Error)) return String(error)
-	const cause = (error as { cause?: unknown }).cause
-	if (cause instanceof Error) {
-		const code = (cause as { code?: string }).code
-		const detail = code ? `${cause.message} (${code})` : cause.message
-		return `${error.message}: ${detail}`
+function normalizeError(cause: unknown): string {
+	if (!(cause instanceof Error)) return String(cause)
+	const nestedCause = cause.cause
+
+	if (nestedCause instanceof Error) {
+		const code = "code" in nestedCause ? nestedCause.code : undefined
+		const detail = code ? `${nestedCause.message} (${code})` : nestedCause.message
+
+		return `${cause.message}: ${detail}`
 	}
-	return error.message
+
+	return cause.message
 }
 
 function fallbackTitle(url: string): string {
 	try {
 		const u = new URL(url)
 		const seg = u.pathname.split("/").filter(Boolean).pop()
+
 		return seg || u.hostname || url
 	} catch {
 		return url
@@ -77,35 +84,45 @@ function fallbackTitle(url: string): string {
 
 function ensureHttpUrl(input: string): string {
 	const parsed = new URL(input)
+
 	if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
 		throw new Error(`Only http/https URLs are supported: ${input}`)
 	}
+
 	return parsed.toString()
 }
 
 function looksLikeHtml(text: string): boolean {
 	const head = text.slice(0, 1200).toLowerCase()
+
 	return head.includes("<!doctype html") || head.includes("<html") || head.includes("<body") || head.includes("<head")
 }
 
 function looksLikeMarkdown(text: string): boolean {
 	const head = text.slice(0, 1200)
+
 	return /^\s*#\s+\S+/m.test(head) || /^\s*[-*]\s+\S+/m.test(head) || /^\s*```/m.test(head) || /^\s*---\n/m.test(head)
 }
 
 function extractTitleFromMarkdown(markdown: string, url: string): string {
 	const lines = markdown.split("\n")
+
 	for (const line of lines) {
 		const t = line.trim()
+
 		if (t.toLowerCase().startsWith("title:")) {
 			const v = t.slice(6).trim()
+
 			if (v) return v
 		}
 	}
+
 	for (const line of lines) {
 		const t = line.trim()
+
 		if (t.startsWith("# ")) return t.slice(2).trim() || fallbackTitle(url)
 	}
+
 	return fallbackTitle(url)
 }
 
@@ -119,6 +136,7 @@ async function getHtmlViews(rawHtml: string, url: string): Promise<{ title: stri
 	if (markdown) {
 		const wrappedHtml = `<html><body>${result.content || rawHtml}</body></html>`
 		const text = parseHTML(wrappedHtml).document.body?.textContent?.replace(/\s+/g, " ").trim() || ""
+
 		return {
 			title,
 			markdown,
@@ -127,6 +145,7 @@ async function getHtmlViews(rawHtml: string, url: string): Promise<{ title: stri
 	}
 
 	const text = document.body?.textContent?.replace(/\s+/g, " ").trim() || ""
+
 	return {
 		title,
 		markdown: rawHtml,
@@ -137,9 +156,12 @@ async function getHtmlViews(rawHtml: string, url: string): Promise<{ title: stri
 function formatAcceptHeader(format: FetchFormat): string {
 	if (format === "markdown")
 		return "text/markdown;q=1.0, text/x-markdown;q=0.9, text/plain;q=0.8, text/html;q=0.7, */*;q=0.1"
+
 	if (format === "text") return "text/plain;q=1.0, text/markdown;q=0.9, text/html;q=0.8, */*;q=0.1"
+
 	if (format === "html")
 		return "text/html;q=1.0, application/xhtml+xml;q=0.9, text/plain;q=0.8, text/markdown;q=0.7, */*;q=0.1"
+
 	return "text/markdown;q=1.0, text/plain;q=0.9, text/html;q=0.8, application/xhtml+xml;q=0.7, */*;q=0.1"
 }
 
@@ -150,20 +172,25 @@ async function buildRecord(
 	format: FetchFormat,
 ): Promise<FetchRecord> {
 	const normalizedType = (contentType || "").split(";")[0].trim().toLowerCase()
+
 	const isHtml =
 		normalizedType.includes("text/html") ||
 		normalizedType.includes("application/xhtml+xml") ||
 		(!normalizedType && looksLikeHtml(raw))
+
 	const isMarkdown = normalizedType.includes("text/markdown") || (!normalizedType && looksLikeMarkdown(raw) && !isHtml)
 
 	if (format === "html") {
 		const title = isHtml ? (await getHtmlViews(raw, url)).title : fallbackTitle(url)
+
 		return { url, title, content: raw, error: null }
 	}
 
 	if (isHtml) {
 		const html = await getHtmlViews(raw, url)
+
 		if (format === "text") return { url, title: html.title, content: html.text, error: null }
+
 		return { url, title: html.title, content: html.markdown, error: null }
 	}
 
@@ -172,15 +199,19 @@ async function buildRecord(
 	if (format === "markdown") {
 		if (isMarkdown) {
 			const normalized = normalizeMarkdown(raw)
+
 			return { url, title: extractTitleFromMarkdown(normalized, url), content: normalized, error: null }
 		}
+
 		return { url, title: fallbackTitle(url), content: normalizeMarkdown(raw), error: null }
 	}
 
 	if (isMarkdown) {
 		const normalized = normalizeMarkdown(raw)
+
 		return { url, title: extractTitleFromMarkdown(normalized, url), content: normalized, error: null }
 	}
+
 	return { url, title: fallbackTitle(url), content: raw, error: null }
 }
 
@@ -214,6 +245,7 @@ export async function fetchOneHttp(
 		}
 
 		const contentLength = Number(response.headers.get("content-length") || "0")
+
 		if (Number.isFinite(contentLength) && contentLength > MAX_RESPONSE_BYTES) {
 			return {
 				url: target,
@@ -225,6 +257,7 @@ export async function fetchOneHttp(
 
 		const raw = await response.text()
 		const sizeBytes = Buffer.byteLength(raw, "utf8")
+
 		if (sizeBytes > MAX_RESPONSE_BYTES) {
 			return {
 				url: target,
@@ -259,6 +292,7 @@ export async function fetchOneRendered(
 	}
 
 	const sizeBytes = Buffer.byteLength(rendered.content, "utf8")
+
 	if (sizeBytes > MAX_RENDERED_RESPONSE_BYTES) {
 		return {
 			url: target,

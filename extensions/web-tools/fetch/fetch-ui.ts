@@ -6,6 +6,7 @@ function firstText(result: AgentToolResult<FetchDetails>): string {
 	for (const c of result.content) {
 		if (c.type === "text") return c.text ?? ""
 	}
+
 	return ""
 }
 
@@ -15,10 +16,12 @@ export function renderFetchResult(
 	theme: Theme,
 ): Text {
 	const d = result.details
+
 	if (opts.isPartial) {
 		const p = Math.max(0, Math.min(1, d.progress ?? 0))
 		const filled = Math.floor(p * 10)
 		const bar = "█".repeat(filled) + "░".repeat(10 - filled)
+
 		return new Text(theme.fg("accent", `[${bar}] ${d.phase || "fetching"}`), 0, 0)
 	}
 
@@ -26,23 +29,26 @@ export function renderFetchResult(
 
 	const mode = d.mode ? theme.fg("muted", ` · ${d.mode}`) : ""
 	let status = `${theme.fg("success", d.title || "Content")}${mode}${theme.fg("muted", ` (${d.totalChars ?? 0} chars)`)}`
-	if (typeof d.durationMs === "number") status += theme.fg("muted", ` | ${(d.durationMs / 1000).toFixed(1)}s`)
+
+	if (d.durationMs != null) status += theme.fg("muted", ` | ${(d.durationMs / 1000).toFixed(1)}s`)
+
 	if (!opts.expanded) return new Text(status, 0, 0)
 
 	const text = firstText(result).trim()
 	const preview = text.length > 1200 ? `${text.slice(0, 1200)}...` : text
+
 	return new Text(`${status}\n${theme.fg("dim", preview)}`, 0, 0)
 }
 
-export function renderFetchCall(args: Record<string, unknown>, theme: Theme, toolName = "web_fetch"): Text {
-	const url = typeof args.url === "string" ? args.url : ""
-	const format = typeof args.format === "string" ? args.format : "auto"
+export function renderFetchCall(args: { url: string; format: string }, theme: Theme, toolName = "web_fetch"): Text {
+	const { url, format } = args
 
 	if (!url) {
 		return new Text(theme.fg("toolTitle", theme.bold(`${toolName} `)) + theme.fg("error", "(no URL)"), 0, 0)
 	}
 
 	const display = url.length > 80 ? `${url.slice(0, 77)}...` : url
+
 	return new Text(
 		theme.fg("toolTitle", theme.bold(`${toolName} `)) + theme.fg("accent", display) + theme.fg("muted", ` (${format})`),
 		0,

@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent"
 import { Type } from "typebox"
+import { z } from "zod"
 import { type FetchDetails, type FetchFormat, type FetchMode, fetchParams } from "./fetch-lib"
 import { renderFetchCall, renderFetchResult } from "./fetch-ui"
 
@@ -11,6 +12,11 @@ type FetchExecutor = (
 ) => Promise<{ url: string; title: string; content: string; error: string | null }>
 
 const MAX_TOTAL_OUTPUT_CHARS = 150_000
+
+const fetchCallSchema = z.object({
+	url: z.string().catch(""),
+	format: z.string().catch("auto"),
+})
 
 const fetchSuccessSchema = Type.Object(
 	{
@@ -56,15 +62,19 @@ function formatFetchBlock(result: {
 	originalChars: number
 }): string {
 	const lines: string[] = [`URL: ${result.url}`]
+
 	if (result.error) {
 		lines.push(`Error: ${result.error}`)
+
 		return lines.join("\n")
 	}
 
 	lines.push(`Title: ${result.title}`)
+
 	if (result.truncated) lines.push(`Truncated: yes (${result.originalChars} -> ${result.content.length} chars)`)
 	lines.push("Content:")
 	lines.push(result.content)
+
 	return lines.join("\n").trimEnd()
 }
 
@@ -92,6 +102,7 @@ export function registerFetchTool(
 			if (signal?.aborted) throw createAbortError()
 
 			const url = params.url.trim()
+
 			if (!url) {
 				return {
 					content: [{ type: "text", text: "Error: url is required" }],
@@ -112,12 +123,15 @@ export function registerFetchTool(
 
 			const startedAt = Date.now()
 			let fetched: Awaited<ReturnType<FetchExecutor>>
+
 			try {
 				fetched = await config.executeFetch(url, format, signal, timeoutMs)
+
 				if (signal?.aborted) throw createAbortError()
 			} catch (error) {
 				if ((error instanceof Error && error.name === "AbortError") || signal?.aborted) throw createAbortError()
 				const message = error instanceof Error ? error.message : String(error)
+
 				return {
 					content: [{ type: "text", text: `Error: ${message}` }],
 					structuredContent: fetchError(url, config.mode, message),
@@ -129,6 +143,7 @@ export function registerFetchTool(
 			const originalChars = fetched.content.length
 			const truncated = !fetched.error && originalChars > perUrlMaxChars
 			const content = truncated ? fetched.content.slice(0, perUrlMaxChars) : fetched.content
+
 			const result = {
 				url: fetched.url || url,
 				title: fetched.title || url,
@@ -140,11 +155,13 @@ export function registerFetchTool(
 
 			const rawOutput = formatFetchBlock(result)
 			const aggregateTruncated = rawOutput.length > MAX_TOTAL_OUTPUT_CHARS
+
 			const output = aggregateTruncated
 				? `${rawOutput.slice(0, MAX_TOTAL_OUTPUT_CHARS)}\n\n[Output truncated: aggregate limit reached]`
 				: rawOutput
 
 			const durationMs = Date.now() - startedAt
+
 			return {
 				content: [{ type: "text", text: output }],
 				structuredContent: result.error
@@ -174,7 +191,7 @@ export function registerFetchTool(
 			}
 		},
 		renderCall(args, theme) {
-			return renderFetchCall(args, theme, config.name)
+			return renderFetchCall(fetchCallSchema.parse(args), theme, config.name)
 		},
 		renderResult(result, opts, theme) {
 			return renderFetchResult(result, opts, theme)

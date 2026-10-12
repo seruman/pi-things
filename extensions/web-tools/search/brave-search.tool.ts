@@ -10,7 +10,14 @@ import {
 	summarizeSearchResult,
 } from "./tool-ui"
 
-type RetryableError = Error & { retryable?: boolean }
+const errorFieldsSchema = z.object({
+	message: z.string().optional().catch(undefined),
+	detail: z.string().optional().catch(undefined),
+})
+
+const braveErrorSchema = errorFieldsSchema.extend({
+	error: errorFieldsSchema.optional().catch(undefined),
+})
 
 const MAX_TOTAL_OUTPUT_CHARS = 120_000
 
@@ -105,10 +112,12 @@ const searchOutputSchema = Type.Union([
 ])
 
 type BraveWebResult = z.infer<typeof braveWebResultSchema>
+
 type BraveResponse = z.infer<typeof braveResponseSchema>
 
 function clip(text: string, maxChars: number): string {
 	if (text.length <= maxChars) return text
+
 	return `${text.slice(0, Math.max(0, maxChars - 3)).trimEnd()}...`
 }
 
@@ -122,14 +131,23 @@ function pickSourceName(item: BraveWebResult): string {
 
 function collectTypeHints(item: BraveWebResult): string[] {
 	const hints: string[] = []
+
 	if (item.article != null) hints.push("article")
+
 	if (item.faq != null) hints.push("faq")
+
 	if (item.video != null) hints.push("video")
+
 	if (item.software != null) hints.push("software")
+
 	if (item.product != null) hints.push("product")
+
 	if (item.review != null) hints.push("review")
+
 	if (item.recipe != null) hints.push("recipe")
+
 	if (item.book != null) hints.push("book")
+
 	return hints
 }
 
@@ -142,11 +160,15 @@ function formatResults(
 	showLanguage: boolean,
 ): string {
 	const lines: string[] = [`Query: ${query}`]
+
 	if (response.query?.altered && clean(response.query.altered) !== clean(query)) {
 		lines.push(`Altered Query: ${clean(response.query.altered)}`)
 	}
+
 	lines.push(`More Results Available: ${response.query?.more_results_available === true ? "true" : "false"}`)
+
 	if (response.web?.mutated_by_goggles) lines.push("Re-ranked by Goggles: yes")
+
 	if (response.query?.search_operators?.applied === true) lines.push("Operators Applied: yes")
 	lines.push("")
 
@@ -166,11 +188,16 @@ function formatResults(
 			lines.push(`--- Result ${index + 1} ---`)
 			lines.push(`Title: ${title}`)
 			lines.push(`URL: ${url}`)
+
 			if (source) lines.push(`Source: ${source}`)
+
 			if (showLanguage && language) lines.push(`Language: ${language}`)
+
 			if (age) lines.push(`Age: ${age}`)
+
 			if (published) lines.push(`Published: ${published}`)
 			lines.push(`Snippet: ${snippet}`)
+
 			if (typeHints.length) lines.push(`Type Hints: ${typeHints.join(", ")}`)
 
 			if (includeExtraSnippets && item.extra_snippets?.length) {
@@ -178,8 +205,10 @@ function formatResults(
 					.map((s) => clean(s))
 					.filter(Boolean)
 					.slice(0, 5)
+
 				if (extras.length) {
 					lines.push("Extra Snippets:")
+
 					for (const extra of extras) lines.push(`- ${clip(extra, 220)}`)
 				}
 			}
@@ -191,6 +220,7 @@ function formatResults(
 	if (debug) {
 		lines.push("Debug:")
 		lines.push("- provider used: brave")
+
 		if (response.query?.search_operators?.applied !== undefined) {
 			lines.push(`- operators_applied: ${response.query.search_operators.applied ? "true" : "false"}`)
 		}
@@ -207,15 +237,25 @@ function structuredSearchResults(
 	textTruncated: boolean,
 ): Static<typeof searchSuccessSchema> {
 	let truncated = textTruncated
+
 	const bounded = (text: string, maxChars: number) => {
 		if (text.length > maxChars) truncated = true
+
 		return clip(text, maxChars)
 	}
+
 	const boundedExtras = (snippets: string[]) => {
-		const extras = snippets.map(clean).filter(Boolean)
+		const extras = snippets.flatMap((snippet) => {
+			const cleaned = clean(snippet)
+
+			return cleaned ? [cleaned] : []
+		})
+
 		if (extras.length > 5) truncated = true
+
 		return extras.slice(0, 5).map((extra) => bounded(extra, 220))
 	}
+
 	const data: Static<typeof searchSuccessSchema> = {
 		status: "success",
 		error: null,
@@ -237,29 +277,25 @@ function structuredSearchResults(
 			typeHints: collectTypeHints(item),
 		})),
 	}
+
 	while (JSON.stringify(data).length > MAX_TOTAL_OUTPUT_CHARS && data.results.length) {
 		data.results.pop()
 		truncated = true
 	}
+
 	data.truncated = truncated
+
 	return data
 }
 
 function parseBraveErrorMessage(bodyText: string): string {
-	const parsed = parseJson(bodyText)
-	if (!parsed || typeof parsed !== "object") return bodyText
+	const parsed = braveErrorSchema.safeParse(parseJson(bodyText))
 
-	const root = parsed as {
-		error?: { message?: unknown; detail?: unknown }
-		message?: unknown
-		detail?: unknown
-	}
+	if (!parsed.success) return bodyText
 
-	if (typeof root.error?.message === "string") return root.error.message
-	if (typeof root.error?.detail === "string") return root.error.detail
-	if (typeof root.message === "string") return root.message
-	if (typeof root.detail === "string") return root.detail
-	return bodyText
+	const root = parsed.data
+
+	return root.error?.message ?? root.error?.detail ?? root.message ?? root.detail ?? bodyText
 }
 
 async function runBraveRequest(input: {
@@ -276,6 +312,7 @@ async function runBraveRequest(input: {
 	signal?: AbortSignal
 }): Promise<BraveResponse> {
 	const apiKey = process.env.BRAVE_SEARCH_API_KEY?.trim() || process.env.BRAVE_API_KEY?.trim()
+
 	if (!apiKey) throw new Error("Brave API key is not set (set BRAVE_SEARCH_API_KEY)")
 
 	const params = new URLSearchParams({
@@ -286,12 +323,18 @@ async function runBraveRequest(input: {
 	})
 
 	if (input.freshness) params.set("freshness", input.freshness)
+
 	if (input.searchLang) params.set("search_lang", input.searchLang)
+
 	if (input.uiLang) params.set("ui_lang", input.uiLang)
+
 	if (input.safesearch) params.set("safesearch", input.safesearch)
+
 	if (input.extraSnippets) params.set("extra_snippets", "true")
+
 	for (const goggle of input.goggles || []) {
 		const value = goggle.trim()
+
 		if (value) params.append("goggles", value)
 	}
 
@@ -307,13 +350,13 @@ async function runBraveRequest(input: {
 	if (!response.ok) {
 		const text = await response.text().catch(() => "")
 		const message = parseBraveErrorMessage(text) || response.statusText
-		const err = new Error(`Brave API error (${response.status}): ${message}`) as RetryableError
-		err.retryable = isRetryableStatus(response.status)
-		throw err
+		throw Object.assign(new Error(`Brave API error (${response.status}): ${message}`), {
+			retryable: isRetryableStatus(response.status),
+		})
 	}
 
-	const raw = (await response.json()) as unknown
-	const parsed = braveResponseSchema.safeParse(raw)
+	const parsed = braveResponseSchema.safeParse(await response.json())
+
 	if (!parsed.success) {
 		throw new Error(
 			`Brave API returned unexpected response shape: ${parsed.error.issues[0]?.message || "invalid response"}`,
@@ -335,6 +378,7 @@ export function registerBraveSearchTool(pi: ExtensionAPI) {
 			if (signal?.aborted) throw new DOMException("aborted", "AbortError")
 			const startedAt = Date.now()
 			const query = params.query.trim()
+
 			if (!query) {
 				return {
 					content: [{ type: "text", text: "Error: query is required" }],
@@ -350,12 +394,13 @@ export function registerBraveSearchTool(pi: ExtensionAPI) {
 			})
 
 			let response: BraveResponse
+
 			try {
 				response = await withExponentialRetries({
 					maxRetries: 2,
 					baseDelayMs: 1000,
 					signal,
-					shouldRetry: (err) => (err as RetryableError).retryable === true || isRetryableNetworkError(err),
+					shouldRetry: (err) => ("retryable" in err && err.retryable === true) || isRetryableNetworkError(err),
 					run: async () =>
 						runBraveRequest({
 							query,
@@ -375,7 +420,9 @@ export function registerBraveSearchTool(pi: ExtensionAPI) {
 				if ((error instanceof Error && error.name === "AbortError") || signal?.aborted) {
 					throw new DOMException("aborted", "AbortError")
 				}
+
 				const normalized = normalizeError(error)
+
 				return {
 					content: [{ type: "text", text: `search failed\n\nError: ${normalized.message}` }],
 					structuredContent: { status: "error", query: clip(query, 4096), error: clip(normalized.message, 4096) },
@@ -396,6 +443,7 @@ export function registerBraveSearchTool(pi: ExtensionAPI) {
 			const results = (response.web?.results || [])
 				.filter((item) => item.url)
 				.slice(0, Math.max(1, Math.min(20, params.count ?? 5)))
+
 			const content = formatResults(
 				query,
 				response,
@@ -404,6 +452,7 @@ export function registerBraveSearchTool(pi: ExtensionAPI) {
 				params.debug === true,
 				Boolean(params.searchLang),
 			)
+
 			const output =
 				content.length > MAX_TOTAL_OUTPUT_CHARS
 					? `${content.slice(0, MAX_TOTAL_OUTPUT_CHARS)}\n\n[Output truncated: aggregate limit reached]`
