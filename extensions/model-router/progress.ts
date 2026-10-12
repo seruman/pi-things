@@ -1,6 +1,10 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent"
 import type { RouterConfig } from "./config"
 
+interface RoutingProgressContext extends Pick<ExtensionContext, "mode" | "hasUI"> {
+	ui: { setWidget(key: string, lines: string[] | undefined): void }
+}
+
 interface Clock {
 	now(): number
 	every(callback: () => void, ms: number): () => void
@@ -12,11 +16,13 @@ const clock: Clock = {
 	every(callback, ms) {
 		const timer = setInterval(callback, ms)
 		timer.unref()
+
 		return () => clearInterval(timer)
 	},
 	after(callback, ms) {
 		const timer = setTimeout(callback, ms)
 		timer.unref()
+
 		return () => clearTimeout(timer)
 	},
 }
@@ -28,24 +34,30 @@ export function seconds(ms: number) {
 /** One temporary widget per router; stale completions cannot erase a newer request. */
 export function createRoutingProgress(key = "model-router.routing", time: Clock = clock) {
 	let clearCurrent: (() => void) | undefined
+
 	return {
 		clear() {
 			clearCurrent?.()
 		},
-		start(ctx: ExtensionContext, config: RouterConfig["classifier"], signal: AbortSignal) {
+		start(ctx: RoutingProgressContext, config: RouterConfig["classifier"], signal: AbortSignal) {
 			clearCurrent?.()
+
 			if (!ctx.hasUI || ctx.mode !== "tui" || signal.aborted) return { finish(_text: string) {}, stop() {} }
 			const start = time.now()
 			let finished = false
 			let cancelTimer: (() => void) | undefined
+
 			const clear = () => {
 				cancelTimer?.()
 				signal.removeEventListener("abort", clear)
+
 				if (clearCurrent !== clear) return
 				clearCurrent = undefined
 				ctx.ui.setWidget(key, undefined)
 			}
+
 			clearCurrent = clear
+
 			const render = () => {
 				if (clearCurrent !== clear) return
 				const elapsed = Math.max(0, time.now() - start)
@@ -55,9 +67,11 @@ export function createRoutingProgress(key = "model-router.routing", time: Clock 
 					...(elapsed >= 2000 ? ["Model may be loading after idle."] : []),
 				])
 			}
+
 			signal.addEventListener("abort", clear, { once: true })
 			render()
 			cancelTimer = time.every(render, 250)
+
 			return {
 				finish(text: string) {
 					if (clearCurrent !== clear || signal.aborted) return

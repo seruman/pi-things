@@ -21,6 +21,7 @@ export default function (pi: ExtensionAPI) {
 				throw new Error("Diagnostics entered model context")
 			const stream = createAssistantMessageEventStream()
 			const text = `router-smoke:${model.id}:${options?.reasoning}`
+
 			const message: AssistantMessage = {
 				role: "assistant",
 				api: model.api,
@@ -38,6 +39,7 @@ export default function (pi: ExtensionAPI) {
 					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 				},
 			}
+
 			stream.push({ type: "start", partial: message })
 			message.content.push({ type: "text", text: "" })
 			stream.push({ type: "text_start", contentIndex: 0, partial: message })
@@ -47,6 +49,7 @@ export default function (pi: ExtensionAPI) {
 			message.stopReason = "stop"
 			stream.push({ type: "done", reason: "stop", message })
 			stream.end()
+
 			return stream
 		},
 	})

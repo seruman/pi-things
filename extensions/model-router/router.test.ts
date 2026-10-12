@@ -1,12 +1,13 @@
 import { describe, expect, test } from "bun:test"
 import type { Api, Model } from "@earendil-works/pi-ai"
-import { type ExtensionContext, SessionManager } from "@earendil-works/pi-coding-agent"
+import { SessionManager } from "@earendil-works/pi-coding-agent"
 import type { Classification, ClassifyTier, RoutingInput } from "./classifier"
 import { type Tier, configSchema } from "./config"
-import { ROUTER_PROVIDER, type RouteRequest, type RouterState, createRouter } from "./router"
+import { ROUTER_PROVIDER, type RouteRequest, type RouterState, type RoutingDecision, createRouter } from "./router"
 
 function required<T>(value: T | undefined | null): T {
 	if (value == null) throw new Error("Missing test fixture")
+
 	return value
 }
 
@@ -34,7 +35,9 @@ function harness(classifications: Classification[] = [choice("standard")], thres
 		},
 		toolFailureThreshold: threshold,
 	})
+
 	const config = { ...settings, ...routers.test }
+
 	const models = new Map<string, Model<Api>>(
 		Object.values(config.tiers).map(({ model, provider }) => [
 			model,
@@ -52,25 +55,41 @@ function harness(classifications: Classification[] = [choice("standard")], thres
 			},
 		]),
 	)
+
 	const sessionManager = SessionManager.inMemory()
-	const records: Record<string, unknown>[] = []
+	const records: RoutingDecision[] = []
 	const inputs: RoutingInput[] = []
 	const warnings: string[] = []
+
 	const classify: ClassifyTier = async (_config, input) => {
 		inputs.push(input)
 		const result = classifications.shift()
+
 		if (!result) throw new Error("Unexpected classification")
+
 		return result
 	}
+
 	const ctx = {
 		sessionManager,
 		hasUI: true,
-		ui: { notify: (message: string) => warnings.push(message) },
+		mode: "print" as const,
+		ui: {
+			notify: (message: string) => warnings.push(message),
+			setWidget() {
+				throw new Error("Print mode must not create terminal widgets")
+			},
+		},
 		modelRegistry: {
 			find: (provider: string, id: string) => (provider === models.get(id)?.provider ? models.get(id) : undefined),
+			classify: async () => {
+				throw new Error("Policy tests must use the supplied classifier")
+			},
 		},
-	} as unknown as ExtensionContext
+	}
+
 	const router = createRouter(config, (data) => records.push(data), classify)
+
 	const request: RouteRequest = {
 		model: {
 			...required(models.get("middle")),
@@ -83,19 +102,25 @@ function harness(classifications: Classification[] = [choice("standard")], thres
 		reason: "user",
 		messages: [],
 	}
+
 	let state: RouterState | undefined
 	let previous: RouteRequest["previous"]
+
 	async function route(overrides: Partial<RouteRequest> = {}) {
 		const result = await router.route({ ...request, state, previous, ...overrides }, ctx)
 		state = result.state ?? state
 		previous = { model: result.model, thinkingLevel: result.thinkingLevel }
+
 		return result
 	}
+
 	async function fresh(prompt = "Do the task") {
 		sessionManager.appendMessage({ role: "user", content: prompt, timestamp: Date.now() })
 		router.beginRun(prompt, false)
+
 		return route()
 	}
+
 	function tool(isError: boolean) {
 		return sessionManager.appendMessage({
 			role: "toolResult",
@@ -106,6 +131,7 @@ function harness(classifications: Classification[] = [choice("standard")], thres
 			timestamp: Date.now(),
 		})
 	}
+
 	return {
 		config,
 		models,
@@ -205,10 +231,12 @@ describe("model router policy", () => {
 			h.config.strongProbabilityThreshold = 0
 			await h.fresh()
 			h.tool(true)
+
 			const result = await h.route({
 				reason,
 				previous: { model: required(h.models.get("middle")), thinkingLevel: "medium" },
 			})
+
 			expect([result.model.id, result.thinkingLevel]).toEqual(["big", "high"])
 			expect(h.inputs).toHaveLength(1)
 			expect(h.records.at(-1)).toMatchObject({ action: "retained", tier: "strong" })
@@ -255,12 +283,15 @@ describe("model router policy", () => {
 	test.each(["fallback", "tool-errors"])("same-task floor retains strong after %s", async (source) => {
 		const initial: Classification =
 			source === "fallback" ? { kind: "fallback", reason: "timeout", durationMs: 1 } : choice("standard")
+
 		const h = harness([initial, choice("standard", false)])
 		await h.fresh("Investigate the incident")
+
 		if (source === "tool-errors") {
 			for (let i = 0; i < 3; i++) h.tool(true)
 			await h.route({ reason: "continuation" })
 		}
+
 		await h.fresh("keep going")
 		expect(h.state).toMatchObject({ tier: "strong", task: "Investigate the incident" })
 		expect(h.records.at(-1)).toMatchObject({ action: "task-floor", tier: "strong" })
@@ -281,10 +312,12 @@ describe("model router policy", () => {
 		async (reason) => {
 			const h = harness()
 			await h.fresh()
+
 			const result = await h.route({
 				reason,
 				previous: { model: required(h.models.get("middle")), thinkingLevel: "minimal" },
 			})
+
 			expect([result.model.id, result.thinkingLevel]).toEqual(["middle", "medium"])
 			expect(h.inputs).toHaveLength(1)
 			expect(result.state).toBeUndefined()
@@ -294,11 +327,12 @@ describe("model router policy", () => {
 	test("retry prefers failed route over successful previous, including its thinking level", async () => {
 		const h = harness()
 		await h.fresh()
+
 		const failed = {
 			model: required(h.models.get("big")),
 			thinkingLevel: "minimal" as const,
-			message: {} as NonNullable<RouteRequest["failed"]>["message"],
 		}
+
 		const result = await h.route({ reason: "retry", failed })
 		expect([result.model.id, result.thinkingLevel]).toEqual(["big", "minimal"])
 		expect(result.state).toBeUndefined()
@@ -330,6 +364,7 @@ describe("model router policy", () => {
 	test("warns once per outage, but warns again after a recovery", async () => {
 		const failure = { kind: "fallback", reason: "timeout", durationMs: 1 } as const
 		const h = harness([failure, failure, choice("standard"), failure])
+
 		for (let i = 0; i < 4; i++) await h.fresh()
 		expect(h.warnings).toHaveLength(2)
 		expect(h.records).toHaveLength(4)
@@ -373,7 +408,7 @@ describe("model router policy", () => {
 
 describe("persisted routing state", () => {
 	// Persisted v1 data predates the current RouterState type.
-	function legacyState(toolCursor: string | null, provider = "physical", model = "small"): RouterState {
+	function legacyState(toolCursor: string | null, provider = "physical", model = "small") {
 		return {
 			version: 1,
 			tier: "trivial",
@@ -381,7 +416,7 @@ describe("persisted routing state", () => {
 			task: "Implement the original task",
 			toolCursor,
 			failures: 2,
-		} as unknown as RouterState
+		} as const
 	}
 
 	test.each(["continuation", "user", "retry"] as const)(
@@ -409,11 +444,12 @@ describe("persisted routing state", () => {
 	])("legacy retry ignores failed %s/%s and defers new tool failures", async (provider, model) => {
 		const h = harness([])
 		const legacy = legacyState(h.tool(true), provider, model)
+
 		const failed = {
 			model: { ...required(h.models.get("middle")), provider, id: model },
 			thinkingLevel: "low" as const,
-			message: {} as NonNullable<RouteRequest["failed"]>["message"],
 		}
+
 		h.tool(true)
 		const result = await h.route({ reason: "retry", state: legacy, failed })
 		expect([result.model.id, result.thinkingLevel]).toEqual(["middle", "medium"])
@@ -455,12 +491,14 @@ describe("persisted routing state", () => {
 			const h = harness([choice(tier)])
 			const saved = await h.fresh()
 			h.config.tiers[tier] = { ...h.config.tiers[tier === "standard" ? "strong" : "standard"] }
+
 			for (const reason of ["continuation", "user", "retry"] as const) {
 				const result = await h.route({ reason })
 				expect([result.model.id, result.thinkingLevel]).toEqual([saved.model.id, saved.thinkingLevel])
 				expect(result.state).toBeUndefined()
 				expect(h.state).toEqual(saved.state)
 			}
+
 			expect(h.inputs).toHaveLength(1)
 		},
 	)
@@ -478,8 +516,10 @@ describe("tool failure escalation", () => {
 		expect((await h.route({ reason: "continuation" })).model.id).toBe("big")
 		expect(h.state?.failures).toBe(0)
 		expect((await h.route({ reason: "continuation" })).state).toBeUndefined()
+
 		for (let i = 0; i < 3; i++) h.tool(true)
 		expect((await h.route({ reason: "user" })).model.id).toBe("big")
+
 		for (let i = 0; i < 3; i++) h.tool(true)
 		expect((await h.route({ reason: "continuation" })).model.id).toBe("big")
 		expect(h.inputs).toHaveLength(1)
@@ -489,6 +529,7 @@ describe("tool failure escalation", () => {
 	test("a success resets consecutive failures", async () => {
 		const h = harness()
 		await h.fresh()
+
 		for (const failed of [true, true, false, true, true]) h.tool(failed)
 		expect((await h.route({ reason: "continuation" })).model.id).toBe("middle")
 		expect(h.state?.failures).toBe(2)
@@ -497,6 +538,7 @@ describe("tool failure escalation", () => {
 	test("a batch of six failures escalates directly to strong without replay", async () => {
 		const h = harness()
 		await h.fresh()
+
 		for (let i = 0; i < 6; i++) h.tool(true)
 		expect((await h.route({ reason: "continuation" })).model.id).toBe("big")
 		expect(h.state?.failures).toBe(0)
@@ -520,6 +562,7 @@ describe("tool failure escalation", () => {
 	test("retry does not escalate or consume new failures", async () => {
 		const h = harness()
 		await h.fresh()
+
 		for (let i = 0; i < 3; i++) h.tool(true)
 		expect((await h.route({ reason: "retry" })).model.id).toBe("middle")
 		expect(h.state?.failures).toBe(0)
@@ -529,6 +572,7 @@ describe("tool failure escalation", () => {
 	test("a fresh continuation escalates directly from standard to strong at the tripwire", async () => {
 		const h = harness([choice("standard"), choice("standard", false)])
 		await h.fresh("Implement feature A")
+
 		for (let i = 0; i < 3; i++) h.tool(true)
 		const result = await h.fresh("continue")
 		expect([result.model.id, result.thinkingLevel]).toEqual(["big", "high"])

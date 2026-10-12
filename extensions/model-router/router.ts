@@ -1,11 +1,12 @@
 import type { ExtensionContext, ModelRoute, ModelRouteRequest, SessionEntry } from "@earendil-works/pi-coding-agent"
 import { z } from "zod"
-import { type ClassifyTier, type RoutingInput, TASK_LIMIT, classifyTier } from "./classifier"
+import { type Classification, type ClassifyTier, type RoutingInput, TASK_LIMIT, classifyTier } from "./classifier"
 import { type RouterConfig, TIERS, type Tier, thinkingSchema } from "./config"
 import { recentConversation } from "./context"
 import { createRoutingProgress, seconds } from "./progress"
 
 export const ROUTER_PROVIDER = "model-router"
+
 export const DECISION_ENTRY = "model-router.decision"
 
 const stateSchema = z.object({
@@ -16,23 +17,57 @@ const stateSchema = z.object({
 	toolCursor: z.string().nullable(),
 	failures: z.number().int().nonnegative(),
 })
+
 const persistedStateSchema = z.union([stateSchema, stateSchema.extend({ tier: z.literal("trivial") })])
+
 export type RouterState = z.infer<typeof stateSchema>
-export type RouteRequest = ModelRouteRequest<RouterState>
+
+// Persisted state is untrusted until persistedStateSchema validates or migrates it.
+export type RouteRequest = Omit<ModelRouteRequest<unknown>, "failed"> & {
+	failed?: Pick<NonNullable<ModelRouteRequest["failed"]>, "model" | "thinkingLevel">
+}
+
+interface RouterContext extends Pick<ExtensionContext, "hasUI" | "mode"> {
+	sessionManager: Pick<ExtensionContext["sessionManager"], "getBranch">
+	modelRegistry: Pick<ExtensionContext["modelRegistry"], "find" | "classify">
+	ui: {
+		notify: ExtensionContext["ui"]["notify"]
+		setWidget(key: string, lines: string[] | undefined): void
+	}
+}
+
+export interface RoutingDecision {
+	version: 1
+	reason: RouteRequest["reason"]
+	userEntryId?: string
+	previousTier?: Tier
+	provider: string
+	model: string
+	thinking: RouterState["selection"]["thinking"]
+	action: "classified" | "fallback" | "task-floor" | "escalated" | "probability-routed" | "retained" | "no-route"
+	tier: Tier
+	probabilityTier?: Tier
+	strongProbabilityThreshold?: number
+	classifier?: Classification & RouterConfig["classifier"]
+}
 
 function lastUserId(branch: readonly SessionEntry[]): string | undefined {
 	for (let i = branch.length - 1; i >= 0; i--) {
 		const entry = branch[i]
+
 		if (entry.type === "message" && entry.message.role === "user") return entry.id
 	}
+
 	return undefined
 }
 
-function target(config: RouterConfig, tier: Tier, ctx: ExtensionContext): ModelRoute<RouterState> {
+function target(config: RouterConfig, tier: Tier, ctx: RouterContext): ModelRoute<RouterState> {
 	const choice = config.tiers[tier]
 	const model = ctx.modelRegistry.find(choice.provider, choice.model)
+
 	if (!model)
 		throw new Error(`model-router: model ${choice.provider}/${choice.model} for ${tier} is not in Pi's catalog`)
+
 	return { model, thinkingLevel: choice.thinking }
 }
 
@@ -40,32 +75,38 @@ function selection(route: ModelRoute<RouterState>): RouterState["selection"] {
 	return { provider: route.model.provider, model: route.model.id, thinking: route.thinkingLevel }
 }
 
-function restoreSelection(state: RouterState, ctx: ExtensionContext): ModelRoute<RouterState> {
+function restoreSelection(state: RouterState, ctx: RouterContext): ModelRoute<RouterState> {
 	const { provider, model: id, thinking } = state.selection
 	const model = ctx.modelRegistry.find(provider, id)
+
 	if (!model) throw new Error(`model-router: saved model ${provider}/${id} is not in Pi's catalog`)
+
 	return { model, thinkingLevel: thinking }
 }
 
 /** Scan persisted results, not the compacted transcript; consume each result only once. */
 function toolFailures(state: RouterState, branch: readonly SessionEntry[], threshold: number) {
 	const start = state.toolCursor === null ? -1 : branch.findIndex((entry) => entry.id === state.toolCursor)
+
 	if (state.toolCursor !== null && start === -1)
 		return { failures: 0, escalate: false, cursor: branch.at(-1)?.id ?? null }
 	let failures = state.failures
 	let escalate = false
 	let cursor = state.toolCursor
+
 	for (const entry of branch.slice(start + 1)) {
 		if (entry.type !== "message" || entry.message.role !== "toolResult") continue
 		cursor = entry.id
 		failures = entry.message.isError ? failures + 1 : 0
+
 		if (failures >= threshold) escalate = true
 	}
+
 	// At most one step for a batch: the new model has not had a chance to try yet.
 	return { failures: escalate ? 0 : failures, escalate, cursor }
 }
 
-export type RecordDecision = (data: Record<string, unknown>) => void
+export type RecordDecision = (data: RoutingDecision) => void
 
 /** Only run-boundary bookkeeping is in memory; decisions live in Pi's branch-persistent state. */
 export function createRouter(
@@ -88,23 +129,33 @@ export function createRouter(
 			activeClassification = undefined
 			progress.clear()
 		},
-		async route(request: RouteRequest, ctx: ExtensionContext): Promise<ModelRoute<RouterState>> {
+		async route(request: RouteRequest, ctx: RouterContext): Promise<ModelRoute<RouterState>> {
 			request.signal?.throwIfAborted()
+
 			// Compaction/other direct calls must neither classify nor consume the pending user input.
 			if (request.reason === "direct") return target(config, "strong", ctx)
 
 			const branch = ctx.sessionManager.getBranch()
 			const parsed = persistedStateSchema.safeParse(request.state)
 			const migrated = parsed.success && parsed.data.tier === "trivial"
+
 			const state: RouterState | undefined = parsed.success
 				? parsed.data.tier === "trivial"
 					? { ...parsed.data, tier: "standard", selection: { ...config.tiers.standard } }
 					: parsed.data
 				: undefined
+
 			const input = freshInput
 			freshInput = undefined
-			const base = { version: 1, reason: request.reason, userEntryId: lastUserId(branch) }
-			const recordRoute = (route: ModelRoute<RouterState>, data: Record<string, unknown>) => {
+			const base = { version: 1, reason: request.reason, userEntryId: lastUserId(branch) } as const
+
+			const recordRoute = (
+				route: ModelRoute<RouterState>,
+				data: Pick<
+					RoutingDecision,
+					"action" | "tier" | "probabilityTier" | "strongProbabilityThreshold" | "classifier"
+				>,
+			) => {
 				record({
 					...base,
 					previousTier: state?.tier,
@@ -113,6 +164,7 @@ export function createRouter(
 					thinking: route.thinkingLevel,
 					...data,
 				})
+
 				return route
 			}
 
@@ -122,6 +174,7 @@ export function createRouter(
 				activeClassification = controller
 				const signal = request.signal ? AbortSignal.any([request.signal, controller.signal]) : controller.signal
 				const feedback = progress.start(ctx, config.classifier, signal)
+
 				try {
 					const decision = await classify(
 						config.classifier,
@@ -134,7 +187,9 @@ export function createRouter(
 						ctx.modelRegistry,
 						signal,
 					)
+
 					signal.throwIfAborted()
+
 					// Raw P(strong), not entropy confidence; calibration is deliberately deferred.
 					const probabilityTier: Tier | undefined =
 						decision.kind === "classified"
@@ -142,14 +197,18 @@ export function createRouter(
 								? "strong"
 								: "standard"
 							: undefined
+
 					let tier = probabilityTier ?? "strong"
+
 					const taskFloor =
 						state?.tier === "strong" && decision.kind === "classified" && !decision.newTask && tier === "standard"
+
 					if (taskFloor) tier = "strong"
 					const probabilityRouted = decision.kind === "classified" && probabilityTier !== decision.tier
 					const continuing = state && decision.kind === "classified" && !decision.newTask && tier === state.tier
 					const failures = continuing ? toolFailures(state, branch, config.toolFailureThreshold) : undefined
 					const escalated = failures?.escalate && tier !== "strong"
+
 					if (escalated) tier = "strong"
 					const route = target(config, tier, ctx)
 					route.state = {
@@ -163,12 +222,14 @@ export function createRouter(
 						toolCursor: branch.at(-1)?.id ?? null,
 						failures: failures?.failures ?? 0,
 					}
+
 					if (decision.kind === "classified") warnedUnavailable = false
 					else if (decision.reason !== "attachments" && !warnedUnavailable) {
 						if (ctx.hasUI)
 							ctx.ui.notify(`model-router: local classification failed (${decision.reason}); using strong`, "warning")
 						warnedUnavailable = true
 					}
+
 					const result = recordRoute(route, {
 						action: taskFloor
 							? "task-floor"
@@ -187,6 +248,7 @@ export function createRouter(
 							...decision,
 						},
 					})
+
 					const outcome =
 						decision.kind === "fallback"
 							? decision.reason === "timeout"
@@ -201,10 +263,13 @@ export function createRouter(
 									: probabilityRouted
 										? `Probability threshold; using ${tier}`
 										: "Routing complete"
+
 					feedback.finish(`${outcome} · ${route.model.provider}/${route.model.id} · ${seconds(decision.durationMs)}`)
+
 					return result
 				} finally {
 					feedback.stop()
+
 					if (activeClassification === controller) activeClassification = undefined
 				}
 			}
@@ -218,25 +283,32 @@ export function createRouter(
 					: state
 						? undefined
 						: request.previous
+
 			const tier = state?.tier ?? "strong"
+
 			let route: ModelRoute<RouterState> = sticky
 				? { model: sticky.model, thinkingLevel: sticky.thinkingLevel ?? config.tiers[tier].thinking }
 				: state
 					? restoreSelection(state, ctx)
 					: target(config, tier, ctx)
-			let action = state || sticky ? "retained" : "no-route"
+
+			let action: RoutingDecision["action"] = state || sticky ? "retained" : "no-route"
 			let nextTier: Tier = tier
+
 			// Persist normalization even when no bookkeeping changes, including on retry.
 			if (migrated) route.state = state
+
 			// Except for legacy migration, retries preserve the failed model and thinking.
 			// Failure escalation waits for a non-retry request.
 			if (state && request.reason !== "retry") {
 				const failures = toolFailures(state, branch, config.toolFailureThreshold)
+
 				if (failures.escalate && tier !== "strong") {
 					nextTier = "strong"
 					route = target(config, nextTier, ctx)
 					action = "escalated"
 				}
+
 				if (nextTier !== tier || failures.failures !== state.failures || failures.cursor !== state.toolCursor) {
 					route.state = {
 						...state,
@@ -247,6 +319,7 @@ export function createRouter(
 					}
 				}
 			}
+
 			return recordRoute(route, { action, tier: nextTier })
 		},
 	}

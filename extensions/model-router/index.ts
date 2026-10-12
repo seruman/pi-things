@@ -8,14 +8,17 @@ import { DECISION_ENTRY, ROUTER_PROVIDER, type RouterState, createRouter } from 
 export function createModelRouterExtension(options: { configPath?: string; classify?: ClassifyTier } = {}) {
 	return (pi: ExtensionAPI) => {
 		const { routers, ...settings } = loadConfig(options.configPath ?? join(getAgentDir(), "model-router.json"))
+
 		for (const [name, definition] of Object.entries(routers)) {
 			const id = `auto-${name}`
+
 			const router = createRouter(
 				{ ...settings, ...definition },
 				(data) => pi.appendEntry(DECISION_ENTRY, { ...data, router: id }),
 				options.classify,
 				createRoutingProgress(`model-router.routing.${id}`),
 			)
+
 			pi.on("before_agent_start", (event, ctx) => {
 				if (ctx.model?.provider === ROUTER_PROVIDER && ctx.model.id === id) {
 					router.beginRun(event.prompt, !!event.images?.length)

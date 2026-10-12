@@ -6,35 +6,44 @@ function harness(mode: ExtensionContext["mode"] = "tui", hasUI = true) {
 	let now = 0
 	const timers = new Map<() => void, { at: number; interval?: number }>()
 	const widgets: (string[] | undefined)[] = []
+
 	const ctx = {
 		mode,
 		hasUI,
 		ui: {
 			setWidget: (_key: string, lines: string[] | undefined) => widgets.push(lines),
 		},
-	} as unknown as ExtensionContext
+	}
+
 	const progress = createRoutingProgress("test", {
 		now: () => now,
 		every(callback, ms) {
 			timers.set(callback, { at: now + ms, interval: ms })
+
 			return () => timers.delete(callback)
 		},
 		after(callback, ms) {
 			timers.set(callback, { at: now + ms })
+
 			return () => timers.delete(callback)
 		},
 	})
+
 	const controller = new AbortController()
 	const config = { baseUrl: "http://localhost:11434/v1", model: "clef-flash:9b-mxfp8", timeoutMs: 10_000 }
+
 	function advance(ms: number) {
 		now += ms
+
 		for (const [callback, timer] of [...timers]) {
 			if (timer.at > now) continue
+
 			if (timer.interval) timer.at = now + timer.interval
 			else timers.delete(callback)
 			callback()
 		}
 	}
+
 	return { progress, ctx, controller, config, widgets, timers, advance }
 }
 
@@ -71,6 +80,7 @@ describe("routing progress widget", () => {
 	test.each(["abort", "clear", "stop"] as const)("%s removes pending UI and rejects late completion", (action) => {
 		const h = harness()
 		const view = h.progress.start(h.ctx, h.config, h.controller.signal)
+
 		if (action === "abort") h.controller.abort()
 		else if (action === "clear") h.progress.clear()
 		else view.stop()
@@ -104,6 +114,7 @@ describe("routing progress widget", () => {
 	test("does not create UI when absent or already cancelled", () => {
 		for (const hasUI of [true, false]) {
 			const h = harness("tui", hasUI)
+
 			if (hasUI) h.controller.abort()
 			h.progress.start(h.ctx, h.config, h.controller.signal)
 			expect(h.widgets).toEqual([])

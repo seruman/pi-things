@@ -2,9 +2,11 @@ import { readFileSync } from "node:fs"
 import { z } from "zod"
 
 export const TIERS = ["standard", "strong"] as const
+
 export type Tier = (typeof TIERS)[number]
 
 export const thinkingSchema = z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"])
+
 const target = z
 	.object({
 		provider: z.string().trim().min(1),
@@ -12,11 +14,13 @@ const target = z
 		thinking: thinkingSchema,
 	})
 	.strict()
+
 const tiers = z.object({ standard: target, strong: target }).strict()
+
 const router = z.object({ tiers }).strict()
 
 // Preset names are virtual-model IDs, not provider IDs. Routing logic only knows abstract tiers.
-const presets: Record<string, z.infer<typeof router>> = {
+const presets = {
 	codex: {
 		tiers: {
 			standard: { provider: "openai-codex", model: "gpt-6.1-sol", thinking: "medium" },
@@ -38,6 +42,7 @@ const classifier = z
 			.url()
 			.refine((value) => {
 				const url = new URL(value)
+
 				return (
 					["http:", "https:"].includes(url.protocol) &&
 					["localhost", "127.0.0.1", "[::1]"].includes(url.hostname) &&
@@ -85,19 +90,24 @@ export const configSchema = z
 	.transform((config, ctx) => {
 		const names = new Set([...Object.keys(presets), ...Object.keys(config.routers)])
 		const resolved: [string, z.infer<typeof router>][] = []
+
 		for (const name of names) {
-			const defaults = Object.hasOwn(presets, name) ? presets[name] : undefined
+			const defaults = Object.entries(presets).find(([presetName]) => presetName === name)?.[1]
 			const overrides = Object.hasOwn(config.routers, name) ? config.routers[name] : undefined
+
 			const merged = router.safeParse({
 				tiers: Object.fromEntries(
 					TIERS.map((tier) => [tier, { ...defaults?.tiers[tier], ...overrides?.tiers?.[tier] }]),
 				),
 			})
+
 			if (!merged.success) {
 				for (const issue of merged.error.issues) ctx.addIssue({ ...issue, path: ["routers", name, ...issue.path] })
 			} else resolved.push([name, merged.data])
 		}
+
 		const { minConfidence: _retired, ...settings } = config
+
 		return { ...settings, routers: Object.fromEntries(resolved) }
 	})
 
@@ -106,12 +116,14 @@ export type RouterConfig = z.infer<typeof router> &
 
 export function loadConfig(path: string): z.infer<typeof configSchema> {
 	let contents = "{}"
+
 	try {
 		contents = readFileSync(path, "utf8")
 	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+		if (!(error instanceof Error && "code" in error && error.code === "ENOENT"))
 			throw new Error(`model-router: cannot read ${path}`, { cause: error })
 	}
+
 	try {
 		return configSchema.parse(JSON.parse(contents))
 	} catch (error) {

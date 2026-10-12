@@ -5,9 +5,11 @@ import { join } from "node:path"
 import { configSchema, loadConfig } from "./config"
 
 const roots: string[] = []
+
 afterEach(() => {
 	for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
+
 const mixed = {
 	tiers: {
 		standard: { provider: "openai-codex", model: "gpt-6.1-sol", thinking: "medium" },
@@ -18,6 +20,7 @@ const mixed = {
 function tempFile() {
 	const root = mkdtempSync(join(tmpdir(), "model-router-config-"))
 	roots.push(root)
+
 	return join(root, "model-router.json")
 }
 
@@ -54,6 +57,7 @@ describe("router configuration", () => {
 				},
 			},
 		})
+
 		expect(config.routers.codex.tiers.strong).toEqual({
 			provider: "openai-codex",
 			model: "gpt-6-astra",
@@ -67,12 +71,14 @@ describe("router configuration", () => {
 
 	test("custom routers can mix arbitrary providers, without hiding built-ins or rewriting the file", async () => {
 		const file = tempFile()
+
 		const contents = JSON.stringify({
 			routers: { mixed },
 			classifier: { timeoutMs: 5000 },
 			toolFailureThreshold: 4,
 			strongProbabilityThreshold: 0.3,
 		})
+
 		writeFileSync(file, contents)
 		const config = loadConfig(file)
 		expect(Object.keys(config.routers)).toEqual(["codex", "bedrock", "mixed"])
@@ -89,6 +95,7 @@ describe("router configuration", () => {
 				false,
 			)
 		}
+
 		expect(() => configSchema.parse({ routers: { custom: { tiers: { strong: mixed.tiers.strong } } } })).toThrow(
 			"standard",
 		)
@@ -96,12 +103,14 @@ describe("router configuration", () => {
 
 	test("legacy trivial overrides are ignored, not routed or written back", async () => {
 		const path = tempFile()
+
 		const contents = JSON.stringify({
 			routers: {
 				bedrock: { tiers: { trivial: { model: "old-cheap-model" } } },
 				mixed: { tiers: { ...mixed.tiers, trivial: { provider: "old", model: "cheap", thinking: "low" } } },
 			},
 		})
+
 		writeFileSync(path, contents)
 		const config = loadConfig(path)
 		expect(Object.keys(config.routers.bedrock.tiers)).toEqual(["standard", "strong"])
@@ -194,9 +203,11 @@ describe("router configuration", () => {
 		expect(configSchema.safeParse({ routers: { codex: { tiers: { standard: { thinking: "auto" } } } } }).success).toBe(
 			false,
 		)
+
 		for (const timeoutMs of [0, -1, 0.5, 120001]) {
 			expect(configSchema.safeParse({ classifier: { timeoutMs } }).success).toBe(false)
 		}
+
 		for (const toolFailureThreshold of [0, -1, 0.5, 101]) {
 			expect(configSchema.safeParse({ toolFailureThreshold }).success).toBe(false)
 		}

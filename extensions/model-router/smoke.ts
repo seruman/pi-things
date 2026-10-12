@@ -12,10 +12,15 @@ import { DECISION_ENTRY } from "./router"
 // Opt-in: real local classifier + installed Pi CLI, fake downstream models, isolated configuration.
 // The caller owns the Ollama process. This script neither downloads nor starts it.
 const root = mkdtempSync(join(tmpdir(), "model-router-smoke-"))
+
 const agentDir = join(root, "agent")
+
 const cwd = join(root, "workspace")
+
 mkdirSync(agentDir)
+
 mkdirSync(cwd)
+
 const config = configSchema.parse({
 	routers: {
 		smoke: {
@@ -30,25 +35,33 @@ const config = configSchema.parse({
 		model: process.env.ROUTER_SMOKE_MODEL ?? "clef-flash:9b-mxfp8",
 	},
 })
+
 writeFileSync(join(agentDir, "model-router.json"), JSON.stringify(config, null, 2))
+
 writeFileSync(
 	join(agentDir, "settings.json"),
 	JSON.stringify({ cacheWarming: "off", retry: { enabled: false }, compaction: { enabled: false } }),
 )
+
 const runtime = await ModelRuntime.create({
 	credentials: new InMemoryCredentialStore(),
 	modelsPath: null,
 	allowModelNetwork: false,
 	refreshOnCreate: false,
 })
+
 const prewarm = await classifyTier(
 	{ ...config.classifier, timeoutMs: 30_000 },
 	{ prompt: "Prewarm the local classifier", hasImages: false },
 	new ModelRegistry(runtime),
 )
+
 assert.equal(prewarm.kind, "classified", `Local classifier unavailable: ${JSON.stringify(prewarm)}`)
+
 const directory = fileURLToPath(new URL(".", import.meta.url))
+
 const session = join(root, "session.jsonl")
+
 const prompts = [
 	{ prompt: "What command prints the current working directory?", tier: "standard", newTask: true },
 	{
@@ -59,7 +72,8 @@ const prompts = [
 	},
 	{ prompt: "Yes, go ahead with that design.", tier: "strong", newTask: false },
 	{ prompt: "Unrelated task: what command prints the current working directory?", tier: "standard", newTask: true },
-]
+] as const
+
 for (const [index, { prompt, tier, newTask }] of prompts.entries()) {
 	const child = Bun.spawn(
 		[
@@ -97,43 +111,54 @@ for (const [index, { prompt, tier, newTask }] of prompts.entries()) {
 			stderr: "pipe",
 		},
 	)
+
 	const timeout = setTimeout(() => child.kill(), 30_000)
+
 	try {
 		const [stdout, stderr, status] = await Promise.all([
 			new Response(child.stdout).text(),
 			new Response(child.stderr).text(),
 			child.exited,
 		])
+
 		writeFileSync(join(root, `run-${index}.jsonl`), stdout)
 		writeFileSync(join(root, `run-${index}.stderr`), stderr)
 		assert.equal(status, 0, `Pi failed: ${stderr}\n${stdout}`)
+
 		const entries = readFileSync(session, "utf8")
 			.trim()
 			.split("\n")
 			.map((line) => JSON.parse(line))
+
 		const decisions = entries.filter((entry) => entry.type === "custom" && entry.customType === DECISION_ENTRY)
 		assert.equal(decisions.length, index + 1)
 		const decision = decisions.at(-1).data
 		assert.equal(decision.classifier.kind, "classified", JSON.stringify(decision))
 		assert.equal(decision.classifier.newTask, newTask, JSON.stringify(decision))
+
 		const probabilityTier =
 			decision.classifier.probabilities.strong >= config.strongProbabilityThreshold ? "strong" : "standard"
+
 		const taskFloor = prompts[index - 1]?.tier === "strong" && !newTask && probabilityTier === "standard"
+
 		const action = taskFloor
 			? "task-floor"
 			: probabilityTier !== decision.classifier.tier
 				? "probability-routed"
 				: "classified"
+
 		assert.equal(decision.action, action, JSON.stringify(decision))
 		assert.equal(decision.probabilityTier, probabilityTier)
 		assert.equal(decision.tier, tier)
 		assert.equal(decision.strongProbabilityThreshold, config.strongProbabilityThreshold)
+
 		const answer = entries
 			.filter((entry) => entry.type === "message" && entry.message.role === "assistant")
 			.at(-1).message
+
 		assert.equal(answer.stopReason, "stop")
 		const tiers = config.routers.smoke.tiers
-		const target = tiers[decision.tier as keyof typeof tiers]
+		const target = tiers[tier]
 		assert.equal(answer.provider, target.provider)
 		assert.equal(answer.model, target.model)
 		assert.equal(answer.thinkingLevel, target.thinking)
@@ -152,4 +177,5 @@ for (const [index, { prompt, tier, newTask }] of prompts.entries()) {
 		clearTimeout(timeout)
 	}
 }
+
 console.log(`Smoke passed. Isolated session and logs: ${root}`)

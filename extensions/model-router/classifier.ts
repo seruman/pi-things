@@ -1,9 +1,11 @@
 import type { ClassifierContext, ClassifierResult, Usage } from "@earendil-works/pi-ai"
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent"
+import { z } from "zod"
 import { type RouterConfig, TIERS, type Tier } from "./config"
 import { HISTORY_LIMIT } from "./context"
 
 export const PROMPT_LIMIT = 12_000
+
 export const TASK_LIMIT = 2_000
 
 export interface RoutingInput {
@@ -86,14 +88,25 @@ export function classificationContext(input: RoutingInput): ClassifierContext {
 	}
 }
 
-function probability(value: unknown): value is number {
-	return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1
-}
+const probability = z.number().finite().min(0).max(1)
+
+const routingAnswers = z.object({
+	tier: z.object({
+		type: z.literal("choice"),
+		choice: z.enum(TIERS),
+		confidence: probability,
+		probabilities: z.object({ standard: probability, strong: probability }).catchall(z.number()),
+	}),
+	newTask: z.object({ type: z.literal("bool"), probability }),
+})
+
+const errorCode = z.object({ code: z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,63}$/) })
 
 /** Keep actionable error text, not stacks/headers/request objects. Redact known input and common credentials. */
-function errorDetails(error: unknown, input?: RoutingInput): ClassifierError {
-	let message = error instanceof Error ? error.message : typeof error === "string" ? error : "Unknown classifier error"
+function errorDetails(cause: unknown, input?: RoutingInput): ClassifierError {
+	let message = cause instanceof Error ? cause.message : z.string().catch("Unknown classifier error").parse(cause)
 	const history = input?.recentConversation?.slice(0, HISTORY_LIMIT)
+
 	for (const text of [
 		input?.prompt.slice(0, PROMPT_LIMIT),
 		input?.task?.slice(0, TASK_LIMIT),
@@ -105,27 +118,27 @@ function errorDetails(error: unknown, input?: RoutingInput): ClassifierError {
 			.replaceAll(text, "[input omitted]")
 			.replaceAll(JSON.stringify(text).slice(1, -1), "[input omitted]")
 	}
+
 	message = message
 		.replace(/\b(Bearer|Basic)\s+[^\s"',;]+/gi, "$1 [redacted]")
 		.replace(/\b(api[_-]?key|token|password)(["'\s:=]+)[^\s"',;&]+/gi, "$1$2[redacted]")
 		.slice(0, 1000)
 	const details: ClassifierError = { message }
-	if (error instanceof Error) {
-		details.name = error.name.slice(0, 80)
+
+	if (cause instanceof Error) {
+		details.name = cause.name.slice(0, 80)
+
 		// Node fetch often wraps ECONNREFUSED in cause; Bun puts it on the top-level error.
-		for (const value of [error, error.cause]) {
-			if (
-				value &&
-				typeof value === "object" &&
-				"code" in value &&
-				typeof value.code === "string" &&
-				/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(value.code)
-			) {
-				details.code = value.code
+		for (const value of [cause, cause.cause]) {
+			const parsed = errorCode.safeParse(value)
+
+			if (parsed.success) {
+				details.code = parsed.data.code
 				break
 			}
 		}
 	}
+
 	return details
 }
 
@@ -134,8 +147,6 @@ export function parseClassification(
 	durationMs: number,
 	input?: RoutingInput,
 ): Classification {
-	const tier = result.answers.tier
-	const newTask = result.answers.newTask
 	if (result.stopReason !== "stop")
 		return {
 			kind: "fallback",
@@ -143,14 +154,9 @@ export function parseClassification(
 			durationMs,
 			error: errorDetails(result.errorMessage ?? `Classifier stopped with ${result.stopReason}`, input),
 		}
-	if (
-		tier?.type !== "choice" ||
-		!TIERS.includes(tier.choice as Tier) ||
-		!probability(tier.confidence) ||
-		!TIERS.every((name) => probability(tier.probabilities[name])) ||
-		newTask?.type !== "bool" ||
-		!probability(newTask.probability)
-	) {
+	const answers = routingAnswers.safeParse(result.answers)
+
+	if (!answers.success) {
 		return {
 			kind: "fallback",
 			reason: "invalid-answer",
@@ -158,9 +164,12 @@ export function parseClassification(
 			error: { message: "Invalid tier choice, probabilities, confidence, or task-continuity answer" },
 		}
 	}
+
+	const { tier, newTask } = answers.data
+
 	return {
 		kind: "classified",
-		tier: tier.choice as Tier,
+		tier: tier.choice,
 		newTask: newTask.probability >= 0.5,
 		probabilities: tier.probabilities,
 		confidence: tier.confidence,
@@ -173,6 +182,7 @@ export function parseClassification(
 /** Native Pi System One transport, pointed only at the explicitly configured local runtime. */
 export const classifyTier: ClassifyTier = async (config, input, registry, signal) => {
 	signal?.throwIfAborted()
+
 	if (input.hasImages) return { kind: "fallback", reason: "attachments", durationMs: 0 }
 	const start = performance.now()
 	const timeout = new AbortController()
@@ -182,6 +192,7 @@ export const classifyTier: ClassifyTier = async (config, input, registry, signal
 	let transportError: ClassifierError | undefined
 	let status: number | undefined
 	const timeoutError = () => ({ message: `Local classification timed out after ${config.timeoutMs} ms` })
+
 	try {
 		const result = await registry.classify(
 			{
@@ -201,28 +212,37 @@ export const classifyTier: ClassifyTier = async (config, input, registry, signal
 				maxRetries: 0,
 				signal: requestSignal,
 				// Do not let an endpoint redirect local prompt data to a hosted service.
-				fetch: (async (url, options) => {
-					try {
-						const response = await fetch(url, { ...options, redirect: "error" })
-						status = response.status
-						return response
-					} catch (error) {
-						transportError = errorDetails(error, input)
-						throw error
-					}
-				}) as typeof fetch,
+				fetch: Object.assign(
+					async (url: Parameters<typeof fetch>[0], options?: Parameters<typeof fetch>[1]) => {
+						try {
+							const response = await fetch(url, { ...options, redirect: "error" })
+							status = response.status
+
+							return response
+						} catch (error) {
+							transportError = errorDetails(error, input)
+							throw error
+						}
+					},
+					{ preconnect: fetch.preconnect },
+				),
 			},
 		)
+
 		signal?.throwIfAborted()
 		const durationMs = Math.round(performance.now() - start)
+
 		if (deadline.aborted)
 			return { kind: "fallback", reason: "timeout", durationMs, error: { ...timeoutError(), status } }
 		const decision = parseClassification(result, durationMs, input)
+
 		if (decision.kind === "fallback")
 			decision.error = { ...(transportError ?? decision.error ?? { message: "Classification failed" }), status }
+
 		return decision
 	} catch (error) {
 		signal?.throwIfAborted()
+
 		return {
 			kind: "fallback",
 			reason: deadline.aborted ? "timeout" : "classifier-error",

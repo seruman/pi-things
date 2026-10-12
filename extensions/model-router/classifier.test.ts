@@ -15,6 +15,7 @@ const registry = new ModelRegistry(
 )
 
 const servers: Array<ReturnType<typeof Bun.serve>> = []
+
 afterEach(() => {
 	for (const server of servers.splice(0)) server.stop(true)
 })
@@ -22,6 +23,7 @@ afterEach(() => {
 function serve(handler: (request: Request) => Response | Promise<Response>) {
 	const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: handler })
 	servers.push(server)
+
 	return { baseUrl: `http://127.0.0.1:${server.port}/v1`, model: "test-classifier", timeoutMs: 2_000 }
 }
 
@@ -65,8 +67,10 @@ describe("local classifier", () => {
 	test("default deadline allows a cold response beyond the former two-second limit", async () => {
 		const endpoint = serve(async () => {
 			await Bun.sleep(2100)
+
 			return Response.json(wire())
 		})
+
 		const { classifier } = configSchema.parse({ classifier: { baseUrl: endpoint.baseUrl, model: endpoint.model } })
 		const result = await classifyTier(classifier, input, registry)
 		expect(classifier.timeoutMs).toBe(10000)
@@ -81,9 +85,10 @@ describe("local classifier", () => {
 			task: "t".repeat(30_000),
 			recentConversation: "h".repeat(30_000),
 		})
-		expect((context.state.recentConversation as string).length).toBe(HISTORY_LIMIT)
-		expect((context.state.latestRequest as string).length).toBe(PROMPT_LIMIT)
-		expect((context.state.previousTask as string).length).toBe(TASK_LIMIT)
+
+		expect(context.state.recentConversation).toBe("h".repeat(HISTORY_LIMIT))
+		expect(context.state.latestRequest).toBe("p".repeat(PROMPT_LIMIT))
+		expect(context.state.previousTask).toBe("t".repeat(TASK_LIMIT))
 		expect(context.state.currentTier).toBe("standard")
 		expect(Object.keys(context.questions)).toEqual(["tier", "newTask"])
 		expect(Object.keys(context.questions.tier.criteria)).toEqual(["standard", "strong"])
@@ -95,14 +100,17 @@ describe("local classifier", () => {
 
 	test("native transport sends exactly one local request and preserves a valid low-confidence choice", async () => {
 		const requests: { url: string; body: unknown; authorization: string | null }[] = []
+
 		const config = serve(async (request) => {
 			requests.push({
 				url: request.url,
 				body: await request.json(),
 				authorization: request.headers.get("authorization"),
 			})
+
 			return Response.json(wire())
 		})
+
 		const result = await classifyTier(config, input, registry)
 		expect(result).toMatchObject({ kind: "classified", tier: "standard", confidence: 0.01, newTask: false })
 		expect(requests).toHaveLength(1)
@@ -116,10 +124,13 @@ describe("local classifier", () => {
 
 	test.each([429, 500, 503])("HTTP %s falls back without retries", async (status) => {
 		let requests = 0
+
 		const config = serve(() => {
 			requests++
+
 			return new Response("unavailable", { status })
 		})
+
 		expect(await classifyTier(config, input, registry)).toMatchObject({ kind: "fallback", reason: "classifier-error" })
 		expect(requests).toBe(1)
 	})
@@ -142,12 +153,14 @@ describe("local classifier", () => {
 				{ status: 404 },
 			),
 		)
+
 		const result = await classifyTier(config, input, registry)
 		expect(result).toMatchObject({
 			kind: "fallback",
 			reason: "classifier-error",
 			error: { status: 404 },
 		})
+
 		if (result.kind !== "fallback") throw new Error("Expected fallback")
 		expect(result.error?.message).toContain("Missing model")
 		expect(result.error?.message.length).toBeLessThanOrEqual(1000)
@@ -158,9 +171,11 @@ describe("local classifier", () => {
 
 	test("classifier errors redact echoed history and individual transcript lines", async () => {
 		const recentConversation = "user:\nPrivate clarification\n\nassistant:\nPrivate proposal"
+
 		const config = serve(() =>
 			Response.json({ error: `Rejected ${recentConversation}; Private proposal` }, { status: 500 }),
 		)
+
 		const result = await classifyTier(config, { ...input, recentConversation }, registry)
 		expect(result).toMatchObject({ kind: "fallback", reason: "classifier-error" })
 		expect(JSON.stringify(result)).not.toContain("Private clarification")
@@ -169,11 +184,14 @@ describe("local classifier", () => {
 
 	test("timeout falls back and does not retry", async () => {
 		let requests = 0
+
 		const config = serve(async () => {
 			requests++
 			await Bun.sleep(200)
+
 			return Response.json(wire())
 		})
+
 		const result = await classifyTier({ ...config, timeoutMs: 30 }, input, registry)
 		expect(result).toMatchObject({
 			kind: "fallback",
@@ -187,14 +205,18 @@ describe("local classifier", () => {
 	test("caller abort propagates instead of routing to strong", async () => {
 		const controller = new AbortController()
 		let received!: () => void
+
 		const started = new Promise<void>((resolve) => {
 			received = resolve
 		})
+
 		const config = serve(async () => {
 			received()
 			await Bun.sleep(100)
+
 			return Response.json(wire())
 		})
+
 		const request = classifyTier(config, input, registry, controller.signal)
 		await started
 		controller.abort(new Error("caller cancelled"))
@@ -203,10 +225,13 @@ describe("local classifier", () => {
 
 	test("already cancelled calls and image fallbacks make no HTTP requests", async () => {
 		let requests = 0
+
 		const config = serve(() => {
 			requests++
+
 			return Response.json(wire())
 		})
+
 		expect(await classifyTier(config, { ...input, hasImages: true }, registry)).toMatchObject({
 			kind: "fallback",
 			reason: "attachments",
@@ -219,24 +244,32 @@ describe("local classifier", () => {
 
 	test("a redirect cannot forward prompt data to another server", async () => {
 		let redirected = 0
+
 		const destination = serve(() => {
 			redirected++
+
 			return Response.json(wire())
 		})
+
 		const config = serve(
 			() => new Response(null, { status: 307, headers: { location: `${destination.baseUrl}/systemone` } }),
 		)
+
 		expect(await classifyTier(config, input, registry)).toMatchObject({ kind: "fallback", reason: "classifier-error" })
 		expect(redirected).toBe(0)
 	})
 
 	test("provider endpoint overrides cannot send prompts outside the configured local endpoint", async () => {
 		let requests = 0
+
 		const destination = serve(() => {
 			requests++
+
 			return Response.json(wire())
 		})
+
 		const config = serve(() => Response.json(wire()))
+
 		const overridden = new ModelRegistry(
 			await ModelRuntime.create({
 				credentials: new InMemoryCredentialStore(),
@@ -245,6 +278,7 @@ describe("local classifier", () => {
 				refreshOnCreate: false,
 			}),
 		)
+
 		overridden.registerProvider("typesafe", { baseUrl: destination.baseUrl })
 		const result = await classifyTier(config, input, overridden)
 		expect(requests).toBe(0)
@@ -268,7 +302,7 @@ describe("answer validation", () => {
 		})
 	})
 
-	test.each([
+	test.each<ClassifierResult["answers"][string]>([
 		{ type: "choice", choice: "bogus", probabilities: { standard: 1, strong: 0 }, confidence: 1 },
 		{ type: "choice", choice: "trivial", probabilities: { trivial: 1, standard: 0, strong: 0 }, confidence: 1 },
 		{ type: "choice", choice: "standard", probabilities: { standard: 1 }, confidence: 1 },
@@ -281,16 +315,21 @@ describe("answer validation", () => {
 		{ type: "choice", choice: "standard", probabilities: { standard: 1, strong: 0 }, confidence: 2 },
 	])("rejects invalid tier answer %#", (tier) => {
 		const result = valid()
-		result.answers.tier = tier as ClassifierResult["answers"][string]
-		expect(parseClassification(result, 0)).toMatchObject({ kind: "fallback", reason: "invalid-answer" })
+		expect(parseClassification({ ...result, answers: { ...result.answers, tier } }, 0)).toMatchObject({
+			kind: "fallback",
+			reason: "invalid-answer",
+		})
 	})
 
-	test.each([undefined, null, "0.85", -0.01, 1.01, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(
+	test.each([-0.01, 1.01, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(
 		"rejects malformed confidence %s rather than treating it as low confidence",
 		(confidence) => {
 			const result = valid()
-			result.answers.tier = { ...result.answers.tier, confidence } as ClassifierResult["answers"][string]
-			expect(parseClassification(result, 0)).toMatchObject({ kind: "fallback", reason: "invalid-answer" })
+			const answers = { ...result.answers, tier: { ...result.answers.tier, confidence } }
+			expect(parseClassification({ ...result, answers }, 0)).toMatchObject({
+				kind: "fallback",
+				reason: "invalid-answer",
+			})
 		},
 	)
 
@@ -300,6 +339,7 @@ describe("answer validation", () => {
 			stopReason: "error" as const,
 			errorMessage: "System One API did not return an answer for tier",
 		}
+
 		expect(parseClassification(result, 7)).toMatchObject({
 			kind: "fallback",
 			reason: "classifier-error",

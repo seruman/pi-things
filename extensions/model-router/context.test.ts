@@ -3,6 +3,7 @@ import type { AssistantMessage, Message } from "@earendil-works/pi-ai"
 import { HISTORY_LIMIT, HISTORY_MESSAGES, HISTORY_MESSAGE_LIMIT, recentConversation } from "./context"
 
 const user = (content: string): Message => ({ role: "user", content, timestamp: 0 })
+
 const assistant = (content: AssistantMessage["content"]): AssistantMessage => ({
 	role: "assistant",
 	content,
@@ -30,6 +31,7 @@ describe("classifier conversation context", () => {
 			user("ok, implement that"),
 			assistant([{ type: "text", text: "injected after current user" }]),
 		]
+
 		const original = structuredClone(messages)
 		expect(recentConversation(messages)).toBe("user:\nDesign a migration\n\nassistant:\nI propose two migration steps.")
 		expect(messages).toEqual(original)
@@ -65,6 +67,7 @@ describe("classifier conversation context", () => {
 			},
 			user("try another file"),
 		])
+
 		expect(history).toBe(
 			"user:\n[image omitted]\n\nassistant:\n[tool call: read]\n\ntoolResult (read, error):\nFile missing\n[image omitted]",
 		)
@@ -78,6 +81,7 @@ describe("classifier conversation context", () => {
 			user("  "),
 			user("continue"),
 		])
+
 		expect(history).toBe("user:\noriginal task")
 	})
 
@@ -101,6 +105,7 @@ describe("classifier conversation context", () => {
 				content: [{ type: "text" as const, text: `output-${i}` }],
 			},
 		]).flat()
+
 		const history = recentConversation([
 			user("Review the mesh simplification algorithm"),
 			assistant([{ type: "text", text: "The surface stays smooth; I have not checked the boundary vertices." }]),
@@ -108,6 +113,7 @@ describe("classifier conversation context", () => {
 			...toolLoop,
 			user("Summarize why the seam appears"),
 		])
+
 		expect(history).toContain("Review the mesh simplification algorithm")
 		expect(history).toContain("I have not checked the boundary vertices.")
 		expect(history).toContain("The rendered seam disproves that.")
@@ -126,6 +132,7 @@ describe("classifier conversation context", () => {
 			assistant([{ type: "text", text: `Beginning ${"x".repeat(5000)} Final proposal` }]),
 			user("implement it"),
 		])
+
 		expect(history.length).toBe("assistant:\n".length + HISTORY_MESSAGE_LIMIT)
 		expect(history).toStartWith("assistant:\nBeginning ")
 		expect(history).toContain("[truncated]")
@@ -137,6 +144,7 @@ describe("classifier conversation context", () => {
 			...Array.from({ length: 10 }, (_, i) => user(`start-${i} ${"x".repeat(5000)} end-${i}`)),
 			user("latest"),
 		])
+
 		expect(history.length).toBe(HISTORY_LIMIT)
 		expect(history).not.toContain("start-5")
 		expect(history).toStartWith("user:\nstart-6 ")

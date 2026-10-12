@@ -237,13 +237,16 @@ export const routingCases: { id: string; expected: Tier; expectedNewTask?: boole
 // server startup, downloads, or configuration writes.
 if (import.meta.main) {
 	const repeats = Number(process.env.ROUTER_EVAL_REPEATS ?? 1)
+
 	if (!Number.isInteger(repeats) || repeats < 1 || repeats > 20) throw new Error("ROUTER_EVAL_REPEATS must be 1..20")
+
 	const { classifier } = configSchema.parse({
 		classifier: {
 			baseUrl: process.env.ROUTER_EVAL_BASE_URL ?? "http://127.0.0.1:11434/v1",
 			model: process.env.ROUTER_EVAL_MODEL ?? "clef-flash:9b-mxfp8",
 		},
 	})
+
 	const registry = new ModelRegistry(
 		await ModelRuntime.create({
 			credentials: new InMemoryCredentialStore(),
@@ -252,37 +255,48 @@ if (import.meta.main) {
 			refreshOnCreate: false,
 		}),
 	)
+
 	const prewarm = await classifyTier(
 		{ ...classifier, timeoutMs: 30_000 },
 		{ prompt: "Prewarm the local classifier", hasImages: false },
 		registry,
 	)
+
 	if (prewarm.kind !== "classified") throw new Error(`Local classifier unavailable: ${JSON.stringify(prewarm)}`)
 	let passed = 0
 	let underRouted = 0
 	let overRouted = 0
 	let unavailable = 0
 	let continuityErrors = 0
+
 	for (let run = 1; run <= repeats; run++) {
 		for (const { id, expected, expectedNewTask, input } of routingCases) {
 			const result = await classifyTier(classifier, input, registry)
 			const actual = result.kind === "classified" ? result.tier : null
+
 			const taskMatch =
 				expectedNewTask === undefined || (result.kind === "classified" && result.newTask === expectedNewTask)
+
 			const match = actual === expected && taskMatch
+
 			if (match) passed++
+
 			if (actual === null) unavailable++
 			else {
 				if (!taskMatch) continuityErrors++
+
 				if (actual !== expected) {
 					if (expected === "strong") underRouted++
 					else overRouted++
 				}
 			}
+
 			console.log(JSON.stringify({ run, id, expected, expectedNewTask, actual, match, result }))
 		}
 	}
+
 	const total = routingCases.length * repeats
 	console.log(JSON.stringify({ classifier, passed, total, underRouted, overRouted, unavailable, continuityErrors }))
+
 	if (passed !== total) process.exitCode = 1
 }
