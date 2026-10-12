@@ -1,6 +1,6 @@
 ---
 name: hauntty
-description: Use hauntty/ht for persistent terminal sessions. Use when commands need persistent shell state, long-running processes, human attach/detach, interactive terminal workflows, screen dumps, scrollback inspection, or waiting for terminal output.
+description: Use hauntty/ht when explicitly requested, when working with existing hauntty sessions, or when Rex is unavailable. Supports persistent shell state, long-running processes, human attach/detach, interactive terminals, screen dumps, scrollback, and waiting for terminal output.
 ---
 
 # hauntty

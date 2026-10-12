@@ -16,6 +16,7 @@ Me just prompting the shit out of LLMs to create things I want in pi.
   - [ast-grep-refactor](./skills/ast-grep-refactor/SKILL.md)
   - [git-hunks](./skills/git-hunks/SKILL.md)
   - [git-wt](./skills/git-wt/SKILL.md)
+  - [rex](./skills/rex/SKILL.md)
   - [sumocli](./skills/sumocli/SKILL.md)
   - [teteyectl](./skills/teteyectl/SKILL.md)
   - [terminal-browser](./skills/terminal-browser/SKILL.md)
