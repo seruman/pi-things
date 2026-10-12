@@ -66,6 +66,7 @@ function getRunsDir(): string {
 
 export function runDirectory(handle: string): string {
 	if (!/^[a-z0-9]+$/.test(handle)) throw new Error(`Invalid subagent handle: ${handle}`)
+
 	return join(getRunsDir(), handle)
 }
 
@@ -79,10 +80,13 @@ export function metadataPath(runDir: string): string {
 
 function generateHandle(): string {
 	mkdirSync(getRunsDir(), { recursive: true, mode: 0o700 })
+
 	for (let attempt = 0; attempt < 100; attempt++) {
 		const handle = randomBytes(3).toString("hex")
+
 		if (!existsSync(runDirectory(handle))) return handle
 	}
+
 	throw new Error("Could not allocate a unique subagent handle")
 }
 
@@ -106,7 +110,9 @@ export function readMetadata(runDir: string): RunMetadata | undefined {
 
 export function getRun(handle: string): RunMetadata {
 	const metadata = readMetadata(runDirectory(handle))
+
 	if (!metadata) throw new Error(`Unknown subagent: ${handle}`)
+
 	return metadata
 }
 
@@ -179,6 +185,8 @@ export function enqueue(handle: string, message: string, followUp: boolean): voi
 
 export function inboxPending(handle: string): boolean {
 	const directory = inboxDir(runDirectory(handle))
+
 	if (!existsSync(directory)) return false
+
 	return readdirSync(directory).some((file) => file.endsWith(".json"))
 }

@@ -401,10 +401,13 @@ test("send then wait retries a failed turn instead of returning its old error", 
 	await c.reply("OLD FAILURE", "error")
 	await call("agent_send", { handle: run.handle, message: "retry" })
 	let finished = false
+
 	const waiting = call("agent_wait", { handle: run.handle, timeoutSec: 2 }).then((result) => {
 		finished = true
+
 		return result
 	})
+
 	await tick()
 	expect(finished).toBe(false)
 	await tick(250)
@@ -436,6 +439,7 @@ test("completion reads metadata and the transcript after asynchronous process in
 		onProcess = undefined
 		void c.reply("JUST FINISHED")
 	}
+
 	expect(await call("agent_wait", { handle: run.handle })).toMatchObject({ answer: "JUST FINISHED" })
 })
 
@@ -444,6 +448,7 @@ test.each(["polling", "process inspection"])("cancelling wait during %s leaves t
 	const c = await child(run)
 	await c.begin()
 	const controller = new AbortController()
+
 	if (phase === "process inspection") {
 		onProcess = () => {
 			onProcess = undefined
@@ -451,12 +456,15 @@ test.each(["polling", "process inspection"])("cancelling wait during %s leaves t
 			controller.signal.throwIfAborted()
 		}
 	}
+
 	const waiting = call("agent_wait", { handle: run.handle }, controller.signal)
 	await tick()
+
 	if (phase === "polling") {
 		controller.abort()
 		await tick(500)
 	}
+
 	expect(await waiting).toMatchObject({ status: "aborted" })
 	expect(blocks.has(run.blockId)).toBe(true)
 	expect(getRun(run.handle).state).toBe("busy")
@@ -475,6 +483,7 @@ test("cancelling foreground spawn still closes the block and preserves the trans
 	const spawning = call("agent_spawn", { prompt: "task" }, controller.signal)
 	await tick()
 	const run = listRuns()[0]
+
 	if (!run) throw new Error("Missing spawned run")
 	controller.abort()
 	await tick(500)

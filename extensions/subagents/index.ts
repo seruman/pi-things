@@ -559,6 +559,7 @@ function registerCommand(pi: ParentHost, exec: Exec): void {
 				const status = await displayStatus(exec, run)
 
 				if (status.state === "exited" || status.state === "suspended") continue
+
 				const item: SelectItem = {
 					value: run.handle,
 					label: `${runDisplayName(run)}  ${status.state.padEnd(8)}  ${run.provider}/${run.model}  ${run.thinking}`,

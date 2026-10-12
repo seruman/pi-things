@@ -52,14 +52,17 @@ export function installBridge(pi: BridgeHost, runDir: string): void {
 		if (processing || !current || !initializeSession()) return
 		syncSessionName()
 		const directory = inboxDir(runDir)
+
 		if (!existsSync(directory)) return
 		processing = true
+
 		try {
 			for (const name of readdirSync(directory)
 				.filter((entry) => entry.endsWith(".json"))
 				.sort()) {
 				const path = join(directory, name)
 				let payload: ReturnType<typeof inboxMessageSchema.parse>
+
 				try {
 					payload = inboxMessageSchema.parse(JSON.parse(readFileSync(path, "utf8")))
 				} catch (error) {
@@ -78,12 +81,14 @@ export function installBridge(pi: BridgeHost, runDir: string): void {
 							deliverAs: payload.delivery === "followUp" ? "followUp" : "steer",
 						})
 					}
+
 					unlinkSync(path)
 				} catch (error) {
 					updateMetadata(runDir, {
 						state: current.isIdle() ? "idle" : "busy",
 						error: error instanceof Error ? error.message : String(error),
 					})
+
 					return
 				}
 			}

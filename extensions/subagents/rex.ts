@@ -148,11 +148,15 @@ export async function readProcess(
 	signal?: AbortSignal,
 ): Promise<{ exists: boolean; alive: boolean }> {
 	const result = await exec("rex", ["block", "call", "-b", blockId, "process"], signal)
+
 	if (result.code !== 0) {
 		const message = result.stderr.trim() || result.stdout.trim()
+
 		if (message === `Error: block target "${blockId}" not found`) return { exists: false, alive: false }
 		throw new Error(message || "process inspection failed")
 	}
+
 	const info = processSchema.parse(JSON.parse(result.stdout))
+
 	return { exists: true, alive: info.last_exit === null }
 }
