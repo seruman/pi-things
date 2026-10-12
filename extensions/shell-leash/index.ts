@@ -12,6 +12,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("tool_call", async (event, ctx) => {
 		if (!ctx.hasUI) return
+
 		if (!isToolCallEventType("bash", event)) return
 
 		const analysis = analyseShellCommand(event.input.command)
@@ -23,6 +24,7 @@ export default function (pi: ExtensionAPI) {
 		if (analysis.hits.length === 0) return
 
 		const blocked = analysis.hits.filter((hit) => !sessionApproved.has(hit.capability))
+
 		if (blocked.length === 0) return
 
 		const capabilities = [...new Set(blocked.map((hit) => hit.capability))]
@@ -46,6 +48,7 @@ export default function (pi: ExtensionAPI) {
 
 		if (choice !== "Allow once") {
 			const approved = sessionOptions.indexOf(choice)
+
 			if (approved >= 0) sessionApproved.add(capabilities[approved])
 		}
 	})
@@ -54,8 +57,10 @@ export default function (pi: ExtensionAPI) {
 		description: "Manage shell-leash approvals for this session",
 		handler: async (_args, ctx) => {
 			if (!ctx.hasUI) return
+
 			if (ctx.mode !== "tui") {
 				ctx.ui.notify("/shell-leash requires TUI mode", "error")
+
 				return
 			}
 

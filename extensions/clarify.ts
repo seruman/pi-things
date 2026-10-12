@@ -2,7 +2,9 @@ import type { UserMessage } from "@earendil-works/pi-ai"
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent"
 
 const USAGE = "Usage: /clarify <rough prompt> | /clarify with editor text | add -clarify anywhere in a message"
+
 const STATUS_KEY = "clarify"
+
 const MARKER_RE = /(?:^|\s)-clarify(?=\s|$|[.,;:!?…])/gi
 
 const SYSTEM_PROMPT = `Rewrite the user's rough prompt into a clearer prompt for a coding agent.
@@ -19,13 +21,16 @@ type RewriteContext = Pick<ExtensionContext, "hasUI" | "model" | "modelRegistry"
 
 function hasClarifyMarker(text: string): boolean {
 	const value = String(text ?? "")
+
 	if (value.trim() === "-clarify") return true
 	MARKER_RE.lastIndex = 0
+
 	return MARKER_RE.test(value)
 }
 
 function stripClarifyMarker(text: string): string {
 	MARKER_RE.lastIndex = 0
+
 	return String(text ?? "")
 		.replace(MARKER_RE, " ")
 		.replace(/\s+([.,;:!?…])/g, "$1")
@@ -40,20 +45,25 @@ function notify(ctx: RewriteContext, message: string, type: "info" | "warning" |
 function currentModel(ctx: RewriteContext): ExtensionContext["model"] | null {
 	if (ctx.model) return ctx.model
 	notify(ctx, "No current model selected for /clarify.", "error")
+
 	return null
 }
 
 async function rewritePrompt(text: string, ctx: RewriteContext): Promise<string | null> {
 	const raw = text.trim()
+
 	if (!raw) {
 		notify(ctx, USAGE, "warning")
+
 		return null
 	}
 
 	const model = currentModel(ctx)
+
 	if (!model) return null
 
 	ctx.ui.setStatus(STATUS_KEY, `Clarifying with ${model.provider}/${model.id}…`)
+
 	try {
 		const message: UserMessage = {
 			role: "user",
@@ -70,18 +80,20 @@ async function rewritePrompt(text: string, ctx: RewriteContext): Promise<string 
 			.result()
 
 		if (response.stopReason === "aborted") return null
+
 		if (response.stopReason === "error") throw new Error(response.errorMessage ?? "/clarify failed")
 
 		const rewritten = response.content
-			.filter((part): part is { type: "text"; text: string } => part.type === "text" && typeof part.text === "string")
-			.map((part) => part.text)
+			.flatMap((part) => (part.type === "text" ? [part.text] : []))
 			.join("\n")
 			.trim()
 
 		if (!rewritten) throw new Error("/clarify returned empty text")
+
 		return rewritten
 	} catch (error) {
 		notify(ctx, error instanceof Error ? error.message : String(error), "error")
+
 		return null
 	} finally {
 		ctx.ui.setStatus(STATUS_KEY, undefined)
@@ -90,6 +102,7 @@ async function rewritePrompt(text: string, ctx: RewriteContext): Promise<string 
 
 async function putRewriteInEditor(text: string, ctx: RewriteContext): Promise<void> {
 	const rewritten = await rewritePrompt(text, ctx)
+
 	if (rewritten === null) return
 
 	ctx.ui.setEditorText(rewritten)
@@ -106,6 +119,7 @@ export default function clarifyExtension(pi: ExtensionAPI): void {
 
 			if (!source) {
 				notify(ctx, USAGE, "warning")
+
 				return
 			}
 
@@ -119,12 +133,15 @@ export default function clarifyExtension(pi: ExtensionAPI): void {
 		}
 
 		const source = stripClarifyMarker(event.text)
+
 		if (!source) {
 			notify(ctx, USAGE, "warning")
+
 			return { action: "handled" }
 		}
 
 		await putRewriteInEditor(source, ctx)
+
 		return { action: "handled" }
 	})
 }

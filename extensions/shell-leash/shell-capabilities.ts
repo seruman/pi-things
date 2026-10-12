@@ -65,9 +65,12 @@ function commandRule(id: string, parts: string[], predicate?: (argv: Argv) => bo
 function isDestructiveRm(argv: Argv): boolean {
 	for (const arg of argv.slice(1)) {
 		if (arg === "--") return false
+
 		if (arg === "--force" || arg === "--recursive") return true
+
 		if (/^-[^-]/u.test(arg) && /[fRr]/u.test(arg.slice(1))) return true
 	}
+
 	return false
 }
 
@@ -82,8 +85,11 @@ function unwrapShellWrapper(argv: Argv): Argv | null {
 
 	if (argv[0] === "env") {
 		let i = 1
+
 		while (i < argv.length && argv[i]?.includes("=")) i++
+
 		if (argv[i] === "command") i++
+
 		if (isShell(argv[i])) return argv.slice(i)
 	}
 
@@ -106,6 +112,7 @@ export const DEFAULT_CAPABILITIES: Capability[] = [
 		commandRule("git.restore.staged", ["git", "restore"], (argv) => argv.includes("--staged")),
 		commandRule("git.restore.source", ["git", "restore"], (argv) => {
 			const sourceIndex = argv.indexOf("--source")
+
 			return argv.some((arg) => arg.startsWith("--source=")) || (sourceIndex >= 0 && sourceIndex < argv.length - 1)
 		}),
 		commandRule("git.restore.path", ["git", "restore"]),
@@ -146,6 +153,7 @@ export function analyseShellCommand(input: string, options: AnalyseShellCommandO
 	const hits: CapabilityHit[] = []
 
 	let ast: ScriptNode
+
 	try {
 		ast = parse(input)
 	} catch (error) {
@@ -175,8 +183,10 @@ export function analyseShellCommand(input: string, options: AnalyseShellCommandO
 		}
 
 		const nested = nestedShellSource(argv)
+
 		if (!nested) return
 		const nestedSource = `${source} > ${nested.shell} ${nested.flag}`
+
 		try {
 			const nestedAst = parse(nested.script)
 			walkScript(nestedAst, nestedSource, visitCommand)
@@ -199,12 +209,17 @@ export function analyseShellCommand(input: string, options: AnalyseShellCommandO
 
 function nestedShellSource(argv: Argv): { shell: string; flag: "-c" | "-lc"; script: string } | null {
 	const nestedArgv = unwrapShellWrapper(argv)
+
 	if (!nestedArgv) return null
+
 	for (let index = 1; index < nestedArgv.length - 1; index++) {
 		const flag = nestedArgv[index]
+
 		if (flag !== "-c" && flag !== "-lc") continue
+
 		return { shell: nestedArgv[0], flag, script: nestedArgv[index + 1] }
 	}
+
 	return null
 }
 
@@ -227,43 +242,60 @@ function walkCommand(command: CommandNode, source: string, onCommand: (argv: Arg
 		case "SimpleCommand": {
 			const argv = toArgv(command)
 			onCommand(argv, source)
+
 			if (command.name) walkWord(command.name, source, onCommand)
+
 			for (const arg of command.args) walkWord(arg, source, onCommand)
+
 			for (const assignment of command.assignments) {
 				if (assignment.value) walkWord(assignment.value, source, onCommand)
+
 				for (const item of assignment.array ?? []) walkWord(item, source, onCommand)
 			}
+
 			return
 		}
+
 		case "If":
 			for (const clause of command.clauses) {
 				for (const condition of clause.condition) walkStatement(condition, source, onCommand)
+
 				for (const body of clause.body) walkStatement(body, source, onCommand)
 			}
+
 			for (const body of command.elseBody ?? []) walkStatement(body, source, onCommand)
+
 			return
 		case "For":
 			for (const word of command.words ?? []) walkWord(word, source, onCommand)
+
 			for (const body of command.body) walkStatement(body, source, onCommand)
+
 			return
 		case "While":
 		case "Until":
 			for (const condition of command.condition) walkStatement(condition, source, onCommand)
+
 			for (const body of command.body) walkStatement(body, source, onCommand)
+
 			return
 		case "CStyleFor":
 		case "Subshell":
 		case "Group":
 			for (const body of command.body) walkStatement(body, source, onCommand)
+
 			return
 		case "Case":
 			walkWord(command.word, source, onCommand)
+
 			for (const item of command.items) {
 				for (const body of item.body) walkStatement(body, source, onCommand)
 			}
+
 			return
 		case "FunctionDef":
 			walkCommand(command.body, source, onCommand)
+
 			return
 		default:
 			return
@@ -284,10 +316,12 @@ function walkWord(word: WordNode, source: string, onCommand: (argv: Argv, source
 					if (inner.type === "CommandSubstitution") {
 						walkScript(inner.body, `${source} > command-substitution`, onCommand)
 					}
+
 					if (inner.type === "ProcessSubstitution") {
 						walkScript(inner.body, `${source} > process-substitution`, onCommand)
 					}
 				}
+
 				break
 		}
 	}
@@ -295,7 +329,9 @@ function walkWord(word: WordNode, source: string, onCommand: (argv: Argv, source
 
 function toArgv(command: SimpleCommandNode): Argv {
 	const argv = command.name ? [wordToText(command.name)] : []
+
 	for (const arg of command.args) argv.push(wordToText(arg))
+
 	return argv.filter(Boolean)
 }
 
@@ -330,6 +366,6 @@ function partToText(part: WordPart): string {
 	}
 }
 
-function toErrorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error)
+function toErrorMessage(cause: unknown): string {
+	return cause instanceof Error ? cause.message : String(cause)
 }
