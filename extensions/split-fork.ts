@@ -108,7 +108,7 @@ export function resolvePiInvocation(
 	return [appName]
 }
 
-function getPiInvocationParts(): string[] {
+export function getPiInvocationParts(): string[] {
 	const currentScript = process.argv[1]
 	const appName = resolveAppName(getPackageDir())
 	return resolvePiInvocation(

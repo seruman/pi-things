@@ -165,6 +165,15 @@ describe("Pi child startup", () => {
 		])
 	})
 
+	test.each(["/usr/bin/node", "/usr/bin/bun"])("reuses %s and the current Pi script", (runtime) => {
+		expect(resolvePiInvocation(runtime, "/opt/pi/cli.js", true)).toEqual([runtime, "/opt/pi/cli.js"])
+	})
+
+	test("falls back to pi only when the generic runtime has no usable script", () => {
+		expect(resolvePiInvocation("/usr/bin/node", undefined, false)).toEqual(["pi"])
+		expect(resolvePiInvocation("/usr/bin/bun", "/missing/cli.js", false)).toEqual(["pi"])
+	})
+
 	test("spawns a rebranded Pi by name so the new pane goes through its wrapper", () => {
 		expect(resolvePiInvocation("/nix/store/example/lib/pi/pi", "/$bunfs/root/pi", true, "piw")).toEqual(["piw"])
 	})
