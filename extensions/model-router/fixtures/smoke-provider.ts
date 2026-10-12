@@ -7,7 +7,7 @@ export default function (pi: ExtensionAPI) {
 		api: "router-smoke-api",
 		baseUrl: "http://unused.invalid",
 		apiKey: "test-only",
-		models: ["small", "middle", "big"].map((id) => ({
+		models: ["middle", "big"].map((id) => ({
 			id,
 			name: id,
 			reasoning: true,

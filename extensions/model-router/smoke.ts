@@ -20,7 +20,6 @@ const config = configSchema.parse({
 	routers: {
 		smoke: {
 			tiers: {
-				trivial: { provider: "router-smoke", model: "small", thinking: "low" },
 				standard: { provider: "router-smoke", model: "middle", thinking: "medium" },
 				strong: { provider: "router-smoke", model: "big", thinking: "high" },
 			},
@@ -51,11 +50,17 @@ assert.equal(prewarm.kind, "classified", `Local classifier unavailable: ${JSON.s
 const directory = fileURLToPath(new URL(".", import.meta.url))
 const session = join(root, "session.jsonl")
 const prompts = [
-	"What command prints the current working directory?",
-	"Design a distributed payment ledger that preserves correctness across retries, out-of-order events, and partial failures. Explain consistency tradeoffs.",
-	"Yes, go ahead with that design.",
+	{ prompt: "What command prints the current working directory?", tier: "standard", newTask: true },
+	{
+		prompt:
+			"Design a distributed payment ledger that preserves correctness across retries, out-of-order events, and partial failures. Explain consistency tradeoffs.",
+		tier: "strong",
+		newTask: true,
+	},
+	{ prompt: "Yes, go ahead with that design.", tier: "strong", newTask: false },
+	{ prompt: "Unrelated task: what command prints the current working directory?", tier: "standard", newTask: true },
 ]
-for (const [index, prompt] of prompts.entries()) {
+for (const [index, { prompt, tier, newTask }] of prompts.entries()) {
 	const child = Bun.spawn(
 		[
 			process.env.ROUTER_SMOKE_PI ?? "pi",
@@ -110,11 +115,19 @@ for (const [index, prompt] of prompts.entries()) {
 		assert.equal(decisions.length, index + 1)
 		const decision = decisions.at(-1).data
 		assert.equal(decision.classifier.kind, "classified", JSON.stringify(decision))
-		const confidenceGated =
-			decision.classifier.tier !== "strong" && decision.classifier.confidence < config.minConfidence
-		assert.equal(decision.action, confidenceGated ? "confidence-gated" : "classified", JSON.stringify(decision))
-		assert.equal(decision.tier, confidenceGated ? "strong" : decision.classifier.tier)
-		assert.equal(decision.minConfidence, config.minConfidence)
+		assert.equal(decision.classifier.newTask, newTask, JSON.stringify(decision))
+		const probabilityTier =
+			decision.classifier.probabilities.strong >= config.strongProbabilityThreshold ? "strong" : "standard"
+		const taskFloor = prompts[index - 1]?.tier === "strong" && !newTask && probabilityTier === "standard"
+		const action = taskFloor
+			? "task-floor"
+			: probabilityTier !== decision.classifier.tier
+				? "probability-routed"
+				: "classified"
+		assert.equal(decision.action, action, JSON.stringify(decision))
+		assert.equal(decision.probabilityTier, probabilityTier)
+		assert.equal(decision.tier, tier)
+		assert.equal(decision.strongProbabilityThreshold, config.strongProbabilityThreshold)
 		const answer = entries
 			.filter((entry) => entry.type === "message" && entry.message.role === "assistant")
 			.at(-1).message
@@ -128,7 +141,7 @@ for (const [index, prompt] of prompts.entries()) {
 			JSON.stringify({
 				prompt,
 				action: decision.action,
-				minConfidence: decision.minConfidence,
+				strongProbabilityThreshold: decision.strongProbabilityThreshold,
 				tier: decision.tier,
 				model: answer.model,
 				thinking: answer.thinkingLevel,

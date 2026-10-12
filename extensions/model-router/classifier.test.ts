@@ -36,7 +36,7 @@ function valid(): ClassifierResult {
 			tier: {
 				type: "choice",
 				choice: "standard",
-				probabilities: { trivial: 0.2, standard: 0.5, strong: 0.3 },
+				probabilities: { standard: 0.7, strong: 0.3 },
 				confidence: 0.01,
 			},
 			newTask: { type: "bool", probability: 0.2 },
@@ -51,7 +51,7 @@ function wire() {
 			tier: {
 				type: "choice",
 				choice: "standard",
-				probabilities: { trivial: 0.2, standard: 0.5, strong: 0.3 },
+				probabilities: { standard: 0.7, strong: 0.3 },
 				confidence: 0.01,
 			},
 			newTask: { type: "noul", noul: 0.2 },
@@ -82,10 +82,16 @@ describe("local classifier", () => {
 			recentConversation: "h".repeat(30_000),
 		})
 		expect((context.state.recentConversation as string).length).toBe(HISTORY_LIMIT)
-		expect((context.state.prompt as string).length).toBe(PROMPT_LIMIT)
-		expect((context.state.establishingTask as string).length).toBe(TASK_LIMIT)
+		expect((context.state.latestRequest as string).length).toBe(PROMPT_LIMIT)
+		expect((context.state.previousTask as string).length).toBe(TASK_LIMIT)
 		expect(context.state.currentTier).toBe("standard")
 		expect(Object.keys(context.questions)).toEqual(["tier", "newTask"])
+		expect(Object.keys(context.questions.tier.criteria)).toEqual(["standard", "strong"])
+		expect(context.questions.tier.instructions).toContain("Simple wording can require deep reasoning")
+		expect(context.questions.tier.instructions).toContain("repeated substantive corrections")
+		expect(context.questions.tier.instructions).toContain("A new explicit request overrides the previous task and tier")
+		expect(context.state).not.toHaveProperty("establishingTask")
+		expect(context.state).not.toHaveProperty("prompt")
 		expect(JSON.stringify(context)).not.toContain("gpt")
 		expect(JSON.stringify(context)).not.toContain("claude")
 	})
@@ -107,7 +113,7 @@ describe("local classifier", () => {
 		expect(requests[0].authorization).toBe("Bearer local")
 		expect(requests[0].body).toMatchObject({
 			model: config.model,
-			state: { prompt: "continue", establishingTask: "Build a CLI" },
+			state: { latestRequest: "continue", previousTask: "Build a CLI" },
 		})
 	})
 
@@ -266,15 +272,16 @@ describe("answer validation", () => {
 	})
 
 	test.each([
-		{ type: "choice", choice: "bogus", probabilities: { trivial: 0, standard: 1, strong: 0 }, confidence: 1 },
+		{ type: "choice", choice: "bogus", probabilities: { standard: 1, strong: 0 }, confidence: 1 },
+		{ type: "choice", choice: "trivial", probabilities: { trivial: 1, standard: 0, strong: 0 }, confidence: 1 },
 		{ type: "choice", choice: "standard", probabilities: { standard: 1 }, confidence: 1 },
 		{
 			type: "choice",
 			choice: "standard",
-			probabilities: { trivial: 0, standard: Number.NaN, strong: 0 },
+			probabilities: { standard: Number.NaN, strong: 0 },
 			confidence: 1,
 		},
-		{ type: "choice", choice: "standard", probabilities: { trivial: 0, standard: 1, strong: 0 }, confidence: 2 },
+		{ type: "choice", choice: "standard", probabilities: { standard: 1, strong: 0 }, confidence: 2 },
 	])("rejects invalid tier answer %#", (tier) => {
 		const result = valid()
 		result.answers.tier = tier as ClassifierResult["answers"][string]

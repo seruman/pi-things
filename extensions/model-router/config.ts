@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs"
 import { z } from "zod"
 
-export const TIERS = ["trivial", "standard", "strong"] as const
+export const TIERS = ["standard", "strong"] as const
 export type Tier = (typeof TIERS)[number]
 
 export const thinkingSchema = z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"])
@@ -12,21 +12,19 @@ const target = z
 		thinking: thinkingSchema,
 	})
 	.strict()
-const tiers = z.object({ trivial: target, standard: target, strong: target }).strict()
+const tiers = z.object({ standard: target, strong: target }).strict()
 const router = z.object({ tiers }).strict()
 
 // Preset names are virtual-model IDs, not provider IDs. Routing logic only knows abstract tiers.
 const presets: Record<string, z.infer<typeof router>> = {
 	codex: {
 		tiers: {
-			trivial: { provider: "openai-codex", model: "gpt-6-luna", thinking: "low" },
 			standard: { provider: "openai-codex", model: "gpt-6.1-sol", thinking: "medium" },
 			strong: { provider: "openai-codex", model: "gpt-6-astra", thinking: "high" },
 		},
 	},
 	bedrock: {
 		tiers: {
-			trivial: { provider: "amazon-bedrock", model: "global.anthropic.claude-sonnet-5-5", thinking: "medium" },
 			standard: { provider: "amazon-bedrock", model: "global.anthropic.claude-sonnet-5-5", thinking: "medium" },
 			strong: { provider: "amazon-bedrock", model: "global.anthropic.claude-opus-5-5", thinking: "high" },
 		},
@@ -57,6 +55,7 @@ const classifier = z
 
 const tierOverrides = z
 	.object({
+		// Read old configs without rewriting them; this retired tier is never merged or routed.
 		trivial: target.partial().optional(),
 		standard: target.partial().optional(),
 		strong: target.partial().optional(),
@@ -78,7 +77,9 @@ export const configSchema = z
 			.default({}),
 		classifier: classifier.default({}),
 		toolFailureThreshold: z.number().int().min(1).max(100).default(3),
-		minConfidence: z.number().finite().min(0).max(1).default(0),
+		// Retired entropy gate: accept old files, but do not reinterpret its value as a probability.
+		minConfidence: z.number().finite().min(0).max(1).optional(),
+		strongProbabilityThreshold: z.number().finite().min(0).max(1).default(0.5),
 	})
 	.strict()
 	.transform((config, ctx) => {
@@ -96,11 +97,12 @@ export const configSchema = z
 				for (const issue of merged.error.issues) ctx.addIssue({ ...issue, path: ["routers", name, ...issue.path] })
 			} else resolved.push([name, merged.data])
 		}
-		return { ...config, routers: Object.fromEntries(resolved) }
+		const { minConfidence: _retired, ...settings } = config
+		return { ...settings, routers: Object.fromEntries(resolved) }
 	})
 
 export type RouterConfig = z.infer<typeof router> &
-	Pick<z.infer<typeof configSchema>, "classifier" | "toolFailureThreshold" | "minConfidence">
+	Pick<z.infer<typeof configSchema>, "classifier" | "toolFailureThreshold" | "strongProbabilityThreshold">
 
 export function loadConfig(path: string): z.infer<typeof configSchema> {
 	let contents = "{}"

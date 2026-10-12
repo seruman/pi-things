@@ -10,7 +10,6 @@ afterEach(() => {
 })
 const mixed = {
 	tiers: {
-		trivial: { provider: "local", model: "open-model", thinking: "off" },
 		standard: { provider: "openai-codex", model: "gpt-6.1-sol", thinking: "medium" },
 		strong: { provider: "amazon-bedrock", model: "global.anthropic.claude-opus-5-5", thinking: "high" },
 	},
@@ -28,12 +27,10 @@ describe("router configuration", () => {
 		expect(config).toEqual(configSchema.parse({}))
 		expect(Object.keys(config.routers)).toEqual(["codex", "bedrock"])
 		expect(config.routers.codex.tiers).toEqual({
-			trivial: { provider: "openai-codex", model: "gpt-6-luna", thinking: "low" },
 			standard: { provider: "openai-codex", model: "gpt-6.1-sol", thinking: "medium" },
 			strong: { provider: "openai-codex", model: "gpt-6-astra", thinking: "high" },
 		})
 		expect(config.routers.bedrock.tiers).toEqual({
-			trivial: { provider: "amazon-bedrock", model: "global.anthropic.claude-sonnet-5-5", thinking: "medium" },
 			standard: { provider: "amazon-bedrock", model: "global.anthropic.claude-sonnet-5-5", thinking: "medium" },
 			strong: { provider: "amazon-bedrock", model: "global.anthropic.claude-opus-5-5", thinking: "high" },
 		})
@@ -43,7 +40,7 @@ describe("router configuration", () => {
 			timeoutMs: 10000,
 		})
 		expect(config.toolFailureThreshold).toBe(3)
-		expect(config.minConfidence).toBe(0)
+		expect(config.strongProbabilityThreshold).toBe(0.5)
 	})
 
 	test("partial tier overrides preserve unspecified model/provider/thinking and other tiers", () => {
@@ -52,7 +49,7 @@ describe("router configuration", () => {
 				codex: {
 					tiers: {
 						strong: { thinking: "max" },
-						trivial: { provider: "local", model: "open-model" },
+						standard: { provider: "local", model: "open-model" },
 					},
 				},
 			},
@@ -62,8 +59,8 @@ describe("router configuration", () => {
 			model: "gpt-6-astra",
 			thinking: "max",
 		})
-		expect(config.routers.codex.tiers.trivial).toEqual({ provider: "local", model: "open-model", thinking: "low" })
-		expect(config.routers.codex.tiers.standard).toEqual(configSchema.parse({}).routers.codex.tiers.standard)
+		expect(config.routers.codex.tiers.standard).toEqual({ provider: "local", model: "open-model", thinking: "medium" })
+		expect(configSchema.parse({}).routers.codex.tiers.standard.model).toBe("gpt-6.1-sol")
 		// Loading another agent's config must not inherit mutations from a previous merge.
 		expect(configSchema.parse({}).routers.codex.tiers.strong.thinking).toBe("high")
 	})
@@ -74,7 +71,7 @@ describe("router configuration", () => {
 			routers: { mixed },
 			classifier: { timeoutMs: 5000 },
 			toolFailureThreshold: 4,
-			minConfidence: 0.9,
+			strongProbabilityThreshold: 0.3,
 		})
 		writeFileSync(file, contents)
 		const config = loadConfig(file)
@@ -82,7 +79,7 @@ describe("router configuration", () => {
 		expect(config.routers.mixed).toEqual(mixed)
 		expect(config.classifier.timeoutMs).toBe(5000)
 		expect(config.toolFailureThreshold).toBe(4)
-		expect(config.minConfidence).toBe(0.9)
+		expect(config.strongProbabilityThreshold).toBe(0.3)
 		expect(await Bun.file(file).text()).toBe(contents)
 	})
 
@@ -92,9 +89,26 @@ describe("router configuration", () => {
 				false,
 			)
 		}
-		expect(() => configSchema.parse({ routers: { custom: { tiers: { trivial: mixed.tiers.trivial } } } })).toThrow(
+		expect(() => configSchema.parse({ routers: { custom: { tiers: { strong: mixed.tiers.strong } } } })).toThrow(
 			"standard",
 		)
+	})
+
+	test("legacy trivial overrides are ignored, not routed or written back", async () => {
+		const path = tempFile()
+		const contents = JSON.stringify({
+			routers: {
+				bedrock: { tiers: { trivial: { model: "old-cheap-model" } } },
+				mixed: { tiers: { ...mixed.tiers, trivial: { provider: "old", model: "cheap", thinking: "low" } } },
+			},
+		})
+		writeFileSync(path, contents)
+		const config = loadConfig(path)
+		expect(Object.keys(config.routers.bedrock.tiers)).toEqual(["standard", "strong"])
+		expect(config.routers.bedrock.tiers.standard.model).toBe("global.anthropic.claude-sonnet-5-5")
+		expect(config.routers.mixed).toEqual(mixed)
+		expect(JSON.stringify(config)).not.toContain("cheap")
+		expect(await Bun.file(path).text()).toBe(contents)
 	})
 
 	test("supports a Nix-style symlink without changing its target", async () => {
@@ -150,19 +164,34 @@ describe("router configuration", () => {
 		},
 	)
 
-	test.each([0, 0.5, 0.85, 1])("accepts confidence threshold %s", (minConfidence) => {
-		expect(configSchema.parse({ minConfidence }).minConfidence).toBe(minConfidence)
+	test.each([0, 0.5, 0.85, 1])("accepts strong probability threshold %s", (strongProbabilityThreshold) => {
+		expect(configSchema.parse({ strongProbabilityThreshold }).strongProbabilityThreshold).toBe(
+			strongProbabilityThreshold,
+		)
 	})
 
 	test.each([-0.01, 1.01, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, "0.85", null])(
-		"rejects invalid confidence threshold %s",
-		(minConfidence) => {
-			expect(configSchema.safeParse({ minConfidence }).success).toBe(false)
+		"rejects invalid strong probability threshold %s",
+		(strongProbabilityThreshold) => {
+			expect(configSchema.safeParse({ strongProbabilityThreshold }).success).toBe(false)
 		},
 	)
 
+	test("legacy entropy threshold is ignored, not reinterpreted or written back", async () => {
+		const path = tempFile()
+		const contents = JSON.stringify({ minConfidence: 0.85 })
+		writeFileSync(path, contents)
+		const config = loadConfig(path)
+		expect(config.strongProbabilityThreshold).toBe(0.5)
+		expect(config).not.toHaveProperty("minConfidence")
+		expect(
+			configSchema.parse({ minConfidence: 0.85, strongProbabilityThreshold: 0.3 }).strongProbabilityThreshold,
+		).toBe(0.3)
+		expect(await Bun.file(path).text()).toBe(contents)
+	})
+
 	test("requires valid thinking and bounded positive timeout/threshold", () => {
-		expect(configSchema.safeParse({ routers: { codex: { tiers: { trivial: { thinking: "auto" } } } } }).success).toBe(
+		expect(configSchema.safeParse({ routers: { codex: { tiers: { standard: { thinking: "auto" } } } } }).success).toBe(
 			false,
 		)
 		for (const timeoutMs of [0, -1, 0.5, 120001]) {

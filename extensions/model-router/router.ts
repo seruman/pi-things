@@ -16,6 +16,7 @@ const stateSchema = z.object({
 	toolCursor: z.string().nullable(),
 	failures: z.number().int().nonnegative(),
 })
+const persistedStateSchema = z.union([stateSchema, stateSchema.extend({ tier: z.literal("trivial") })])
 export type RouterState = z.infer<typeof stateSchema>
 export type RouteRequest = ModelRouteRequest<RouterState>
 
@@ -93,8 +94,13 @@ export function createRouter(
 			if (request.reason === "direct") return target(config, "strong", ctx)
 
 			const branch = ctx.sessionManager.getBranch()
-			const parsed = stateSchema.safeParse(request.state)
-			const state = parsed.success ? parsed.data : undefined
+			const parsed = persistedStateSchema.safeParse(request.state)
+			const migrated = parsed.success && parsed.data.tier === "trivial"
+			const state: RouterState | undefined = parsed.success
+				? parsed.data.tier === "trivial"
+					? { ...parsed.data, tier: "standard", selection: { ...config.tiers.standard } }
+					: parsed.data
+				: undefined
 			const input = freshInput
 			freshInput = undefined
 			const base = { version: 1, reason: request.reason, userEntryId: lastUserId(branch) }
@@ -129,13 +135,22 @@ export function createRouter(
 						signal,
 					)
 					signal.throwIfAborted()
-					const confidenceGated =
-						decision.kind === "classified" && decision.tier !== "strong" && decision.confidence < config.minConfidence
-					let tier = decision.kind === "classified" && !confidenceGated ? decision.tier : "strong"
+					// Raw P(strong), not entropy confidence; calibration is deliberately deferred.
+					const probabilityTier: Tier | undefined =
+						decision.kind === "classified"
+							? decision.probabilities.strong >= config.strongProbabilityThreshold
+								? "strong"
+								: "standard"
+							: undefined
+					let tier = probabilityTier ?? "strong"
+					const taskFloor =
+						state?.tier === "strong" && decision.kind === "classified" && !decision.newTask && tier === "standard"
+					if (taskFloor) tier = "strong"
+					const probabilityRouted = decision.kind === "classified" && probabilityTier !== decision.tier
 					const continuing = state && decision.kind === "classified" && !decision.newTask && tier === state.tier
 					const failures = continuing ? toolFailures(state, branch, config.toolFailureThreshold) : undefined
 					const escalated = failures?.escalate && tier !== "strong"
-					if (escalated) tier = TIERS[TIERS.indexOf(tier) + 1]
+					if (escalated) tier = "strong"
 					const route = target(config, tier, ctx)
 					route.state = {
 						version: 1,
@@ -155,9 +170,16 @@ export function createRouter(
 						warnedUnavailable = true
 					}
 					const result = recordRoute(route, {
-						action: confidenceGated ? "confidence-gated" : escalated ? "escalated" : decision.kind,
+						action: taskFloor
+							? "task-floor"
+							: escalated
+								? "escalated"
+								: probabilityRouted
+									? "probability-routed"
+									: decision.kind,
 						tier,
-						minConfidence: config.minConfidence,
+						probabilityTier,
+						strongProbabilityThreshold: config.strongProbabilityThreshold,
 						classifier: {
 							model: config.classifier.model,
 							baseUrl: config.classifier.baseUrl,
@@ -172,9 +194,13 @@ export function createRouter(
 								: decision.reason === "attachments"
 									? "Images attached; using strong"
 									: "Local classification failed; using strong"
-							: confidenceGated
-								? "Confidence gate; using strong"
-								: "Routing complete"
+							: taskFloor
+								? "Same task; keeping strong"
+								: escalated
+									? "Tool failures; using strong"
+									: probabilityRouted
+										? `Probability threshold; using ${tier}`
+										: "Routing complete"
 					feedback.finish(`${outcome} · ${route.model.provider}/${route.model.id} · ${seconds(decision.durationMs)}`)
 					return result
 				} finally {
@@ -185,8 +211,13 @@ export function createRouter(
 
 			// `previous` skips failed requests and may belong to an older task—even on the same model
 			// with different thinking. Saved selection is authoritative; Pi applies the same thinking clamp again.
+			// Legacy trivial retries must not resurrect the removed model through `failed`.
 			const sticky =
-				request.reason === "retry" && request.failed ? request.failed : state ? undefined : request.previous
+				request.reason === "retry" && request.failed && !migrated
+					? request.failed
+					: state
+						? undefined
+						: request.previous
 			const tier = state?.tier ?? "strong"
 			let route: ModelRoute<RouterState> = sticky
 				? { model: sticky.model, thinkingLevel: sticky.thinkingLevel ?? config.tiers[tier].thinking }
@@ -195,11 +226,14 @@ export function createRouter(
 					: target(config, tier, ctx)
 			let action = state || sticky ? "retained" : "no-route"
 			let nextTier: Tier = tier
-			// Retries always preserve the failed model and thinking. Failure escalation waits for a non-retry request.
+			// Persist normalization even when no bookkeeping changes, including on retry.
+			if (migrated) route.state = state
+			// Except for legacy migration, retries preserve the failed model and thinking.
+			// Failure escalation waits for a non-retry request.
 			if (state && request.reason !== "retry") {
 				const failures = toolFailures(state, branch, config.toolFailureThreshold)
 				if (failures.escalate && tier !== "strong") {
-					nextTier = TIERS[TIERS.indexOf(tier) + 1]
+					nextTier = "strong"
 					route = target(config, nextTier, ctx)
 					action = "escalated"
 				}
