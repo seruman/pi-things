@@ -19,6 +19,7 @@
     "test:split-handoff": "bun test extensions/split-handoff.test.ts",
     "test:model-router": "bun --no-env-file test extensions/model-router/*.test.ts",
     "smoke:model-router": "bun --no-env-file run extensions/model-router/smoke.ts",
+    "eval:model-router": "bun --no-env-file run extensions/model-router/evaluate.ts",
     "typecheck:model-router": "bunx tsc -p extensions/model-router/tsconfig.json",
     "typecheck:web-tools": "bunx tsc -p extensions/web-tools/tsconfig.json",
     "typecheck:pi-safety": "bunx tsc -p extensions/pi-safety/tsconfig.json",
