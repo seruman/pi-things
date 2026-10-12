@@ -26,7 +26,7 @@ const presets: Record<string, z.infer<typeof router>> = {
 	},
 	bedrock: {
 		tiers: {
-			trivial: { provider: "amazon-bedrock", model: "global.anthropic.claude-haiku-5-5", thinking: "low" },
+			trivial: { provider: "amazon-bedrock", model: "global.anthropic.claude-sonnet-5-5", thinking: "medium" },
 			standard: { provider: "amazon-bedrock", model: "global.anthropic.claude-sonnet-5-5", thinking: "medium" },
 			strong: { provider: "amazon-bedrock", model: "global.anthropic.claude-opus-5-5", thinking: "high" },
 		},
