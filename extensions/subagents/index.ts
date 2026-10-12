@@ -5,7 +5,7 @@ import {
 	type AssistantMessage,
 	type JsonValue,
 	type Static,
-	type TSchema,
+	StringEnum,
 	type TextContent,
 	Type,
 	type Usage,
@@ -16,11 +16,11 @@ import {
 	type ExtensionContext,
 	type SessionEntry,
 	SessionManager,
-	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent"
 import { type SelectItem, SelectList } from "@earendil-works/pi-tui"
 import { getPiInvocationParts } from "../split-fork"
-import { type LifecycleEvent, installBridge } from "./bridge"
+import { installBridge } from "./bridge"
+import type { ParentContext, ParentHost } from "./contracts"
 import {
 	type Exec,
 	type RunState,
@@ -48,44 +48,6 @@ import {
 	writeMetadata,
 } from "./runs"
 import { childUsage } from "./usage"
-
-export type ParentContext = Pick<ExtensionContext, "cwd" | "hasUI"> & {
-	model?: Pick<NonNullable<ExtensionContext["model"]>, "provider" | "id">
-	sessionManager: Pick<ExtensionContext["sessionManager"], "getSessionId">
-	ui: Pick<ExtensionContext["ui"], "notify" | "custom"> & {
-		setWidget(key: string, lines: string[] | undefined, options?: { placement: "belowEditor" }): void
-		theme: Pick<ExtensionContext["ui"]["theme"], "fg">
-	}
-}
-
-export type ParentHandler = (event: LifecycleEvent, ctx: ParentContext) => void | Promise<void>
-
-export type SubagentTool<TParams extends TSchema, TDetails extends JsonValue> = Omit<
-	ToolDefinition<TParams, TDetails>,
-	"execute"
-> & {
-	execute(
-		id: string,
-		params: Static<TParams>,
-		signal: AbortSignal | undefined,
-		onUpdate: ((result: AgentToolResult<TDetails>) => void) | undefined,
-		ctx: ParentContext,
-	): Promise<AgentToolResult<TDetails>>
-}
-
-export interface ParentAPI {
-	on(event: "session_start" | "session_shutdown", handler: ParentHandler): void
-	exec: ExtensionAPI["exec"]
-	getThinkingLevel: ExtensionAPI["getThinkingLevel"]
-	registerCommand(
-		name: string,
-		command: {
-			description: string
-			handler(args: string, ctx: ParentContext): Promise<void>
-		},
-	): void
-	registerTool<TParams extends TSchema, TDetails extends JsonValue>(tool: SubagentTool<TParams, TDetails>): void
-}
 
 const EXCLUDED = ["codemode", "agent_spawn", "agent_send", "agent_wait", "agent_stop", "agent_list", "agent_rename"]
 
@@ -145,8 +107,8 @@ const listSchema = Type.Object({
 			sessionFile: Type.String(),
 			cwd: Type.String(),
 			model: modelSchema,
-			thinking: Type.Union(thinkingLevels.map((level) => Type.Literal(level))),
-			state: Type.Union(runStates.map((state) => Type.Literal(state))),
+			thinking: StringEnum(thinkingLevels),
+			state: StringEnum(runStates),
 			error: Type.Optional(Type.String()),
 		}),
 	),
@@ -183,7 +145,7 @@ const spawnParameters = Type.Object({
 	name: Type.Optional(nameParameter),
 	cwd: Type.Optional(Type.String()),
 	model: Type.Optional(Type.String({ description: "Model id. Defaults to the parent's model." })),
-	thinkingLevel: Type.Optional(Type.Union(thinkingLevels.map((level) => Type.Literal(level)))),
+	thinkingLevel: Type.Optional(StringEnum(thinkingLevels)),
 	tools: Type.Optional(Type.Union([Type.Literal("readonly"), Type.Array(Type.String())])),
 	excludeTools: Type.Optional(Type.Array(Type.String())),
 	noTools: Type.Optional(Type.Union([Type.Literal("all"), Type.Literal("builtin")])),
@@ -342,7 +304,7 @@ async function settle(
 
 async function spawn(
 	exec: Exec,
-	pi: ParentAPI,
+	pi: ParentHost,
 	ctx: ParentContext,
 	params: SpawnParameters,
 	signal?: AbortSignal,
@@ -449,8 +411,8 @@ export default function (pi: ExtensionAPI) {
 	installParent(pi)
 }
 
-export function installParent(pi: ParentAPI): void {
-	const exec: Exec = (command, args, signal) => pi.exec(command, args, { signal })
+export function installParent(pi: ParentHost): void {
+	const exec: Exec = (command, args, signal) => pi.exec(command, args, signal ? { signal } : {})
 	let widgetTimer: ReturnType<typeof setInterval> | undefined
 	let widgetContext: ParentContext | undefined
 	let refreshingWidget = false
@@ -531,7 +493,7 @@ export function installParent(pi: ParentAPI): void {
 					continue
 				}
 
-				const starting = updateMetadata(runDirectory(run.handle), { state: "starting", error: undefined }) ?? run
+				const starting = updateMetadata(runDirectory(run.handle), { state: "starting" }, ["error"]) ?? run
 				const blockId = await newBlock(exec, run.cwd, run.handle, launchCommand(starting))
 				updateMetadata(runDirectory(run.handle), { blockId, suspended: false })
 			} catch (error) {
@@ -559,7 +521,7 @@ export function installParent(pi: ParentAPI): void {
 		if (ctx.hasUI) ctx.ui.setWidget("subagents", undefined)
 
 		if (event.reason === "reload") return
-		const failures: unknown[] = []
+		const failures: Error[] = []
 
 		for (const run of listRuns(ctx.sessionManager.getSessionId())) {
 			try {
@@ -575,7 +537,7 @@ export function installParent(pi: ParentAPI): void {
 				updateMetadata(runDirectory(run.handle), { suspended: true })
 				await closeBlock(exec, run.blockId)
 			} catch (error) {
-				failures.push(error)
+				failures.push(error instanceof Error ? error : new Error(String(error)))
 			}
 		}
 
@@ -586,7 +548,7 @@ export function installParent(pi: ParentAPI): void {
 	registerTools(pi, exec)
 }
 
-function registerCommand(pi: ParentAPI, exec: Exec): void {
+function registerCommand(pi: ParentHost, exec: Exec): void {
 	pi.registerCommand("subagent", {
 		description: "Select and attach to a subagent spawned by this session",
 		handler: async (_args, ctx) => {
@@ -597,11 +559,13 @@ function registerCommand(pi: ParentAPI, exec: Exec): void {
 				const status = await displayStatus(exec, run)
 
 				if (status.state === "exited" || status.state === "suspended") continue
-				items.push({
+				const item: SelectItem = {
 					value: run.handle,
 					label: `${runDisplayName(run)}  ${status.state.padEnd(8)}  ${run.provider}/${run.model}  ${run.thinking}`,
-					description: status.error,
-				})
+				}
+
+				if (status.error) item.description = status.error
+				items.push(item)
 			}
 
 			if (items.length === 0) {
@@ -619,7 +583,7 @@ function registerCommand(pi: ParentAPI, exec: Exec): void {
 	})
 }
 
-function registerTools(pi: ParentAPI, exec: Exec): void {
+function registerTools(pi: ParentHost, exec: Exec): void {
 	pi.registerTool({
 		name: "agent_rename",
 		label: "Rename agent",
@@ -652,7 +616,7 @@ function registerTools(pi: ParentAPI, exec: Exec): void {
 		async execute(_id, _params, signal, _onUpdate, ctx) {
 			const runs = await Promise.all(
 				listRuns(ctx.sessionManager.getSessionId()).map(async (run) => {
-					const item: BackgroundResult & { thinking: RunMetadata["thinking"]; state: RunState; error?: string } = {
+					const item: Static<typeof listSchema>["runs"][number] = {
 						handle: run.handle,
 						blockId: run.blockId,
 						sessionFile: run.sessionFile,

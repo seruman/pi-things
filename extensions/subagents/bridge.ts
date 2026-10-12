@@ -1,23 +1,9 @@
 import { existsSync, readFileSync, readdirSync, unlinkSync } from "node:fs"
 import { join } from "node:path"
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent"
+import type { BridgeContext, BridgeHost } from "./contracts"
 import { type RunMetadata, inboxDir, inboxMessageSchema, readMetadata, updateMetadata } from "./runs"
 
-export type BridgeContext = Pick<ExtensionContext, "isIdle"> & {
-	sessionManager: Pick<ExtensionContext["sessionManager"], "getSessionId" | "getSessionFile">
-}
-
-export type LifecycleEvent = { type: string; reason?: string }
-
-export type BridgeHandler = (event: LifecycleEvent, ctx: BridgeContext) => void | Promise<void>
-
-export interface BridgeAPI {
-	on(event: "session_start" | "agent_start" | "agent_settled" | "session_shutdown", handler: BridgeHandler): void
-	setSessionName: ExtensionAPI["setSessionName"]
-	sendUserMessage(message: string, options?: { deliverAs?: "steer" | "followUp" }): void
-}
-
-export function installBridge(pi: BridgeAPI, runDir: string): void {
+export function installBridge(pi: BridgeHost, runDir: string): void {
 	let current: BridgeContext | undefined
 	let timer: ReturnType<typeof setInterval> | undefined
 	let processing = false
@@ -38,12 +24,10 @@ export function installBridge(pi: BridgeAPI, runDir: string): void {
 			childSessionId: current.sessionManager.getSessionId(),
 			sessionFile: current.sessionManager.getSessionFile() ?? metadata.sessionFile,
 			state: current.isIdle() ? "idle" : "busy",
-			suspended: undefined,
-			error: undefined,
 		}
 
 		if (hasStarted) patch.hasStarted = true
-		const updated = updateMetadata(runDir, patch)
+		const updated = updateMetadata(runDir, patch, ["suspended", "error"])
 
 		if (!updated) return false
 		sessionPending = false
@@ -68,17 +52,14 @@ export function installBridge(pi: BridgeAPI, runDir: string): void {
 		if (processing || !current || !initializeSession()) return
 		syncSessionName()
 		const directory = inboxDir(runDir)
-
 		if (!existsSync(directory)) return
 		processing = true
-
 		try {
 			for (const name of readdirSync(directory)
 				.filter((entry) => entry.endsWith(".json"))
 				.sort()) {
 				const path = join(directory, name)
 				let payload: ReturnType<typeof inboxMessageSchema.parse>
-
 				try {
 					payload = inboxMessageSchema.parse(JSON.parse(readFileSync(path, "utf8")))
 				} catch (error) {
@@ -87,7 +68,7 @@ export function installBridge(pi: BridgeAPI, runDir: string): void {
 					continue
 				}
 
-				updateMetadata(runDir, { state: "busy", error: undefined })
+				updateMetadata(runDir, { state: "busy" }, ["error"])
 
 				try {
 					if (current.isIdle()) {
@@ -97,14 +78,12 @@ export function installBridge(pi: BridgeAPI, runDir: string): void {
 							deliverAs: payload.delivery === "followUp" ? "followUp" : "steer",
 						})
 					}
-
 					unlinkSync(path)
 				} catch (error) {
 					updateMetadata(runDir, {
 						state: current.isIdle() ? "idle" : "busy",
 						error: error instanceof Error ? error.message : String(error),
 					})
-
 					return
 				}
 			}
@@ -129,7 +108,7 @@ export function installBridge(pi: BridgeAPI, runDir: string): void {
 	pi.on("agent_start", (_event, ctx) => {
 		current = ctx
 		hasStarted = true
-		updateMetadata(runDir, { state: "busy", hasStarted: true, error: undefined })
+		updateMetadata(runDir, { state: "busy", hasStarted: true }, ["error"])
 	})
 
 	pi.on("agent_settled", (_event, ctx) => {

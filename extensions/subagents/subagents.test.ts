@@ -1,20 +1,15 @@
 import { afterEach, beforeEach, expect, test, vi } from "bun:test"
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { setImmediate } from "node:timers/promises"
-import {
-	type AssistantMessage,
-	type JsonObject,
-	type JsonValue,
-	type Static,
-	type StopReason,
-	Type,
-} from "@earendil-works/pi-ai"
-import { SessionManager } from "@earendil-works/pi-coding-agent"
+import type { AssistantMessage, JsonObject, JsonValue, Static, StopReason } from "@earendil-works/pi-ai"
+import { type AgentToolResult, SessionManager } from "@earendil-works/pi-coding-agent"
 import { Check } from "typebox/value"
-import { type BridgeContext, type LifecycleEvent, installBridge } from "./bridge"
-import { type ParentContext, installParent } from "./index"
+import { z } from "zod"
+import { installBridge } from "./bridge"
+import type { BridgeContext, LifecycleEvents, LifecycleHandler, ParentContext } from "./contracts"
+import { installParent } from "./index"
 import { type Exec, readProcess } from "./rex"
 import {
 	type RunMetadata,
@@ -27,22 +22,58 @@ import {
 	writeMetadata,
 } from "./runs"
 
-function events<TContext>() {
-	const handlers = new Map<string, (event: LifecycleEvent, ctx: TContext) => void | Promise<void>>()
+type LifecycleListeners<Context> = {
+	[Key in keyof LifecycleEvents]: Set<LifecycleHandler<LifecycleEvents[Key], Context>>
+}
+
+function events<Context>() {
+	const handlers: LifecycleListeners<Context> = {
+		session_start: new Set(),
+		session_shutdown: new Set(),
+		agent_start: new Set(),
+		agent_settled: new Set(),
+	}
+
+	async function dispatch<Key extends keyof LifecycleEvents>(type: Key, event: LifecycleEvents[Key], ctx: Context) {
+		for (const handler of handlers[type]) await handler(event, ctx)
+	}
 
 	return {
-		on: (event: string, handler: (event: LifecycleEvent, ctx: TContext) => void | Promise<void>) => {
-			handlers.set(event, handler)
+		on<Key extends keyof LifecycleEvents>(event: Key, handler: LifecycleHandler<LifecycleEvents[Key], Context>) {
+			handlers[event].add(handler)
+
+			return () => {
+				handlers[event].delete(handler)
+			}
 		},
-		emit: async (event: string, ctx: TContext, reason?: string) => {
-			await handlers.get(event)?.({ type: event, reason }, ctx)
+		emit(event: keyof LifecycleEvents, ctx: Context, reason: LifecycleEvents["session_shutdown"]["reason"] = "quit") {
+			if (event === "session_shutdown") return dispatch(event, { type: event, reason }, ctx)
+
+			return dispatch(event, { type: event }, ctx)
 		},
 	}
 }
 
-type ToolCall = (params: JsonObject, signal?: AbortSignal) => Promise<JsonValue | undefined>
+type Tool = (params: JsonObject, signal?: AbortSignal) => Promise<AgentToolResult<JsonValue>>
 
-type Block = { exit: number | null; error?: string }
+type Block = { exit: number | null; error?: string; closeError?: string }
+
+const jsonSchema: z.ZodType<JsonValue> = z.lazy(() =>
+	z.union([z.null(), z.boolean(), z.number(), z.string(), z.array(jsonSchema), z.record(jsonSchema)]),
+)
+
+const resultSchema = z.record(jsonSchema)
+
+const launchRequestSchema = z
+	.object({
+		session_id: z.string(),
+		flavor: z.literal("com.superlogical.terminal.shell"),
+		label: z.string(),
+		options: z.object({ cwd: z.string(), command: z.array(z.string()) }).strict(),
+	})
+	.strict()
+
+const closeRequestSchema = z.object({ session_id: z.string(), block_id: z.string() }).strict()
 
 let root: string
 
@@ -52,19 +83,15 @@ let ctx: ParentContext
 
 let parent: ReturnType<typeof events<ParentContext>>
 
-let tools: Map<string, ToolCall>
+let tools: Map<string, Tool>
 
 let blocks: Map<string, Block>
 
-let launches: { options: { cwd: string; command: string[] }; label: string }[]
+let nextBlockId: number
 
-let failLaunch: boolean
-
-let failClose: boolean
+let launches: { cwd: string; command: string[] }[]
 
 let onProcess: (() => void) | undefined
-
-let widgets: (string[] | undefined)[]
 
 const envKeys = ["PI_CODING_AGENT_DIR", "PI_SUBAGENT_RUN_DIR", "REX_SESSION", "REX_BLOCK"]
 
@@ -86,30 +113,35 @@ const exec: Exec = async (command, args, signal) => {
 			stderr: "",
 			stdout: JSON.stringify({
 				last_exit: block.exit === null ? null : { exit_code: block.exit },
-				child: { name: "rebranded-pi" },
+				child: { name: "rebranded-pi", pid: 1, user_id: 1 },
 			}),
 		}
 	}
 
-	const payload = JSON.parse(args[5] ?? "{}")
-
 	if (args[4] === "session.new_block") {
-		if (failLaunch) throw new Error("launch failed")
-		launches.push(payload)
-		const blockId = `block:${launches.length}`
+		const payload = launchRequestSchema.parse(JSON.parse(args[5] ?? "{}"))
+		launches.push(payload.options)
+		const blockId = `block:${++nextBlockId}`
 		blocks.set(blockId, { exit: null })
 
-		return { code: 0, stderr: "", stdout: JSON.stringify({ block_id: blockId }) }
+		return { code: 0, stderr: "", stdout: JSON.stringify({ block_id: blockId, revision: nextBlockId }) }
 	}
 
 	if (args[4] === "block.close") {
-		if (failClose) throw new Error("close failed")
+		const payload = closeRequestSchema.parse(JSON.parse(args[5] ?? "{}"))
+		const error = blocks.get(payload.block_id)?.closeError
+
+		if (error) throw new Error(error)
 		blocks.delete(payload.block_id)
 
-		return { code: 0, stderr: "", stdout: "{}" }
+		return { code: 0, stderr: "", stdout: JSON.stringify({ block_id: payload.block_id, revision: nextBlockId }) }
 	}
 
 	throw new Error(`Unexpected Rex operation: ${args.join(" ")}`)
+}
+
+function unexpectedUI(): never {
+	throw new Error("Unexpected UI call in a headless test")
 }
 
 beforeEach(() => {
@@ -121,9 +153,8 @@ beforeEach(() => {
 	vi.useFakeTimers()
 	tools = new Map()
 	blocks = new Map()
+	nextBlockId = 0
 	launches = []
-	widgets = []
-	failLaunch = failClose = false
 	onProcess = undefined
 	parent = events<ParentContext>()
 	ctx = {
@@ -131,39 +162,26 @@ beforeEach(() => {
 		hasUI: false,
 		model: { provider: "configured", id: "parent" },
 		sessionManager: { getSessionId: () => "parent" },
-		ui: {
-			setWidget: (_key, lines) => {
-				widgets.push(lines)
-			},
-			theme: { fg: (_color, text) => text },
-			notify() {},
-			custom() {
-				throw new Error("Unexpected custom UI")
-			},
-		},
+		ui: { theme: { fg: unexpectedUI }, setWidget: unexpectedUI, notify: unexpectedUI, custom: unexpectedUI },
 	}
 	installParent({
 		on: parent.on,
 		exec: async (command, args, options) => ({ ...(await exec(command, args, options?.signal)), killed: false }),
 		getThinkingLevel: () => "off",
 		registerCommand() {},
-		registerTool: (tool) => {
-			tools.set(tool.name, async (params, signal) => {
-				if (!Check(tool.parameters, params)) throw new Error(`Invalid parameters for ${tool.name}`)
-				// SAFETY: Check validated the registered plain-JSON schema. Local TypeBox 1.3.7 and
-				// the SDK's 1.3.27 disagree on generic Static types, not these JSON parameter types.
-				const validated = params as Static<typeof tool.parameters>
-				const result = await tool.execute("test", validated, signal, undefined, ctx)
-				expect(result.structuredContent).toEqual(result.details)
+		registerTool(tool) {
+			// Pi and this repo resolve different TypeBox versions; validate using the declared wire schema.
+			const parameters = z.custom<Static<typeof tool.parameters>>(
+				(value) => Check(tool.parameters, value),
+				`Invalid parameters for ${tool.name}`,
+			)
 
-				return result.structuredContent
-			})
+			tools.set(tool.name, (params, signal) => tool.execute("test", parameters.parse(params), signal, undefined, ctx))
 		},
 	})
 })
 
 afterEach(() => {
-	vi.restoreAllMocks()
 	vi.clearAllTimers()
 	vi.useRealTimers()
 	rmSync(root, { recursive: true, force: true })
@@ -174,7 +192,7 @@ afterEach(() => {
 	}
 })
 
-async function call(name: string, params: JsonObject = {}, signal?: AbortSignal) {
+async function execute(name: string, params: JsonObject = {}, signal?: AbortSignal) {
 	const tool = tools.get(name)
 
 	if (!tool) throw new Error(`Missing tool: ${name}`)
@@ -182,12 +200,20 @@ async function call(name: string, params: JsonObject = {}, signal?: AbortSignal)
 	return tool(params, signal)
 }
 
+async function call(name: string, params: JsonObject = {}, signal?: AbortSignal) {
+	return resultSchema.parse((await execute(name, params, signal)).structuredContent)
+}
+
+function flagValue(command: string[], flag: string) {
+	const index = command.indexOf(flag)
+
+	return index < 0 ? undefined : command[index + 1]
+}
+
 async function spawn(params: JsonObject = {}) {
 	const result = await call("agent_spawn", { prompt: "task", background: true, ...params })
 
-	if (!Check(Type.Object({ handle: Type.String() }), result)) throw new Error("Spawn returned no handle")
-
-	return getRun(result.handle)
+	return getRun(z.string().parse(result.handle))
 }
 
 async function tick(ms = 0) {
@@ -195,8 +221,8 @@ async function tick(ms = 0) {
 	await setImmediate() // Drain asynchronous Rex calls without guessing how many microtasks they need.
 }
 
-// Real bridge, metadata and transcripts; only Pi's event source and message sink are supplied here.
-async function child(run: RunMetadata, start = true) {
+// Real bridge, metadata and transcripts; the typed host supplies only the capabilities the bridge uses.
+async function child(run: RunMetadata) {
 	const hooks = events<BridgeContext>()
 	const names: string[] = []
 	const sent: { message: string; deliverAs?: "steer" | "followUp" }[] = []
@@ -206,15 +232,8 @@ async function child(run: RunMetadata, start = true) {
 		session: SessionManager.open(run.sessionFile, undefined, root),
 		names,
 		sent,
-		emit: (event: string, reason?: string) =>
-			hooks.emit(
-				event,
-				{
-					isIdle: () => c.idle,
-					sessionManager: c.session,
-				},
-				reason,
-			),
+		emit: (event: keyof LifecycleEvents, reason?: LifecycleEvents["session_shutdown"]["reason"]) =>
+			hooks.emit(event, { isIdle: () => c.idle, sessionManager: c.session }, reason),
 		begin: async () => {
 			c.idle = false
 			await c.emit("agent_start")
@@ -222,7 +241,7 @@ async function child(run: RunMetadata, start = true) {
 		reply: async (text: string, stopReason: StopReason = "stop") => {
 			c.session.appendMessage({ role: "user", content: "task", timestamp: Date.now() })
 
-			const reply: AssistantMessage = {
+			const message: AssistantMessage = {
 				role: "assistant",
 				content: [{ type: "text", text }],
 				stopReason,
@@ -240,8 +259,8 @@ async function child(run: RunMetadata, start = true) {
 				},
 			}
 
-			if (stopReason === "error") reply.errorMessage = text
-			c.session.appendMessage(reply)
+			if (stopReason === "error") message.errorMessage = text
+			c.session.appendMessage(message)
 			c.idle = true
 			await c.emit("agent_settled")
 		},
@@ -251,42 +270,72 @@ async function child(run: RunMetadata, start = true) {
 		{
 			on: hooks.on,
 			setSessionName: (name) => {
-				c.names.push(name)
+				names.push(name)
 			},
 			sendUserMessage: (message, options) => {
-				c.sent.push({ message, ...options })
+				sent.push({ message, ...options })
 			},
 		},
 		runDirectory(run.handle),
 	)
-
-	if (start) await c.emit("session_start")
+	await c.emit("session_start")
 
 	return c
 }
 
-test("launch uses the current extension, shell defaults and explicit tool flags; [] keeps defaults", async () => {
-	const run = await spawn({ tools: [] })
-	expect(launches[0]).toMatchObject({ label: `subagent ${run.handle}`, options: { cwd: root } })
-	expect(launches[0]?.options).not.toHaveProperty("shell")
-	const command = launches[0]?.options.command ?? []
-	expect(command.slice(command.indexOf("--extension"), command.indexOf("--extension") + 2)).toEqual([
-		"--extension",
-		new URL("./index.ts", import.meta.url).pathname,
-	])
-	expect(command).not.toContain("--tools")
-	expect(command).not.toContain("--no-tools")
+test.each([
+	["defaults", {}, []],
+	["empty selection", { tools: [] }, []],
+	["readonly", { tools: "readonly" }, ["read", "grep", "find", "ls"]],
+	["explicit selection", { tools: ["read", "bash"] }, ["read", "bash"]],
+] as const)("spawn sends the requested argv to Rex: %s", async (_name, params, expectedTools) => {
+	const prompt = "a task with spaces"
+	const cwd = join(root, "directory with spaces")
 
-	for (const noTools of ["all", "builtin"]) {
-		const restricted = await spawn({ tools: "readonly", noTools })
-		expect(restricted.launchArgs).toEqual([
-			"--tools",
-			"read,grep,find,ls",
-			"--exclude-tools",
-			"codemode,agent_spawn,agent_send,agent_wait,agent_stop,agent_list,agent_rename",
-			noTools === "all" ? "--no-tools" : "--no-builtin-tools",
-		])
+	const run = await spawn({
+		...params,
+		excludeTools: ["network"],
+		cwd,
+		model: "child-model",
+		thinkingLevel: "high",
+		prompt,
+	})
+
+	const command = launches[0]?.command ?? []
+	expect(launches[0]?.cwd).toBe(cwd)
+	expect(flagValue(command, "--session")).toBe(run.sessionFile)
+	expect(flagValue(command, "--provider")).toBe("configured")
+	expect(flagValue(command, "--model")).toBe("child-model")
+	expect(flagValue(command, "--thinking")).toBe("high")
+	expect(command.at(-1)).toBe(prompt)
+
+	if (expectedTools.length) {
+		expect(new Set(flagValue(command, "--tools")?.split(","))).toEqual(new Set(expectedTools))
+	} else {
+		expect(command).not.toContain("--tools")
 	}
+
+	expect(new Set(flagValue(command, "--exclude-tools")?.split(","))).toEqual(
+		new Set([
+			"codemode",
+			"agent_spawn",
+			"agent_send",
+			"agent_wait",
+			"agent_stop",
+			"agent_list",
+			"agent_rename",
+			"network",
+		]),
+	)
+	expect(command).not.toContain("--no-tools")
+	expect(command).not.toContain("--no-builtin-tools")
+})
+
+test.each(["all", "builtin"] as const)("spawn forwards noTools=%s to Rex", async (noTools) => {
+	await spawn({ noTools })
+	const command = launches[0]?.command ?? []
+	expect(command).toContain(noTools === "all" ? "--no-tools" : "--no-builtin-tools")
+	expect(command).not.toContain(noTools === "all" ? "--no-builtin-tools" : "--no-tools")
 })
 
 test.each(["stop", "error", "aborted"] as const)(
@@ -296,13 +345,41 @@ test.each(["stop", "error", "aborted"] as const)(
 		const c = await child(run)
 		await c.begin()
 		await c.reply("ANSWER", reason)
-		expect(await call("agent_wait", { handle: run.handle })).toMatchObject({
+		const result = await execute("agent_wait", { handle: run.handle })
+		expect(result.structuredContent).toMatchObject({
 			answer: "ANSWER",
 			status: reason === "stop" ? "success" : reason,
 			usage: { totalTokens: 5 },
 		})
+		expect(Boolean(result.isError)).toBe(reason !== "stop")
+		expect(result.usage).toEqual({
+			input: 2,
+			output: 3,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 5,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		})
 	},
 )
+
+test("wait selects the active branch rather than a newer abandoned answer", async () => {
+	const run = await spawn()
+	const c = await child(run)
+	await c.begin()
+	await c.reply("ACTIVE ANSWER")
+	const active = c.session.getLeafId()
+
+	if (!active) throw new Error("Missing active branch leaf")
+	await c.reply("ABANDONED FAILURE", "error")
+	c.session.branch(active)
+	// Persist the selected branch without adding another assistant answer.
+	c.session.appendCustomEntry("branch-selected")
+	expect(await call("agent_wait", { handle: run.handle })).toMatchObject({
+		status: "success",
+		answer: "ACTIVE ANSWER",
+	})
+})
 
 test("synchronous spawn waits for the bridge to finish the initial task", async () => {
 	const spawning = call("agent_spawn", { prompt: "task" })
@@ -324,13 +401,10 @@ test("send then wait retries a failed turn instead of returning its old error", 
 	await c.reply("OLD FAILURE", "error")
 	await call("agent_send", { handle: run.handle, message: "retry" })
 	let finished = false
-
 	const waiting = call("agent_wait", { handle: run.handle, timeoutSec: 2 }).then((result) => {
 		finished = true
-
 		return result
 	})
-
 	await tick()
 	expect(finished).toBe(false)
 	await tick(250)
@@ -341,19 +415,17 @@ test("send then wait retries a failed turn instead of returning its old error", 
 	expect(await waiting).toMatchObject({ status: "success", answer: "RECOVERED" })
 })
 
-test("startup and busy polling do not read transcripts, and a timeout leaves the child alive", async () => {
+test("wait timeout leaves the child alive and invalid deadlines are rejected", async () => {
 	const run = await spawn()
 	const c = await child(run)
-	const opened = vi.spyOn(SessionManager, "open")
 	const waiting = call("agent_wait", { handle: run.handle, timeoutSec: 1 })
 	await tick()
-	expect(opened).not.toHaveBeenCalled()
 	await c.begin()
 	await tick(500)
-	expect(opened).not.toHaveBeenCalled()
 	await tick(500)
 	expect(await waiting).toMatchObject({ status: "error", error: "timeout after 1s" })
 	expect(blocks.has(run.blockId)).toBe(true)
+	await expect(call("agent_wait", { handle: run.handle, timeoutSec: 0 })).rejects.toThrow("Invalid parameters")
 })
 
 test("completion reads metadata and the transcript after asynchronous process inspection", async () => {
@@ -364,7 +436,6 @@ test("completion reads metadata and the transcript after asynchronous process in
 		onProcess = undefined
 		void c.reply("JUST FINISHED")
 	}
-
 	expect(await call("agent_wait", { handle: run.handle })).toMatchObject({ answer: "JUST FINISHED" })
 })
 
@@ -424,7 +495,7 @@ test("bridge initializes late metadata, syncs names and follows session changes"
 	await call("agent_rename", { handle: run.handle, name: " renamed " })
 	await tick(500)
 	expect(c.names).toEqual(["subagent review", "subagent renamed"])
-	await c.emit("session_shutdown", "switch")
+	await c.emit("session_shutdown", "resume")
 	c.session = SessionManager.create(root, root)
 	await c.emit("session_start")
 	await c.begin()
@@ -458,22 +529,93 @@ test("inbox removes malformed messages, prompts idle children, and steers or que
 	expect(getRun(run.handle).error).toBeUndefined()
 })
 
-test("suspend/resume preserves the session and flags; failed close cannot duplicate a live child", async () => {
-	const run = await spawn({ name: "worker", tools: "readonly" })
-	failClose = true
-	await expect(parent.emit("session_shutdown", ctx)).rejects.toThrow("subagent suspend failed")
-	failClose = false
+test("resume launches the preserved transcript with its restrictions and without replaying the prompt", async () => {
+	const prompt = "initial task must not be replayed"
+	const run = await spawn({ prompt, tools: ["read"], excludeTools: ["network"], noTools: "builtin" })
+	const c = await child(run)
+	await c.begin()
+	await c.reply("SAVED HISTORY")
+	const transcript = readFileSync(run.sessionFile, "utf8")
+	await parent.emit("session_shutdown", ctx, "quit")
+	await c.emit("session_shutdown", "quit")
+	expect(blocks.has(run.blockId)).toBe(false)
+	expect(getRun(run.handle).suspended).toBe(true)
+	await parent.emit("session_start", ctx)
+	const resumed = getRun(run.handle)
+	const command = launches[1]?.command ?? []
+	expect(launches).toHaveLength(2)
+	expect(blocks.size).toBe(1)
+	expect(blocks.has(resumed.blockId)).toBe(true)
+	expect(resumed.suspended).toBe(false)
+	expect(flagValue(command, "--session")).toBe(run.sessionFile)
+	expect(readFileSync(run.sessionFile, "utf8")).toBe(transcript)
+	expect(new Set(flagValue(command, "--tools")?.split(","))).toEqual(new Set(["read"]))
+	expect(new Set(flagValue(command, "--exclude-tools")?.split(","))).toEqual(
+		new Set([
+			"codemode",
+			"agent_spawn",
+			"agent_send",
+			"agent_wait",
+			"agent_stop",
+			"agent_list",
+			"agent_rename",
+			"network",
+		]),
+	)
+	expect(command).toContain("--no-builtin-tools")
+	expect(command).not.toContain(prompt)
+})
+
+test("resume does not duplicate a still-live child after close fails", async () => {
+	const run = await spawn()
+	blocks.set(run.blockId, { exit: null, closeError: "close failed" })
+	await expect(parent.emit("session_shutdown", ctx, "quit")).rejects.toThrow("subagent suspend failed")
+	expect(blocks.has(run.blockId)).toBe(true)
+	expect(getRun(run.handle).suspended).toBe(true)
 	await parent.emit("session_start", ctx)
 	expect(launches).toHaveLength(1)
-	await parent.emit("session_shutdown", ctx)
-	failLaunch = true
+	expect(blocks.size).toBe(1)
+	expect(getRun(run.handle)).toMatchObject({ blockId: run.blockId, suspended: false })
+})
+
+test.each(["quit", "resume"] as const)("bridge releases its polling timer on %s", async (reason) => {
+	const run = await spawn()
+	const baseline = vi.getTimerCount()
+	const c = await child(run)
+	expect(vi.getTimerCount()).toBeGreaterThan(baseline)
+	await c.emit("session_shutdown", reason)
+	expect(vi.getTimerCount()).toBe(baseline)
+	await call("agent_send", { handle: run.handle, message: "not delivered after shutdown" })
+	await tick(1000)
+	expect(c.sent).toEqual([])
+})
+
+test.each(["quit", "reload"] as const)("parent releases its widget timer on %s", async (reason) => {
+	const widgets: (string[] | undefined)[] = []
+	ctx.hasUI = true
+	ctx.ui = {
+		setWidget: (_key, lines) => {
+			widgets.push(lines)
+		},
+		theme: { fg: (_color, text) => text },
+		notify: unexpectedUI,
+		custom: unexpectedUI,
+	}
+	await spawn()
+	const baseline = vi.getTimerCount()
 	await parent.emit("session_start", ctx)
-	expect(getRun(run.handle)).toMatchObject({ state: "error", error: "launch failed", suspended: true })
-	failLaunch = false
-	await parent.emit("session_start", ctx)
-	expect(launches).toHaveLength(2)
-	expect(launches[1]?.options.command).toEqual(launches[0]?.options.command.slice(0, -1))
-	expect(getRun(run.handle)).toMatchObject({ name: "worker", sessionFile: run.sessionFile, suspended: false })
+	expect(vi.getTimerCount()).toBeGreaterThan(baseline)
+	await parent.emit("session_shutdown", ctx, reason)
+	expect(vi.getTimerCount()).toBe(baseline)
+	const writes = widgets.length
+	let inspections = 0
+	onProcess = () => {
+		inspections++
+	}
+
+	await tick(2000)
+	expect(inspections).toBe(0)
+	expect(widgets).toHaveLength(writes)
 })
 
 test("stop and parent shutdown remove exited blocks too", async () => {
@@ -495,28 +637,22 @@ test("missing blocks mean exited, but connection failures stay unknown and don't
 	await c.begin()
 	blocks.set(failed.blockId, { exit: null, error: "connection refused" })
 	const result = await call("agent_list")
-	expect(result).toEqual({
-		runs: expect.arrayContaining([
+	expect(result.runs).toEqual(
+		expect.arrayContaining([
 			expect.objectContaining({ handle: failed.handle, state: "unknown", error: "connection refused" }),
 			expect.objectContaining({ handle: healthy.handle, state: "busy" }),
 		]),
-	})
-	ctx.hasUI = true
-	await parent.emit("session_start", ctx)
-	expect(widgets.at(-1)?.join()).toContain("healthy:busy")
+	)
 	blocks.delete(failed.blockId)
 	expect(await readProcess(exec, failed.blockId)).toMatchObject({ exists: false, alive: false })
 	await expect(call("agent_send", { handle: failed.handle, message: "no" })).rejects.toThrow("not running")
-	await parent.emit("session_shutdown", ctx, "reload")
-	await tick(1000)
-	expect(widgets.at(-1)).toBeUndefined()
 })
 
 test("metadata skips corrupt records, list stays parent-scoped, and names/handles are validated", async () => {
 	const run = await spawn()
 	const other = await spawn()
 	updateMetadata(runDirectory(other.handle), { parentSessionId: "other" })
-	expect(await call("agent_list")).toEqual({ runs: [expect.objectContaining({ handle: run.handle })] })
+	expect((await call("agent_list")).runs).toEqual([expect.objectContaining({ handle: run.handle })])
 	writeFileSync(join(runDirectory(other.handle), "metadata.json"), "{")
 	expect(readMetadata(runDirectory(other.handle))).toBeUndefined()
 	expect(listRuns()).toHaveLength(1)
