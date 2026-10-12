@@ -16,10 +16,13 @@ function excerpt(text: string, limit: number): string {
 export function recentConversation(messages: readonly Message[]): string {
 	let currentUser = messages.length - 1
 	while (currentUser >= 0 && messages[currentUser].role !== "user") currentUser--
-	const parts: string[] = []
-	let used = 0
-	// The current user request is sent separately. Ignore any later injected messages too.
-	for (let i = currentUser - 1; i >= 0 && parts.length < HISTORY_MESSAGES; i--) {
+	const dialogue: { index: number; label: string; text: string }[] = []
+	const tools: typeof dialogue = []
+	let haveAssistantReply = false
+	// Keep user turns and the latest assistant prose per turn before tool outputs.
+	// Neither command output nor repeated progress updates should crowd out corrections.
+	// The current request is sent separately; ignore later injected messages too.
+	for (let i = currentUser - 1; i >= 0 && dialogue.length < HISTORY_MESSAGES; i--) {
 		const message = messages[i]
 		if (message.role !== "user" && message.role !== "assistant" && message.role !== "toolResult") continue
 		const text = (
@@ -39,13 +42,30 @@ export function recentConversation(messages: readonly Message[]): string {
 			message.role === "toolResult"
 				? `toolResult (${message.toolName.slice(0, 80)}${message.isError ? ", error" : ""})`
 				: message.role
-		const header = `${label}:\n`
+		const hasProse =
+			typeof message.content === "string" || message.content.some((block) => block.type === "text" && block.text.trim())
+		if (message.role === "user") haveAssistantReply = false
+		if (message.role === "assistant" && hasProse) {
+			if (haveAssistantReply) continue
+			haveAssistantReply = true
+		}
+		const candidates = message.role === "user" || (message.role === "assistant" && hasProse) ? dialogue : tools
+		if (candidates.length < HISTORY_MESSAGES) candidates.push({ index: i, label, text })
+	}
+	const parts: { index: number; text: string }[] = []
+	let used = 0
+	for (const candidate of [...dialogue, ...tools]) {
+		if (parts.length === HISTORY_MESSAGES) break
+		const header = `${candidate.label}:\n`
 		const separator = parts.length ? 2 : 0
 		const budget = Math.min(HISTORY_MESSAGE_LIMIT, HISTORY_LIMIT - used - header.length - separator)
 		if (budget <= OMITTED.length) break
-		const part = header + excerpt(text, budget)
-		parts.unshift(part)
-		used += part.length + separator
+		const text = header + excerpt(candidate.text, budget)
+		parts.push({ index: candidate.index, text })
+		used += text.length + separator
 	}
-	return parts.join("\n\n")
+	return parts
+		.sort((a, b) => a.index - b.index)
+		.map((part) => part.text)
+		.join("\n\n")
 }

@@ -86,6 +86,41 @@ describe("classifier conversation context", () => {
 		expect(history).toBe(Array.from({ length: HISTORY_MESSAGES }, (_, i) => `user:\nmessage ${i + 3}`).join("\n\n"))
 	})
 
+	test("tool loops do not crowd out the user's corrections or the assistant's disputed explanation", () => {
+		const toolLoop: Message[] = Array.from({ length: 10 }, (_, i) => [
+			assistant([
+				{ type: "text", text: `Checking output ${i}` },
+				{ type: "toolCall", id: `call-${i}`, name: "read", arguments: { path: "private" } },
+			]),
+			{
+				role: "toolResult" as const,
+				toolCallId: `call-${i}`,
+				toolName: "read",
+				isError: false,
+				timestamp: 0,
+				content: [{ type: "text" as const, text: `output-${i}` }],
+			},
+		]).flat()
+		const history = recentConversation([
+			user("Review the mesh simplification algorithm"),
+			assistant([{ type: "text", text: "The surface stays smooth; I have not checked the boundary vertices." }]),
+			user("The rendered seam disproves that. Inspect the boundary constraints."),
+			...toolLoop,
+			user("Summarize why the seam appears"),
+		])
+		expect(history).toContain("Review the mesh simplification algorithm")
+		expect(history).toContain("I have not checked the boundary vertices.")
+		expect(history).toContain("The rendered seam disproves that.")
+		expect(history).toContain("output-9")
+		expect(history).toContain("Checking output 9")
+		expect(history).not.toContain("Checking output 0")
+		expect(history).not.toContain("output-0")
+		expect(history).not.toContain("Summarize why the seam appears")
+		expect(history).not.toContain("private")
+		expect(history.length).toBeLessThanOrEqual(HISTORY_LIMIT)
+		expect(history.indexOf("The rendered seam")).toBeLessThan(history.indexOf("output-9"))
+	})
+
 	test("bounds each message, preserving its beginning and final proposal", () => {
 		const history = recentConversation([
 			assistant([{ type: "text", text: `Beginning ${"x".repeat(5000)} Final proposal` }]),
