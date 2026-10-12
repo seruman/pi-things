@@ -10,11 +10,27 @@ import {
 	getPackageDir,
 } from "@earendil-works/pi-coding-agent"
 import type { AutocompleteItem } from "@earendil-works/pi-tui"
+import { z } from "zod"
 
 const VALID_DIRECTIONS = ["right", "left", "down", "up"] as const
+
 const DEFAULT_DIRECTION = "right"
+
 export type SplitDirection = (typeof VALID_DIRECTIONS)[number]
+
 export type SplitLaunchResult = { ok: true; terminalName: string } | { ok: false; terminalName: string; reason: string }
+
+type SplitExecutor = Pick<ExtensionAPI, "exec">
+
+type SplitContext = Pick<ExtensionCommandContext, "cwd">
+
+type SplitForkArgs = { direction: SplitDirection; prompt: string }
+
+const teteyeErrorSchema = z.object({ error: z.string().optional() })
+
+const teteyePaneSchema = z.object({ result: z.object({ pane_id: z.string().optional() }).optional() })
+
+const packageNameSchema = z.object({ piConfig: z.object({ name: z.string().optional() }).optional() })
 
 const GHOSTTY_SPLIT_SCRIPT = `on run argv
 	set targetCwd to item 1 of argv
@@ -47,6 +63,7 @@ end run`
 
 function shellQuote(value: string): string {
 	if (value.length === 0) return "''"
+
 	return `'${value.replace(/'/g, `'"'"'`)}'`
 }
 
@@ -64,31 +81,33 @@ function getTeteyeCtlPath(): string {
 
 function getTeteyeResponseError(stdout: string | undefined, stderr: string | undefined): string {
 	const trimmedStdout = stdout?.trim()
+
 	if (trimmedStdout) {
 		try {
-			const response = JSON.parse(trimmedStdout) as { error?: unknown }
-			if (typeof response.error === "string" && response.error.length > 0) return response.error
+			const response = teteyeErrorSchema.safeParse(JSON.parse(trimmedStdout))
+
+			if (response.success && response.data.error) return response.data.error
 		} catch {
 			// Fall back to the raw output below.
 		}
 	}
+
 	return stderr?.trim() || trimmedStdout || "unknown teteyectl error"
 }
 
 function getPaneIdFromTeteyeResponse(stdout: string | undefined): string | undefined {
 	if (!stdout?.trim()) return undefined
-	const response = JSON.parse(stdout) as { result?: { pane_id?: unknown } }
-	return typeof response.result?.pane_id === "string" ? response.result.pane_id : undefined
+	const response = teteyePaneSchema.safeParse(JSON.parse(stdout))
+
+	return response.success ? response.data.result?.pane_id : undefined
 }
 
 /** Pi takes its command name from `piConfig.name` in its package.json, but does not export it. */
 export function resolveAppName(packageDir: string): string {
 	try {
-		const pkg = JSON.parse(readFileSync(path.join(packageDir, "package.json"), "utf8")) as {
-			piConfig?: { name?: unknown }
-		}
-		const name = pkg.piConfig?.name
-		return typeof name === "string" && name.length > 0 ? name : "pi"
+		const pkg = packageNameSchema.parse(JSON.parse(readFileSync(path.join(packageDir, "package.json"), "utf8")))
+
+		return pkg.piConfig?.name || "pi"
 	} catch {
 		return "pi"
 	}
@@ -103,14 +122,18 @@ export function resolvePiInvocation(
 	if (appName !== "pi") return [appName]
 	const execName = path.basename(execPath).toLowerCase()
 	const isGenericRuntime = /^(node|bun)(\.exe)?$/.test(execName)
+
 	if (!isGenericRuntime) return [execPath]
+
 	if (currentScript && currentScriptExists) return [execPath, currentScript]
+
 	return [appName]
 }
 
 export function getPiInvocationParts(): string[] {
 	const currentScript = process.argv[1]
 	const appName = resolveAppName(getPackageDir())
+
 	return resolvePiInvocation(
 		process.execPath,
 		currentScript,
@@ -129,6 +152,7 @@ export function buildPiStartupInput(
 	for (const extensionFile of extensionFiles) {
 		commandParts.push("-e", extensionFile)
 	}
+
 	if (sessionFile) {
 		commandParts.push("--session", sessionFile)
 	}
@@ -141,11 +165,12 @@ export function buildPiStartupInput(
 }
 
 function isSplitDirection(value: string): value is SplitDirection {
-	return (VALID_DIRECTIONS as readonly string[]).includes(value)
+	return VALID_DIRECTIONS.some((direction) => direction === value)
 }
 
-export function parseSplitForkArgs(raw: string): { direction: SplitDirection; prompt: string } {
+export function parseSplitForkArgs(raw: string): SplitForkArgs {
 	const trimmed = raw.trim()
+
 	if (!trimmed) {
 		return { direction: DEFAULT_DIRECTION, prompt: "" }
 	}
@@ -159,12 +184,15 @@ export function parseSplitForkArgs(raw: string): { direction: SplitDirection; pr
 		const firstSpace = withoutFlag.search(/\s/)
 		const value = (firstSpace === -1 ? withoutFlag : withoutFlag.slice(0, firstSpace)).trim()
 		const prompt = firstSpace === -1 ? "" : withoutFlag.slice(firstSpace).trim()
+
 		if (!value) {
 			throw new Error("Missing value for -d. Expected one of: right, left, down, up.")
 		}
+
 		if (!isSplitDirection(value)) {
 			throw new Error(`Invalid direction \"${value}\". Expected one of: right, left, down, up.`)
 		}
+
 		return { direction: value, prompt }
 	}
 
@@ -172,12 +200,15 @@ export function parseSplitForkArgs(raw: string): { direction: SplitDirection; pr
 		const match = trimmed.match(/^-d(?:\s+([^\s]+))?(?:\s+(.*))?$/s)
 		const value = match?.[1]?.trim() ?? ""
 		const prompt = match?.[2]?.trim() ?? ""
+
 		if (!value) {
 			throw new Error("Missing value for -d. Expected one of: right, left, down, up.")
 		}
+
 		if (!isSplitDirection(value)) {
 			throw new Error(`Invalid direction \"${value}\". Expected one of: right, left, down, up.`)
 		}
+
 		return { direction: value, prompt }
 	}
 
@@ -186,12 +217,13 @@ export function parseSplitForkArgs(raw: string): { direction: SplitDirection; pr
 }
 
 async function launchGhosttySplit(
-	pi: ExtensionAPI,
-	ctx: ExtensionCommandContext,
+	pi: SplitExecutor,
+	ctx: SplitContext,
 	startupInput: string,
 	direction: SplitDirection,
 ): Promise<SplitLaunchResult> {
 	const result = await pi.exec("osascript", ["-e", GHOSTTY_SPLIT_SCRIPT, "--", ctx.cwd, startupInput, direction])
+
 	if (result.code !== 0) {
 		return {
 			ok: false,
@@ -199,33 +231,39 @@ async function launchGhosttySplit(
 			reason: result.stderr?.trim() || result.stdout?.trim() || "unknown osascript error",
 		}
 	}
+
 	return { ok: true, terminalName: "Ghostty" }
 }
 
 async function launchTeteyeSplit(
-	pi: ExtensionAPI,
-	ctx: ExtensionCommandContext,
+	pi: SplitExecutor,
+	ctx: SplitContext,
 	startupInput: string,
 	direction: SplitDirection,
 ): Promise<SplitLaunchResult> {
 	const socket = process.env.TETEYE_SOCKET?.trim()
+
 	if (!socket || !process.env.TETEYE_PANE_ID?.trim()) {
 		return { ok: false, terminalName: "teteye", reason: "missing TETEYE_SOCKET or TETEYE_PANE_ID" }
 	}
 
 	const teteyectl = getTeteyeCtlPath()
 	const splitResult = await pi.exec(teteyectl, ["split", direction, "--socket", socket, "--json"])
+
 	if (splitResult.code !== 0) {
 		return { ok: false, terminalName: "teteye", reason: getTeteyeResponseError(splitResult.stdout, splitResult.stderr) }
 	}
 
 	let newPaneId: string
+
 	try {
 		newPaneId = getPaneIdFromTeteyeResponse(splitResult.stdout) ?? ""
 	} catch (error) {
 		const reason = error instanceof Error ? error.message : String(error)
+
 		return { ok: false, terminalName: "teteye", reason: `invalid split response: ${reason}` }
 	}
+
 	if (!newPaneId) {
 		return { ok: false, terminalName: "teteye", reason: "split response did not include a pane_id" }
 	}
@@ -239,6 +277,7 @@ async function launchTeteyeSplit(
 		newPaneId,
 		"--json",
 	])
+
 	if (sendResult.code !== 0) {
 		return { ok: false, terminalName: "teteye", reason: getTeteyeResponseError(sendResult.stdout, sendResult.stderr) }
 	}
@@ -247,14 +286,16 @@ async function launchTeteyeSplit(
 }
 
 async function launchRexSplit(
-	pi: ExtensionAPI,
-	ctx: ExtensionCommandContext,
+	pi: SplitExecutor,
+	ctx: SplitContext,
 	startupInput: string,
 	direction: SplitDirection,
 ): Promise<SplitLaunchResult> {
 	const block = process.env.REX_BLOCK?.trim()
+
 	if (!block) return { ok: false, terminalName: "Rex", reason: "missing REX_BLOCK" }
 	const rexDirection = direction === "up" ? "above" : direction === "down" ? "below" : direction
+
 	const result = await pi.exec("rex", [
 		"split",
 		"--block",
@@ -268,6 +309,7 @@ async function launchRexSplit(
 		"-c",
 		startupInput,
 	])
+
 	if (result.code !== 0) {
 		return {
 			ok: false,
@@ -275,16 +317,18 @@ async function launchRexSplit(
 			reason: result.stderr?.trim() || result.stdout?.trim() || "unknown rex error",
 		}
 	}
+
 	return { ok: true, terminalName: "Rex" }
 }
 
 export async function launchTerminalSplit(
-	pi: ExtensionAPI,
-	ctx: ExtensionCommandContext,
+	pi: SplitExecutor,
+	ctx: SplitContext,
 	startupInput: string,
 	direction: SplitDirection,
 ): Promise<SplitLaunchResult> {
 	if (isRexSession()) return launchRexSplit(pi, ctx, startupInput, direction)
+
 	return isTeteyeSession()
 		? launchTeteyeSplit(pi, ctx, startupInput, direction)
 		: launchGhosttySplit(pi, ctx, startupInput, direction)
@@ -293,6 +337,7 @@ export async function launchTerminalSplit(
 export function createClonedSession(ctx: ExtensionCommandContext): string | undefined {
 	const sessionFile = ctx.sessionManager.getSessionFile()
 	const leafId = ctx.sessionManager.getLeafId()
+
 	if (!sessionFile || !leafId || !existsSync(sessionFile)) return undefined
 
 	// createBranchedSession mutates its SessionManager, so mirror pi's native /clone
@@ -308,14 +353,17 @@ export function createClonedSession(ctx: ExtensionCommandContext): string | unde
 
 function getArgumentCompletions(prefix: string): AutocompleteItem[] | null {
 	const trimmedStart = prefix.trimStart()
+
 	if (trimmedStart.length === 0) {
 		return [{ value: "-d ", label: "-d", description: "Choose split direction" }]
 	}
 
 	if (trimmedStart.startsWith("-d=")) {
 		const valuePrefix = trimmedStart.slice(3)
+
 		if (valuePrefix.includes(" ")) return null
 		const matches = VALID_DIRECTIONS.filter((direction) => direction.startsWith(valuePrefix))
+
 		return matches.length > 0 ? matches.map((direction) => ({ value: `-d=${direction}`, label: direction })) : null
 	}
 
@@ -324,9 +372,11 @@ function getArgumentCompletions(prefix: string): AutocompleteItem[] | null {
 	}
 
 	const shortFlagMatch = trimmedStart.match(/^-d\s+([^\s]*)$/)
+
 	if (shortFlagMatch) {
 		const valuePrefix = shortFlagMatch[1] ?? ""
 		const matches = VALID_DIRECTIONS.filter((direction) => direction.startsWith(valuePrefix))
+
 		return matches.length > 0 ? matches.map((direction) => ({ value: `-d ${direction}`, label: direction })) : null
 	}
 
@@ -349,35 +399,44 @@ export default function (pi: ExtensionAPI): void {
 		handler: async (args, ctx) => {
 			if (process.platform !== "darwin" && !isRexSession() && !isTeteyeSession()) {
 				ctx.ui.notify("/split-fork currently requires Rex, teteye, or macOS (Ghostty AppleScript).", "warning")
+
 				return
 			}
 
 			let parsedArgs: { direction: SplitDirection; prompt: string }
+
 			try {
 				parsedArgs = parseSplitForkArgs(args)
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error)
 				ctx.ui.notify(`${message} Usage: /split-fork [-d right|left|down|up] [optional prompt]`, "error")
+
 				return
 			}
 
 			const wasBusy = !ctx.isIdle()
 			let clonedSessionFile: string | undefined
+
 			try {
 				clonedSessionFile = createClonedSession(ctx)
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error)
 				ctx.ui.notify(`Failed to clone the active session branch: ${message}`, "error")
+
 				return
 			}
+
 			const startupInput = buildPiStartupInput(clonedSessionFile, parsedArgs.prompt)
 
 			const result = await launchTerminalSplit(pi, ctx, startupInput, parsedArgs.direction)
+
 			if (!result.ok) {
 				ctx.ui.notify(`Failed to launch ${result.terminalName} split: ${result.reason}`, "error")
+
 				if (clonedSessionFile) {
 					ctx.ui.notify(`Cloned session was created: ${clonedSessionFile}`, "info")
 				}
+
 				return
 			}
 
@@ -388,6 +447,7 @@ export default function (pi: ExtensionAPI): void {
 					`Cloned the active branch to ${fileName} in a new ${result.terminalName} ${parsedArgs.direction} split${promptSuffix}.`,
 					"info",
 				)
+
 				if (wasBusy) {
 					ctx.ui.notify("Cloned from current committed state (in-flight turn continues in original session).", "info")
 				}

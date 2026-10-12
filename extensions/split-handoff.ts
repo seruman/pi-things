@@ -1,7 +1,7 @@
 import { mkdtemp, open, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import type { AssistantMessage, Context, Message, SimpleStreamOptions } from "@earendil-works/pi-ai"
+import type { Message } from "@earendil-works/pi-ai"
 import {
 	BorderedLoader,
 	type ExtensionAPI,
@@ -88,15 +88,8 @@ type GitSnapshot = {
 
 type HandoffGenerationResult = { ok: true; text: string } | { ok: false; error: string } | null
 
-type NativeCompletionRegistry = {
-	complete: (
-		model: NonNullable<ExtensionCommandContext["model"]>,
-		context: Context,
-		options?: SimpleStreamOptions,
-	) => Promise<AssistantMessage>
-}
-
 const nonBlankString = z.string().refine((value) => value.trim().length > 0)
+
 const handoffManifestSchema = z
 	.object({
 		version: z.literal(1),
@@ -109,19 +102,24 @@ const handoffManifestSchema = z
 type HandoffManifest = z.infer<typeof handoffManifestSchema>
 
 const MAX_MANIFEST_BYTES = 1024 * 1024
+
 const RECEIVE_PREFIX = "--receive "
 
 function directionCompletions(prefix: string): AutocompleteItem[] | null {
 	const trimmedStart = prefix.trimStart()
+
 	if (trimmedStart.length === 0) {
 		return [{ value: "-d ", label: "-d", description: "Choose split direction" }]
 	}
 
 	const directions = ["right", "left", "down", "up"] as const
+
 	if (trimmedStart.startsWith("-d=")) {
 		const valuePrefix = trimmedStart.slice(3)
+
 		if (valuePrefix.includes(" ")) return null
 		const matches = directions.filter((direction) => direction.startsWith(valuePrefix))
+
 		return matches.length > 0 ? matches.map((direction) => ({ value: `-d=${direction}`, label: direction })) : null
 	}
 
@@ -130,22 +128,27 @@ function directionCompletions(prefix: string): AutocompleteItem[] | null {
 	}
 
 	const shortFlagMatch = trimmedStart.match(/^-d\s+([^\s]*)$/)
+
 	if (shortFlagMatch) {
 		const valuePrefix = shortFlagMatch[1] ?? ""
 		const matches = directions.filter((direction) => direction.startsWith(valuePrefix))
+
 		return matches.length > 0 ? matches.map((direction) => ({ value: `-d ${direction}`, label: direction })) : null
 	}
 
 	if (trimmedStart.startsWith("-d ") || trimmedStart.startsWith("-d=")) return null
+
 	if (!trimmedStart.includes(" ") && "-d".startsWith(trimmedStart)) {
 		return [{ value: "-d ", label: "-d", description: "Choose split direction" }]
 	}
+
 	return null
 }
 
 async function getGitSnapshot(pi: ExtensionAPI, cwd: string): Promise<GitSnapshot> {
 	const run = async (args: string[]): Promise<string | undefined> => {
 		const result = await pi.exec("git", ["-C", cwd, ...args])
+
 		return result.code === 0 && result.stdout.trim() ? result.stdout.trim() : undefined
 	}
 
@@ -156,6 +159,7 @@ async function getGitSnapshot(pi: ExtensionAPI, cwd: string): Promise<GitSnapsho
 		run(["diff", "--stat"]),
 		run(["diff", "--stat", "--cached"]),
 	])
+
 	return { branch, head, status, diffStat, stagedDiffStat }
 }
 
@@ -167,6 +171,7 @@ export function formatGitSnapshot(snapshot: GitSnapshot): string {
 		snapshot.diffStat ? `Unstaged diff stat:\n${snapshot.diffStat}` : undefined,
 		snapshot.stagedDiffStat ? `Staged diff stat:\n${snapshot.stagedDiffStat}` : undefined,
 	].filter((section): section is string => section !== undefined)
+
 	return sections.join("\n\n")
 }
 
@@ -192,21 +197,27 @@ export function buildHandoffRequest(conversationText: string, goal: string, snap
 
 function parseHandoffManifest(raw: string): HandoffManifest {
 	let decoded: unknown
+
 	try {
 		decoded = JSON.parse(raw)
 	} catch {
 		throw new Error("Invalid split-handoff manifest")
 	}
+
 	const parsed = handoffManifestSchema.safeParse(decoded)
+
 	if (!parsed.success) throw new Error("Invalid split-handoff manifest")
+
 	return parsed.data
 }
 
 export async function createHandoffManifestFile(manifest: Omit<HandoffManifest, "version">): Promise<string> {
 	const directory = await mkdtemp(path.join(tmpdir(), "pi-split-handoff-"))
 	const manifestFile = path.join(directory, "manifest.json")
+
 	try {
 		await writeFile(manifestFile, JSON.stringify({ version: 1, ...manifest }), { encoding: "utf8", mode: 0o600 })
+
 		return manifestFile
 	} catch (error) {
 		await rm(directory, { recursive: true, force: true }).catch(() => undefined)
@@ -216,10 +227,14 @@ export async function createHandoffManifestFile(manifest: Omit<HandoffManifest, 
 
 export async function consumeHandoffManifestFile(manifestFile: string): Promise<HandoffManifest> {
 	const file = await open(path.resolve(manifestFile), "r")
+
 	try {
 		const fileStat = await file.stat()
+
 		if (!fileStat.isFile()) throw new Error("Invalid split-handoff manifest")
+
 		if (fileStat.size > MAX_MANIFEST_BYTES) throw new Error("Split-handoff manifest is too large")
+
 		return parseHandoffManifest(await file.readFile("utf8"))
 	} finally {
 		await file.close()
@@ -232,6 +247,7 @@ async function generateHandoff(
 	goal: string,
 ): Promise<HandoffGenerationResult> {
 	const messages = ctx.sessionManager.buildContextEntries().flatMap(sessionEntryToContextMessages)
+
 	if (messages.length === 0) return { ok: false, error: "No conversation to hand off" }
 
 	const conversationText = serializeConversation(convertToLlm(messages))
@@ -243,6 +259,7 @@ async function generateHandoff(
 
 		const run = async (): Promise<HandoffGenerationResult> => {
 			const model = ctx.model
+
 			if (!model) return { ok: false, error: "No model selected" }
 
 			const userMessage: Message = {
@@ -250,16 +267,21 @@ async function generateHandoff(
 				content: [{ type: "text", text: buildHandoffRequest(conversationText, goal, snapshot) }],
 				timestamp: Date.now(),
 			}
-			const modelRegistry = ctx.modelRegistry as typeof ctx.modelRegistry & Partial<NativeCompletionRegistry>
-			if (typeof modelRegistry.complete !== "function") {
+
+			const modelRegistry = ctx.modelRegistry
+
+			if (!modelRegistry.complete) {
 				return { ok: false, error: "Split handoff requires Pi 0.84.2 or newer" }
 			}
+
 			const response = await modelRegistry.complete(
 				model,
 				{ systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
 				{ signal: loader.signal, cacheRetention: "none" },
 			)
+
 			if (response.stopReason === "aborted") return null
+
 			if (response.stopReason === "error") {
 				return { ok: false, error: response.errorMessage ?? "Handoff generation failed" }
 			}
@@ -269,12 +291,14 @@ async function generateHandoff(
 				.map((content) => content.text)
 				.join("\n")
 				.trim()
+
 			return text ? { ok: true, text } : { ok: false, error: "The model returned an empty handoff" }
 		}
 
 		run()
 			.then(done)
 			.catch((error) => done({ ok: false, error: error instanceof Error ? error.message : String(error) }))
+
 		return loader
 	})
 }
@@ -286,8 +310,10 @@ export default function (pi: ExtensionAPI): void {
 		getArgumentCompletions: directionCompletions,
 		handler: async (args, ctx) => {
 			const trimmedArgs = args.trim()
+
 			if (trimmedArgs.startsWith(RECEIVE_PREFIX)) {
 				let manifest: HandoffManifest
+
 				try {
 					manifest = await consumeHandoffManifestFile(trimmedArgs.slice(RECEIVE_PREFIX.length).trim())
 				} catch (error) {
@@ -295,6 +321,7 @@ export default function (pi: ExtensionAPI): void {
 						`Failed to receive split handoff: ${error instanceof Error ? error.message : String(error)}`,
 						"error",
 					)
+
 					return
 				}
 
@@ -305,21 +332,27 @@ export default function (pi: ExtensionAPI): void {
 						replacementCtx.ui.notify("Split handoff ready. Submit when ready.", "info")
 					},
 				})
+
 				if (result.cancelled) ctx.ui.notify("Split handoff session creation was cancelled", "warning")
+
 				return
 			}
 
 			if (ctx.mode !== "tui") {
 				ctx.ui.notify("/split-handoff requires interactive mode.", "error")
+
 				return
 			}
+
 			if (process.platform !== "darwin" && !isRexSession() && !isTeteyeSession()) {
 				ctx.ui.notify("/split-handoff currently requires Rex, teteye, or macOS (Ghostty AppleScript).", "warning")
+
 				return
 			}
 
 			let direction: SplitDirection
 			let goal: string
+
 			try {
 				const parsed = parseSplitForkArgs(args)
 				direction = parsed.direction
@@ -327,14 +360,19 @@ export default function (pi: ExtensionAPI): void {
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error)
 				ctx.ui.notify(`${message} Usage: /split-handoff [-d right|left|down|up] <goal>`, "error")
+
 				return
 			}
+
 			if (!goal) {
 				ctx.ui.notify("Usage: /split-handoff [-d right|left|down|up] <goal>", "error")
+
 				return
 			}
+
 			if (!ctx.model) {
 				ctx.ui.notify("No model selected", "error")
+
 				return
 			}
 
@@ -342,16 +380,21 @@ export default function (pi: ExtensionAPI): void {
 			await ctx.waitForIdle()
 
 			const generated = await generateHandoff(pi, ctx, goal)
+
 			if (generated === null) {
 				ctx.ui.notify("Handoff cancelled", "info")
+
 				return
 			}
+
 			if (!generated.ok) {
 				ctx.ui.notify(`Failed to generate handoff: ${generated.error}`, "error")
+
 				return
 			}
 
 			let manifestFile: string
+
 			try {
 				manifestFile = await createHandoffManifestFile({
 					goal,
@@ -363,21 +406,26 @@ export default function (pi: ExtensionAPI): void {
 					`Failed to create split handoff: ${error instanceof Error ? error.message : String(error)}`,
 					"error",
 				)
+
 				return
 			}
 
 			const receivePrompt = `/split-handoff ${RECEIVE_PREFIX}${manifestFile}`
 			let result: SplitLaunchResult
+
 			try {
 				result = await launchTerminalSplit(pi, ctx, buildPiStartupInput(undefined, receivePrompt), direction)
 			} catch (error) {
 				await rm(path.dirname(manifestFile), { recursive: true, force: true })
 				ctx.ui.notify(`Failed to launch split: ${error instanceof Error ? error.message : String(error)}`, "error")
+
 				return
 			}
+
 			if (!result.ok) {
 				await rm(path.dirname(manifestFile), { recursive: true, force: true })
 				ctx.ui.notify(`Failed to launch ${result.terminalName} split: ${result.reason}`, "error")
+
 				return
 			}
 

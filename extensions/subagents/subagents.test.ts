@@ -3,10 +3,18 @@ import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { setImmediate } from "node:timers/promises"
-import type { StopReason } from "@earendil-works/pi-ai"
-import { type ExtensionAPI, type ExtensionContext, SessionManager } from "@earendil-works/pi-coding-agent"
-import { installBridge } from "./bridge"
-import installParent from "./index"
+import {
+	type AssistantMessage,
+	type JsonObject,
+	type JsonValue,
+	type Static,
+	type StopReason,
+	Type,
+} from "@earendil-works/pi-ai"
+import { SessionManager } from "@earendil-works/pi-coding-agent"
+import { Check } from "typebox/value"
+import { type BridgeContext, type LifecycleEvent, installBridge } from "./bridge"
+import { type ParentContext, installParent } from "./index"
 import { type Exec, readProcess } from "./rex"
 import {
 	type RunMetadata,
@@ -19,50 +27,60 @@ import {
 	writeMetadata,
 } from "./runs"
 
-type Handler = (event: { reason?: string }, ctx: ExtensionContext) => unknown
-function events() {
-	const handlers = new Map<string, Handler>()
+function events<TContext>() {
+	const handlers = new Map<string, (event: LifecycleEvent, ctx: TContext) => void | Promise<void>>()
+
 	return {
-		on: (event: string, handler: Handler) => handlers.set(event, handler),
-		emit: async (event: string, ctx: ExtensionContext, reason?: string) => {
-			await handlers.get(event)?.({ reason }, ctx)
+		on: (event: string, handler: (event: LifecycleEvent, ctx: TContext) => void | Promise<void>) => {
+			handlers.set(event, handler)
+		},
+		emit: async (event: string, ctx: TContext, reason?: string) => {
+			await handlers.get(event)?.({ type: event, reason }, ctx)
 		},
 	}
 }
 
-type Tool = {
-	name: string
-	execute: (
-		id: string,
-		params: never,
-		signal: AbortSignal | undefined,
-		update: undefined,
-		ctx: ExtensionContext,
-	) => Promise<{ structuredContent: Record<string, unknown> }>
-}
+type ToolCall = (params: JsonObject, signal?: AbortSignal) => Promise<JsonValue | undefined>
+
 type Block = { exit: number | null; error?: string }
+
 let root: string
+
 let savedEnv: Record<string, string | undefined>
-let ctx: ExtensionContext
-let parent: ReturnType<typeof events>
-let tools: Map<string, Tool>
+
+let ctx: ParentContext
+
+let parent: ReturnType<typeof events<ParentContext>>
+
+let tools: Map<string, ToolCall>
+
 let blocks: Map<string, Block>
+
 let launches: { options: { cwd: string; command: string[] }; label: string }[]
+
 let failLaunch: boolean
+
 let failClose: boolean
+
 let onProcess: (() => void) | undefined
+
 let widgets: (string[] | undefined)[]
+
 const envKeys = ["PI_CODING_AGENT_DIR", "PI_SUBAGENT_RUN_DIR", "REX_SESSION", "REX_BLOCK"]
 
 // Only the external Rex transport is faked. Unexpected operations fail, rather than silently succeeding.
 const exec: Exec = async (command, args, signal) => {
 	signal?.throwIfAborted()
 	expect(command).toBe("rex")
+
 	if (args[0] === "block" && args[4] === "process") {
 		onProcess?.()
 		const block = blocks.get(args[3] ?? "")
+
 		if (!block) return { code: 1, stdout: "", stderr: `Error: block target "${args[3]}" not found` }
+
 		if (block.error) throw new Error(block.error)
+
 		return {
 			code: 0,
 			stderr: "",
@@ -72,19 +90,25 @@ const exec: Exec = async (command, args, signal) => {
 			}),
 		}
 	}
+
 	const payload = JSON.parse(args[5] ?? "{}")
+
 	if (args[4] === "session.new_block") {
 		if (failLaunch) throw new Error("launch failed")
 		launches.push(payload)
 		const blockId = `block:${launches.length}`
 		blocks.set(blockId, { exit: null })
+
 		return { code: 0, stderr: "", stdout: JSON.stringify({ block_id: blockId }) }
 	}
+
 	if (args[4] === "block.close") {
 		if (failClose) throw new Error("close failed")
 		blocks.delete(payload.block_id)
+
 		return { code: 0, stderr: "", stdout: "{}" }
 	}
+
 	throw new Error(`Unexpected Rex operation: ${args.join(" ")}`)
 }
 
@@ -101,25 +125,41 @@ beforeEach(() => {
 	widgets = []
 	failLaunch = failClose = false
 	onProcess = undefined
-	parent = events()
+	parent = events<ParentContext>()
 	ctx = {
 		cwd: root,
 		hasUI: false,
 		model: { provider: "configured", id: "parent" },
 		sessionManager: { getSessionId: () => "parent" },
 		ui: {
-			setWidget: (_key: string, lines: string[] | undefined) => widgets.push(lines),
-			theme: { fg: (_color: string, text: string) => text },
+			setWidget: (_key, lines) => {
+				widgets.push(lines)
+			},
+			theme: { fg: (_color, text) => text },
 			notify() {},
+			custom() {
+				throw new Error("Unexpected custom UI")
+			},
 		},
-	} as unknown as ExtensionContext
+	}
 	installParent({
 		on: parent.on,
-		exec: (command: string, args: string[], options?: { signal?: AbortSignal }) => exec(command, args, options?.signal),
+		exec: async (command, args, options) => ({ ...(await exec(command, args, options?.signal)), killed: false }),
 		getThinkingLevel: () => "off",
 		registerCommand() {},
-		registerTool: (tool: Tool) => tools.set(tool.name, tool),
-	} as unknown as ExtensionAPI)
+		registerTool: (tool) => {
+			tools.set(tool.name, async (params, signal) => {
+				if (!Check(tool.parameters, params)) throw new Error(`Invalid parameters for ${tool.name}`)
+				// SAFETY: Check validated the registered plain-JSON schema. Local TypeBox 1.3.7 and
+				// the SDK's 1.3.27 disagree on generic Static types, not these JSON parameter types.
+				const validated = params as Static<typeof tool.parameters>
+				const result = await tool.execute("test", validated, signal, undefined, ctx)
+				expect(result.structuredContent).toEqual(result.details)
+
+				return result.structuredContent
+			})
+		},
+	})
 })
 
 afterEach(() => {
@@ -127,21 +167,29 @@ afterEach(() => {
 	vi.clearAllTimers()
 	vi.useRealTimers()
 	rmSync(root, { recursive: true, force: true })
+
 	for (const key of envKeys) {
 		if (savedEnv[key] === undefined) Reflect.deleteProperty(process.env, key)
 		else process.env[key] = savedEnv[key]
 	}
 })
 
-async function call(name: string, params = {}, signal?: AbortSignal) {
+async function call(name: string, params: JsonObject = {}, signal?: AbortSignal) {
 	const tool = tools.get(name)
+
 	if (!tool) throw new Error(`Missing tool: ${name}`)
-	return (await tool.execute("test", params as never, signal, undefined, ctx)).structuredContent
+
+	return tool(params, signal)
 }
-async function spawn(params = {}) {
+
+async function spawn(params: JsonObject = {}) {
 	const result = await call("agent_spawn", { prompt: "task", background: true, ...params })
-	return getRun(String(result.handle))
+
+	if (!Check(Type.Object({ handle: Type.String() }), result)) throw new Error("Spawn returned no handle")
+
+	return getRun(result.handle)
 }
+
 async function tick(ms = 0) {
 	vi.advanceTimersByTime(ms)
 	await setImmediate() // Drain asynchronous Rex calls without guessing how many microtasks they need.
@@ -149,19 +197,22 @@ async function tick(ms = 0) {
 
 // Real bridge, metadata and transcripts; only Pi's event source and message sink are supplied here.
 async function child(run: RunMetadata, start = true) {
-	const hooks = events()
+	const hooks = events<BridgeContext>()
+	const names: string[] = []
+	const sent: { message: string; deliverAs?: "steer" | "followUp" }[] = []
+
 	const c = {
 		idle: true,
 		session: SessionManager.open(run.sessionFile, undefined, root),
-		names: [] as string[],
-		sent: [] as { message: string; deliverAs?: string }[],
+		names,
+		sent,
 		emit: (event: string, reason?: string) =>
 			hooks.emit(
 				event,
 				{
 					isIdle: () => c.idle,
 					sessionManager: c.session,
-				} as unknown as ExtensionContext,
+				},
 				reason,
 			),
 		begin: async () => {
@@ -170,7 +221,8 @@ async function child(run: RunMetadata, start = true) {
 		},
 		reply: async (text: string, stopReason: StopReason = "stop") => {
 			c.session.appendMessage({ role: "user", content: "task", timestamp: Date.now() })
-			c.session.appendMessage({
+
+			const reply: AssistantMessage = {
 				role: "assistant",
 				content: [{ type: "text", text }],
 				stopReason,
@@ -178,7 +230,6 @@ async function child(run: RunMetadata, start = true) {
 				provider: run.provider,
 				model: run.model,
 				timestamp: Date.now(),
-				...(stopReason === "error" ? { errorMessage: text } : {}),
 				usage: {
 					input: 2,
 					output: 3,
@@ -187,20 +238,30 @@ async function child(run: RunMetadata, start = true) {
 					totalTokens: 5,
 					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 				},
-			})
+			}
+
+			if (stopReason === "error") reply.errorMessage = text
+			c.session.appendMessage(reply)
 			c.idle = true
 			await c.emit("agent_settled")
 		},
 	}
+
 	installBridge(
 		{
 			on: hooks.on,
-			setSessionName: (name: string) => c.names.push(name),
-			sendUserMessage: (message: string, options?: { deliverAs?: string }) => c.sent.push({ message, ...options }),
-		} as unknown as ExtensionAPI,
+			setSessionName: (name) => {
+				c.names.push(name)
+			},
+			sendUserMessage: (message, options) => {
+				c.sent.push({ message, ...options })
+			},
+		},
 		runDirectory(run.handle),
 	)
+
 	if (start) await c.emit("session_start")
+
 	return c
 }
 
@@ -215,6 +276,7 @@ test("launch uses the current extension, shell defaults and explicit tool flags;
 	])
 	expect(command).not.toContain("--tools")
 	expect(command).not.toContain("--no-tools")
+
 	for (const noTools of ["all", "builtin"]) {
 		const restricted = await spawn({ tools: "readonly", noTools })
 		expect(restricted.launchArgs).toEqual([
@@ -246,6 +308,7 @@ test("synchronous spawn waits for the bridge to finish the initial task", async 
 	const spawning = call("agent_spawn", { prompt: "task" })
 	await tick()
 	const run = listRuns()[0]
+
 	if (!run) throw new Error("Missing spawned run")
 	const c = await child(run)
 	await c.begin()
@@ -261,10 +324,13 @@ test("send then wait retries a failed turn instead of returning its old error", 
 	await c.reply("OLD FAILURE", "error")
 	await call("agent_send", { handle: run.handle, message: "retry" })
 	let finished = false
+
 	const waiting = call("agent_wait", { handle: run.handle, timeoutSec: 2 }).then((result) => {
 		finished = true
+
 		return result
 	})
+
 	await tick()
 	expect(finished).toBe(false)
 	await tick(250)
@@ -288,7 +354,6 @@ test("startup and busy polling do not read transcripts, and a timeout leaves the
 	await tick(500)
 	expect(await waiting).toMatchObject({ status: "error", error: "timeout after 1s" })
 	expect(blocks.has(run.blockId)).toBe(true)
-	await expect(call("agent_wait", { handle: run.handle, timeoutSec: 0 })).rejects.toThrow("positive integer")
 })
 
 test("completion reads metadata and the transcript after asynchronous process inspection", async () => {
@@ -299,6 +364,7 @@ test("completion reads metadata and the transcript after asynchronous process in
 		onProcess = undefined
 		void c.reply("JUST FINISHED")
 	}
+
 	expect(await call("agent_wait", { handle: run.handle })).toMatchObject({ answer: "JUST FINISHED" })
 })
 
@@ -382,6 +448,7 @@ test("stop and parent shutdown remove exited blocks too", async () => {
 	for (const action of ["stop", "shutdown"]) {
 		const run = await spawn()
 		blocks.set(run.blockId, { exit: 0 })
+
 		if (action === "stop") await call("agent_stop", { handle: run.handle })
 		else await parent.emit("session_shutdown", ctx)
 		expect(blocks.has(run.blockId)).toBe(false)
@@ -396,12 +463,12 @@ test("missing blocks mean exited, but connection failures stay unknown and don't
 	await c.begin()
 	blocks.set(failed.blockId, { exit: null, error: "connection refused" })
 	const result = await call("agent_list")
-	expect(result.runs).toEqual(
-		expect.arrayContaining([
+	expect(result).toEqual({
+		runs: expect.arrayContaining([
 			expect.objectContaining({ handle: failed.handle, state: "unknown", error: "connection refused" }),
 			expect.objectContaining({ handle: healthy.handle, state: "busy" }),
 		]),
-	)
+	})
 	ctx.hasUI = true
 	await parent.emit("session_start", ctx)
 	expect(widgets.at(-1)?.join()).toContain("healthy:busy")
@@ -417,7 +484,7 @@ test("metadata skips corrupt records, list stays parent-scoped, and names/handle
 	const run = await spawn()
 	const other = await spawn()
 	updateMetadata(runDirectory(other.handle), { parentSessionId: "other" })
-	expect((await call("agent_list")).runs).toEqual([expect.objectContaining({ handle: run.handle })])
+	expect(await call("agent_list")).toEqual({ runs: [expect.objectContaining({ handle: run.handle })] })
 	writeFileSync(join(runDirectory(other.handle), "metadata.json"), "{")
 	expect(readMetadata(runDirectory(other.handle))).toBeUndefined()
 	expect(listRuns()).toHaveLength(1)

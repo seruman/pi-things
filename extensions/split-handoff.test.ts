@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
 import { mkdtemp, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent"
 import {
 	buildPiStartupInput,
 	isRexSession,
@@ -13,7 +12,6 @@ import {
 } from "./split-fork.ts"
 import {
 	buildHandoffRequest,
-	buildReceivingDraft,
 	consumeHandoffManifestFile,
 	createHandoffManifestFile,
 	formatGitSnapshot,
@@ -30,6 +28,7 @@ async function createRawManifest(raw: string): Promise<{ directory: string; mani
 	temporaryDirectories.push(directory)
 	const manifestFile = path.join(directory, "manifest.json")
 	await writeFile(manifestFile, raw, { mode: 0o600 })
+
 	return { directory, manifestFile }
 }
 
@@ -53,18 +52,6 @@ describe("handoff request", () => {
 
 	test("describes an empty status without inventing repository facts", () => {
 		expect(formatGitSnapshot({})).toBe("Working tree: clean or unavailable")
-	})
-})
-
-describe("receiving draft", () => {
-	test("adds a concise read-only orientation gate after the generated handoff", () => {
-		const draft = buildReceivingDraft("## Goal\nContinue the investigation.\n")
-
-		expect(draft).toStartWith("## Goal\nContinue the investigation.")
-		expect(draft).toContain("## On Receipt")
-		expect(draft).toContain("at most five concise bullets")
-		expect(draft).toContain("Do not modify anything")
-		expect(draft).toContain("wait for explicit user authorization")
 	})
 })
 
@@ -94,6 +81,7 @@ describe("Rex split launcher", () => {
 	afterEach(() => {
 		for (const [index, key] of envKeys.entries()) {
 			const value = originalEnv[index]
+
 			if (value === undefined) Reflect.deleteProperty(process.env, key)
 			else process.env[key] = value
 		}
@@ -116,12 +104,8 @@ describe("Rex split launcher", () => {
 	] as const)("launches %s using Rex direction %s", async (direction, rexDirection) => {
 		const exec = mock(async () => ({ code: 0, stdout: "", stderr: "", killed: false }))
 		const startupInput = "'pi' '--session' '/tmp/a b.jsonl' 'literal $(whoami)'\n"
-		const result = await launchTerminalSplit(
-			{ exec } as unknown as ExtensionAPI,
-			{ cwd: "/tmp/project with spaces" } as ExtensionCommandContext,
-			startupInput,
-			direction,
-		)
+
+		const result = await launchTerminalSplit({ exec }, { cwd: "/tmp/project with spaces" }, startupInput, direction)
 
 		expect(result).toEqual({ ok: true, terminalName: "Rex" })
 		expect(exec).toHaveBeenCalledTimes(1)
@@ -146,14 +130,11 @@ describe("Rex split launcher", () => {
 		["", "", "unknown rex error"],
 	])("reports Rex errors without falling back to another terminal", async (stderr, stdout, reason) => {
 		const exec = mock(async () => ({ code: 1, stdout, stderr, killed: false }))
-		expect(
-			await launchTerminalSplit(
-				{ exec } as unknown as ExtensionAPI,
-				{ cwd: "/tmp" } as ExtensionCommandContext,
-				"'pi'\n",
-				"right",
-			),
-		).toEqual({ ok: false, terminalName: "Rex", reason })
+		expect(await launchTerminalSplit({ exec }, { cwd: "/tmp" }, "'pi'\n", "right")).toEqual({
+			ok: false,
+			terminalName: "Rex",
+			reason,
+		})
 		expect(exec).toHaveBeenCalledTimes(1)
 	})
 })
@@ -196,11 +177,13 @@ describe("Pi child startup", () => {
 
 	test("keeps handoff text out of argv", async () => {
 		const handoff = "Sensitive-looking shell text: $(touch /tmp/should-not-run) `whoami`"
+
 		const manifestFile = await createHandoffManifestFile({
 			goal: "continue safely",
 			handoff,
 			parentSession: "/tmp/source.jsonl",
 		})
+
 		const directory = path.dirname(manifestFile)
 		temporaryDirectories.push(directory)
 
