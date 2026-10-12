@@ -14,6 +14,7 @@ function fixture(root: string) {
 	fs.mkdirSync(workspace)
 	fs.mkdirSync(state)
 	fs.writeFileSync(path.join(workspace, "file.txt"), "content")
+
 	const store = unwrap(
 		createSnapshotStore({
 			workspaceRoot: canonicalPath(workspace),
@@ -21,7 +22,9 @@ function fixture(root: string) {
 			policy: testPolicy(workspace, state),
 		}),
 	)
+
 	const published = unwrap(createSnapshot(store))
+
 	return { workspace, store, published }
 }
 
@@ -48,6 +51,7 @@ test("verification rejects stored metadata changes", () => {
 		fs.utimesSync(stored, original.atimeMs / 1000, original.mtimeMs / 1000 + 10)
 		const verified = verifySnapshot(loaded)
 		assert.equal(verified.ok, false)
+
 		if (!verified.ok) assert.equal(verified.error.kind, "stored-entry-mismatch")
 	})
 })
@@ -63,11 +67,13 @@ test("rejects manifest identity mismatches and missing stored entries", () => {
 
 		manifest.id = value.published.id
 		const fileEntry = manifest.entries.find((entry: { kind: string }) => entry.kind === "file")
+
 		if (!fileEntry) throw new Error("test manifest file entry missing")
 		fileEntry.storage = { kind: "protected" }
 		fs.writeFileSync(manifestPath, JSON.stringify(manifest))
 		const storageMismatch = loadSnapshot(value.store, value.published.id)
 		assert.equal(storageMismatch.ok, false)
+
 		if (!storageMismatch.ok) assert.equal(storageMismatch.error.kind, "storage-classification-mismatch")
 
 		fileEntry.storage = { kind: "ordinary" }
@@ -76,6 +82,7 @@ test("rejects manifest identity mismatches and missing stored entries", () => {
 		fs.rmSync(path.join(value.published.directory, "tree", "file.txt"))
 		const verified = verifySnapshot(loaded)
 		assert.equal(verified.ok, false)
+
 		if (!verified.ok) assert.equal(verified.error.kind, "stored-entry-mismatch")
 	})
 })

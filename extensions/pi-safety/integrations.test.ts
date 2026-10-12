@@ -14,12 +14,14 @@ test("parses SSH agent, Docker, and native wb integrations into closed variants"
 		const bin = path.join(root, "bin")
 		const sshSocket = path.join(temp, "ssh.sock")
 		const dockerSocket = path.join(temp, "docker.sock")
+
 		for (const directory of [home, temp, bin]) fs.mkdirSync(directory)
 		const wb = path.join(bin, "wb")
 		const nix = path.join(bin, "nix")
 		fs.writeFileSync(wb, "#!/bin/sh\nexit 0\n", { mode: 0o700 })
 		fs.writeFileSync(nix, "#!/bin/sh\nexit 0\n", { mode: 0o700 })
 		const installedGit = Bun.which("git")
+
 		if (!installedGit) throw new Error("Git must be installed for integration tests")
 		fs.symlinkSync(installedGit, path.join(bin, "git"))
 
@@ -32,8 +34,10 @@ test("parses SSH agent, Docker, and native wb integrations into closed variants"
 			},
 			home: canonicalPath(home),
 		}
+
 		const parsed = parseBashIntegrations(input)
 		assert.equal(parsed.ok, true, parsed.ok ? undefined : JSON.stringify(parsed.error))
+
 		if (!parsed.ok) return
 		assert.equal(parsed.value.gitExecutable, canonicalExecutable(installedGit))
 		assert.deepEqual(parsed.value.nix, {
@@ -45,13 +49,16 @@ test("parses SSH agent, Docker, and native wb integrations into closed variants"
 		assert.deepEqual(parsed.value.sshAgent, { kind: "unix-socket", socket: canonicalPath(sshSocket) })
 		assert.deepEqual(parsed.value.docker, { kind: "unix-socket", socket: canonicalPath(dockerSocket) })
 		assert.equal(parsed.value.wb.kind, "enabled")
+
 		if (parsed.value.wb.kind === "enabled") {
 			assert.equal(parsed.value.wb.executable, canonicalPath(wb))
 			const nextGeneration = parseBashIntegrations(input)
 			assert.equal(nextGeneration.ok, true)
+
 			if (nextGeneration.ok && nextGeneration.value.wb.kind === "enabled") {
 				assert.notEqual(nextGeneration.value.wb.socket, parsed.value.wb.socket)
 			}
+
 			assert.ok(parsed.value.wb.socket.length < 104)
 			assert.equal(prepareBashIntegrations(parsed.value).ok, true)
 			assert.equal(fs.statSync(parsed.value.wb.runtimeDirectory).mode & 0o777, 0o700)
@@ -75,6 +82,7 @@ test("derives the selected Docker context Unix socket without invoking Docker", 
 			path.join(metadataDirectory, "meta.json"),
 			JSON.stringify({ Name: contextName, Endpoints: { docker: { Host: `unix://${socket}` } } }),
 		)
+
 		const parsed = parseBashIntegrations({
 			environment: {
 				path: "",
@@ -84,7 +92,9 @@ test("derives the selected Docker context Unix socket without invoking Docker", 
 			},
 			home: canonicalPath(home),
 		})
+
 		assert.equal(parsed.ok, true)
+
 		if (parsed.ok) assert.deepEqual(parsed.value.docker, { kind: "unix-socket", socket: canonicalPath(socket) })
 	})
 })
@@ -93,6 +103,7 @@ test("rejects unsupported Docker endpoint protocols", () => {
 	withTestTempDirectory("integrations-invalid-docker-", (root) => {
 		const home = path.join(root, "home")
 		fs.mkdirSync(home)
+
 		const parsed = parseBashIntegrations({
 			environment: {
 				path: "",
@@ -102,9 +113,12 @@ test("rejects unsupported Docker endpoint protocols", () => {
 			},
 			home: canonicalPath(home),
 		})
+
 		assert.equal(parsed.ok, false)
+
 		if (!parsed.ok) {
 			assert.equal(parsed.error.kind, "invalid-integration-path")
+
 			if (parsed.error.kind === "invalid-integration-path") assert.equal(parsed.error.integration, "docker")
 		}
 	})
@@ -114,6 +128,7 @@ test("uses disabled or network variants without inventing socket permissions", (
 	withTestTempDirectory("integrations-disabled-", (root) => {
 		const home = path.join(root, "home")
 		fs.mkdirSync(home)
+
 		const parsed = parseBashIntegrations({
 			environment: {
 				path: "",
@@ -123,7 +138,9 @@ test("uses disabled or network variants without inventing socket permissions", (
 			},
 			home: canonicalPath(home),
 		})
+
 		assert.equal(parsed.ok, true)
+
 		if (parsed.ok) {
 			assert.deepEqual(parsed.value.nix, { kind: "disabled" })
 			assert.deepEqual(parsed.value.sshAgent, { kind: "disabled" })

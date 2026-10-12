@@ -13,10 +13,12 @@ test("sandbox launcher preserves hostile commands and parameters as inert argv",
 		const injected = path.join(root, "injected")
 		const output = path.join(root, "output")
 		const hostile = `quote' $(touch ${injected})\nnewline`
+
 		const compiled: CompiledSbpl = {
 			source: "(version 1)\n(allow default)",
 			parameters: [{ name: "PI_SAFETY_0", value: hostile }],
 		}
+
 		const commandValue = "command's\nline"
 		const command = `printf %s "command's" > ${JSON.stringify(output)}\nprintf '\\nline' >> ${JSON.stringify(output)}`
 		const wrapper = unwrap(compileSandboxedBashCommand(compiled, command))
@@ -32,10 +34,12 @@ test("generated hostile parameter values remain inert outer-shell argv", () => {
 		for (let index = 0; index < 24; index += 1) {
 			const injected = path.join(root, `injected-${index}`)
 			const value = `case-${index}-'\"\\\n$(touch ${injected});${String.fromCodePoint(0x3b1 + (index % 20))}`
+
 			const compiled: CompiledSbpl = {
 				source: "(version 1)\n(allow default)",
 				parameters: [{ name: "PI_SAFETY_0", value }],
 			}
+
 			const wrapper = unwrap(compileSandboxedBashCommand(compiled, "/usr/bin/true"))
 			const result = spawnSync("/bin/bash", ["-c", wrapper], { encoding: "utf8" })
 			assert.equal(result.status, 0, result.stderr)
@@ -49,10 +53,12 @@ test("sandbox launcher preserves Pi abort propagation", async () => {
 		const compiled: CompiledSbpl = { source: "(version 1)\n(allow default)", parameters: [] }
 		const operations = createSandboxedBashOperations(() => compiled)
 		const controller = new AbortController()
+
 		const execution = operations.exec("sleep 5", root, {
 			onData: () => undefined,
 			signal: controller.signal,
 		})
+
 		setTimeout(() => controller.abort(), 50)
 		await assert.rejects(execution, /aborted/)
 	})

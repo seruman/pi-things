@@ -4,14 +4,13 @@ import {
 	type AssistantMessageEventStream,
 	type JsonValue,
 	type Model,
-	type SimpleStreamOptions,
 	createAssistantMessageEventStream,
 } from "@earendil-works/pi-ai"
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 import { z } from "zod"
 import { readJsonFile } from "./json-file"
 
-const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
+export const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
 	z.union([
 		z.null(),
 		z.boolean(),
@@ -31,9 +30,10 @@ const scriptedResponseSchema = z.discriminatedUnion("kind", [
 		arguments: z.record(jsonValueSchema),
 	}),
 ])
+
 const scriptSchema = z.array(scriptedResponseSchema).min(1)
 
-type ScriptedResponse = z.infer<typeof scriptedResponseSchema>
+export type ScriptedResponse = z.infer<typeof scriptedResponseSchema>
 
 function emptyAssistantMessage(model: Model<string>): AssistantMessage {
 	return {
@@ -59,6 +59,7 @@ function streamResponse(model: Model<string>, response: ScriptedResponse): Assis
 	const stream = createAssistantMessageEventStream()
 	const output = emptyAssistantMessage(model)
 	stream.push({ type: "start", partial: output })
+
 	if (response.kind === "text") {
 		const block = { type: "text" as const, text: response.text }
 		output.content.push(block)
@@ -73,6 +74,7 @@ function streamResponse(model: Model<string>, response: ScriptedResponse): Assis
 			name: response.name,
 			arguments: response.arguments,
 		}
+
 		output.content.push(toolCall)
 		output.stopReason = "toolUse"
 		stream.push({ type: "toolcall_start", contentIndex: 0, partial: output })
@@ -85,16 +87,21 @@ function streamResponse(model: Model<string>, response: ScriptedResponse): Assis
 		stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial: output })
 		stream.push({ type: "done", reason: "toolUse", message: output })
 	}
+
 	stream.end()
+
 	return stream
 }
 
 export default function scriptedProvider(pi: ExtensionAPI): void {
 	const scriptPath = process.env.PI_SAFETY_TEST_SCRIPT
+
 	if (!scriptPath || !path.isAbsolute(scriptPath)) {
 		throw new Error("PI_SAFETY_TEST_SCRIPT must be an absolute path")
 	}
+
 	const script = readJsonFile(scriptPath, scriptSchema)
+
 	if (!script.ok) throw new Error(`invalid script: ${script.error.message}`)
 	const responses = script.value
 	let responseIndex = 0
@@ -115,10 +122,12 @@ export default function scriptedProvider(pi: ExtensionAPI): void {
 				maxTokens: 1024,
 			},
 		],
-		streamSimple: (model: Model<string>, _context: unknown, _options?: SimpleStreamOptions) => {
+		streamSimple: (model) => {
 			const response = responses[responseIndex]
+
 			if (!response) throw new Error(`script exhausted after ${responseIndex} responses`)
 			responseIndex += 1
+
 			return streamResponse(model, response)
 		},
 	})

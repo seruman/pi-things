@@ -13,6 +13,7 @@ export function describeSeatbeltPolicy(policy: Policy): readonly PolicyDisplayEn
 	return policy.rules.flatMap((rule, index) => {
 		if (rule.kind === "snapshot") return []
 		const readable = describeReadableRule(rule, policy)
+
 		return [{ number: index + 1, ...readable, dsl: describeRule(rule) }]
 	})
 }
@@ -24,9 +25,11 @@ export function describePolicy(policy: Policy): string {
 		`home      ${quote(policy.homeRoot)}`,
 		"",
 	]
+
 	for (const [index, rule] of policy.rules.entries()) {
 		lines.push(`${String(index + 1).padStart(3, "0")} ${describeRule(rule)}`)
 	}
+
 	return lines.join("\n")
 }
 
@@ -147,6 +150,7 @@ function describeReadableSelector(
 ): string {
 	const value = selector.kind === "glob" ? selector.pattern.pattern : selector.path
 	const aliased = aliasPolicyPath(value, policy)
+
 	switch (selector.kind) {
 		case "file":
 		case "seatbelt-file":
@@ -169,8 +173,10 @@ function aliasPolicyPath(value: string, policy: Policy): string {
 		[policy.homeRoot, "$HOME"],
 	] as const) {
 		if (value === root) return alias
+
 		if (value.startsWith(`${root}/`)) return `${alias}${value.slice(root.length)}`
 	}
+
 	return value
 }
 

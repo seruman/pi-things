@@ -15,6 +15,7 @@ function snapshotFixture(root: string, maxSnapshots = 20) {
 	fs.mkdirSync(workspace)
 	fs.mkdirSync(state)
 	const workspaceRoot = canonicalPath(workspace)
+
 	const policy = testPolicy(workspace, state, {
 		noAccessPatterns: [pathPattern(path.join(workspace, "**", ".env*"), workspaceRoot)],
 		snapshotExclusions: [
@@ -23,6 +24,7 @@ function snapshotFixture(root: string, maxSnapshots = 20) {
 			pathPattern(path.join(workspace, "node_modules"), workspaceRoot),
 		],
 	})
+
 	const store = unwrap(
 		createSnapshotStore({
 			workspaceRoot,
@@ -31,6 +33,7 @@ function snapshotFixture(root: string, maxSnapshots = 20) {
 			maxSnapshots,
 		}),
 	)
+
 	return { workspace, workspaceRoot, state, policy, store }
 }
 
@@ -52,6 +55,7 @@ test("plans supported entries without following symlinks and records exclusions"
 				policy: fixture.policy,
 			}),
 		)
+
 		assert.deepEqual(
 			plan.entries.map((entry) => [entry.kind, entry.path, entry.kind === "file" ? entry.storage.kind : undefined]),
 			[
@@ -76,10 +80,12 @@ test("read-only paths can be excluded from snapshots independently", () => {
 		fs.writeFileSync(path.join(reference, "manual.txt"), "readable")
 		const workspaceRoot = canonicalPath(workspace)
 		const referencePattern = pathPattern(reference, workspaceRoot)
+
 		const policy = testPolicy(workspace, state, {
 			readOnlyPatterns: [referencePattern],
 			snapshotExclusions: [referencePattern],
 		})
+
 		const plan = unwrap(planSnapshot({ workspaceRoot, policy }))
 		assert.deepEqual(
 			plan.entries.map((entry) => [entry.kind, entry.path]),
@@ -96,12 +102,14 @@ test("protected roots keep explicit public metadata exceptions ordinary", () => 
 		fs.writeFileSync(path.join(ssh, "custom-private-key"), "private")
 		fs.writeFileSync(path.join(ssh, "id_ed25519.pub"), "public")
 		const workspaceRoot = canonicalPath(workspace)
+
 		const policy = testPolicy(workspace, workspace, {
 			additionalRules: [
 				noAccess(shared(), pattern(pathPattern(ssh, workspaceRoot))),
 				readOnly(shared(), pattern(pathPattern(path.join(ssh, "**", "*.pub"), workspaceRoot))),
 			],
 		})
+
 		const plan = unwrap(planSnapshot({ workspaceRoot, policy }))
 		assert.deepEqual(
 			plan.entries.filter((entry) => entry.kind === "file").map((entry) => [entry.path, entry.storage.kind]),
@@ -152,7 +160,9 @@ test("rejects unsupported filesystem entries before creating staging output", ()
 			workspaceRoot: fixture.workspaceRoot,
 			policy: fixture.policy,
 		})
+
 		assert.equal(planned.ok, false)
+
 		if (!planned.ok) assert.equal(planned.error.kind, "unsupported-entry")
 		assert.equal(fs.existsSync(fixture.store.projectDirectory), false)
 	})
@@ -163,12 +173,15 @@ test("rejects snapshot stores nested inside the workspace", () => {
 		const workspace = path.join(root, "workspace")
 		fs.mkdirSync(workspace)
 		const workspaceRoot = canonicalPath(workspace)
+
 		const created = createSnapshotStore({
 			workspaceRoot,
 			stateRoot: canonicalPath(path.join(workspace, ".state")),
 			policy: testPolicy(workspace, root),
 		})
+
 		assert.equal(created.ok, false)
+
 		if (!created.ok) assert.equal(created.error.kind, "invalid-store")
 	})
 })
@@ -198,6 +211,7 @@ test("an existing project lock is not removed by a competing snapshot", () => {
 
 		const created = createSnapshot(fixture.store)
 		assert.equal(created.ok, false)
+
 		if (!created.ok) assert.equal(created.error.kind, "project-locked")
 		assert.equal(fs.existsSync(lock), true)
 	})
@@ -227,6 +241,7 @@ test("retention fails atomically when all required snapshots cannot fit", () => 
 		fs.writeFileSync(file, "two")
 		const conflicted = createSnapshot(fixture.store, { preserve: first.id })
 		assert.equal(conflicted.ok, false)
+
 		if (!conflicted.ok) assert.equal(conflicted.error.kind, "retention-conflict")
 		assert.deepEqual(fs.readdirSync(fixture.store.projectDirectory), [first.id])
 	})
@@ -236,13 +251,16 @@ test("retains only the configured number of successfully published snapshots", (
 	withTestTempDirectory("snapshot-retention-", (root) => {
 		const fixture = snapshotFixture(root, 2)
 		const file = path.join(fixture.workspace, "value.txt")
+
 		for (const value of ["one", "two", "three"]) {
 			fs.writeFileSync(file, value)
 			unwrap(createSnapshot(fixture.store))
 		}
+
 		const published = fs
 			.readdirSync(fixture.store.projectDirectory, { withFileTypes: true })
 			.filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
+
 		assert.equal(published.length, 2)
 	})
 })

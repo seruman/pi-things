@@ -25,13 +25,18 @@ export function parseInitialSafetyConfiguration(
 	raw: RawPolicyConfiguration,
 ): Result<InitialSafetyConfiguration, PolicyConfigurationError> {
 	const workspace = parsePolicyPath("cwd", raw.cwd)
+
 	if (!workspace.ok) return workspace
 	const home = parsePolicyPath("home", raw.home)
+
 	if (!home.ok) return home
 	const stateHome = parsePolicyPath("stateHome", raw.stateHome)
+
 	if (!stateHome.ok) return stateHome
 	const piConfigDirectory = parsePolicyPath("piConfigDir", raw.piConfigDir)
+
 	if (!piConfigDirectory.ok) return piConfigDirectory
+
 	return ok(
 		Object.freeze({
 			paths: Object.freeze({
@@ -50,5 +55,6 @@ function parsePolicyPath(
 	input: string,
 ): Result<CanonicalPath, PolicyConfigurationError> {
 	const parsed = parseCanonicalPath(input)
+
 	return parsed.ok ? parsed : err({ kind: "canonical-path", field, cause: parsed.error })
 }

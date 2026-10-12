@@ -51,11 +51,13 @@ describe("ordered policy evaluation", () => {
 
 	test("sandbox capabilities apply to sandboxed executables but not built-ins", () => {
 		const privateTemp = pathValue(path.join(workspace, "private-temp"))
+
 		const subjectPolicy = definePolicy({
 			workspaceRoot: workspace,
 			homeRoot: home,
 			rules: [readOnly(shared(), tree(root)), readWrite(sandbox(), tree(privateTemp))],
 		})
+
 		const accessFor = (subject: EvaluationSubject) =>
 			evaluatePolicy(subjectPolicy, {
 				kind: "file-access",
@@ -63,6 +65,7 @@ describe("ordered policy evaluation", () => {
 				subject,
 				path: pathValue(path.join(privateTemp, "file")),
 			}).effect
+
 		expect(accessFor({ kind: "builtin" })).toBe("deny")
 		expect(accessFor({ kind: "sandbox" })).toBe("allow")
 		expect(accessFor({ kind: "executable", executable: git })).toBe("allow")
@@ -90,11 +93,13 @@ describe("ordered policy evaluation", () => {
 
 	test("file selectors do not match descendants", () => {
 		const exact = pathValue(path.join(workspace, "one"))
+
 		const exactPolicy = definePolicy({
 			workspaceRoot: workspace,
 			homeRoot: home,
 			rules: [readOnly(shared(), tree(root)), noAccess(shared(), file(exact))],
 		})
+
 		expect(
 			evaluatePolicy(exactPolicy, {
 				kind: "file-access",

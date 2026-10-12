@@ -24,6 +24,7 @@ export function readJsonFile<Schema extends z.ZodTypeAny>(
 export function readJsonFile(path: string): Result<unknown, JsonFileError>
 export function readJsonFile(path: string, schema?: z.ZodTypeAny): Result<unknown, JsonFileSchemaError> {
 	let input: unknown
+
 	try {
 		input = JSON.parse(fs.readFileSync(path, "utf8"))
 	} catch (cause) {
@@ -33,9 +34,12 @@ export function readJsonFile(path: string, schema?: z.ZodTypeAny): Result<unknow
 			message: cause instanceof Error ? cause.message : String(cause),
 		})
 	}
+
 	if (!schema) return ok(input)
 	const decoded = schema.safeParse(input)
+
 	if (decoded.success) return ok(decoded.data)
+
 	return err({
 		kind: "json-file-schema",
 		path,

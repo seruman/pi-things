@@ -36,16 +36,21 @@ export function parseSessionPathGrant(input: {
 	readonly allowTilde?: boolean
 }): Result<SessionPathGrant, SessionPathError> {
 	const expanded = input.allowTilde ? expandTilde(input.path.trim(), input.home) : input.path.trim()
+
 	if (!path.isAbsolute(expanded)) return invalid(input.path, "expected an absolute directory path")
 	const canonical = parseCanonicalPath(expanded)
+
 	if (!canonical.ok) return invalid(input.path, `path resolution failed (${canonical.error.kind})`)
 	let stat: fs.Stats
+
 	try {
 		stat = fs.statSync(canonical.value)
 	} catch (cause) {
 		return invalid(input.path, cause instanceof Error ? cause.message : String(cause))
 	}
+
 	if (!stat.isDirectory()) return invalid(input.path, "expected an existing directory")
+
 	return ok(Object.freeze({ path: canonical.value, access: input.access }))
 }
 
@@ -55,22 +60,29 @@ export function parseSessionPathsEnvironment(
 ): Result<readonly SessionPathGrant[], SessionPathError> {
 	if (!input) return ok([])
 	let decoded: unknown
+
 	try {
 		decoded = JSON.parse(input)
 	} catch (cause) {
 		return invalid("PI_SAFETY_SESSION_PATHS", cause instanceof Error ? cause.message : String(cause))
 	}
+
 	const parsed = environmentSchema.safeParse(decoded)
+
 	if (!parsed.success)
 		return invalid("PI_SAFETY_SESSION_PATHS", parsed.error.issues.map((issue) => issue.message).join("; "))
 	const grants: SessionPathGrant[] = []
+
 	for (const entry of parsed.data) {
 		const grant = parseSessionPathGrant({ ...entry, home })
+
 		if (!grant.ok) return grant
 		const existing = grants.findIndex((candidate) => candidate.path === grant.value.path)
+
 		if (existing >= 0) grants.splice(existing, 1)
 		grants.push(grant.value)
 	}
+
 	return ok(Object.freeze(grants))
 }
 

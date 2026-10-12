@@ -64,9 +64,12 @@ export class CheckpointRun {
 						this.#state = result.ok
 							? { kind: "ready", snapshot: result.value }
 							: { kind: "failed", error: result.error }
+
 						return result
 					})
+
 				this.#state = { kind: "creating", promise }
+
 				return promise
 			}
 		}

@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent"
-import { getKeybindings } from "@earendil-works/pi-tui"
-import { buildSafetySettings, showPiSafetySettings } from "./safety-settings"
+import { KeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui"
+import { type SafetyFeature, buildSafetySettings, createSafetySettingsComponent } from "./safety-settings"
 
 describe("Pi Safety settings", () => {
 	test("offers disabled-by-default protection and enabled-by-default checkpoints", () => {
@@ -11,43 +10,21 @@ describe("Pi Safety settings", () => {
 		])
 	})
 
-	test("changes settings in place and opens a read-only policy view", async () => {
+	test("changes settings in place and opens a read-only policy view", () => {
 		const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text }
-		;(globalThis as Record<symbol, unknown>)[Symbol.for("@earendil-works/pi-coding-agent:theme")] = theme
 		let closed = false
-		let change: unknown
-		const context = {
-			mode: "tui",
-			ui: {
-				custom: async (factory: Parameters<ExtensionContext["ui"]["custom"]>[0]) => {
-					const component = await factory(
-						{ requestRender() {} } as never,
-						theme as never,
-						getKeybindings() as never,
-						() => {
-							closed = true
-						},
-					)
-					if (!component.handleInput) throw new Error("settings component does not accept input")
-					component.handleInput("\r")
-					expect(closed).toBe(false)
-					component.handleInput("p")
-					expect(component.render(120).join("\n")).toContain('DSL: file shared read-only tree="/"')
-					for (const character of "cache") component.handleInput(character)
-					expect(component.render(120).join("\n")).toContain('DSL: file shared read-write tree="/home/.cache"')
-					component.handleInput("\r")
-					expect(closed).toBe(false)
-					component.handleInput("\x1b")
-					expect(closed).toBe(false)
-					component.handleInput("\x1b")
-					expect(closed).toBe(false)
-					component.handleInput("\x1b")
-				},
-			},
-		} as unknown as ExtensionContext
+		const changes: Array<{ feature: SafetyFeature; enabled: boolean }> = []
+		let renderRequests = 0
 
-		await showPiSafetySettings(
-			context,
+		const component = createSafetySettingsComponent(
+			theme,
+			new KeybindingsManager(TUI_KEYBINDINGS),
+			() => {
+				renderRequests += 1
+			},
+			() => {
+				closed = true
+			},
 			false,
 			true,
 			[
@@ -67,10 +44,26 @@ describe("Pi Safety settings", () => {
 				},
 			],
 			(feature, enabled) => {
-				change = { feature, enabled }
+				changes.push({ feature, enabled })
 			},
 		)
-		expect(change).toEqual({ feature: "protection", enabled: true })
+
+		component.handleInput("\r")
+		expect(closed).toBe(false)
+		component.handleInput("p")
+		expect(component.render(120).join("\n")).toContain('DSL: file shared read-only tree="/"')
+
+		for (const character of "cache") component.handleInput(character)
+		expect(component.render(120).join("\n")).toContain('DSL: file shared read-write tree="/home/.cache"')
+		component.handleInput("\r")
+		expect(closed).toBe(false)
+		component.handleInput("\x1b")
+		expect(closed).toBe(false)
+		component.handleInput("\x1b")
+		expect(closed).toBe(false)
+		component.handleInput("\x1b")
+		expect(renderRequests).toBeGreaterThan(0)
+		expect(changes).toEqual([{ feature: "protection", enabled: true }])
 		expect(closed).toBe(true)
 	})
 })

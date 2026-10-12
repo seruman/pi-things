@@ -25,6 +25,7 @@ type SessionInitialization =
 	| { readonly kind: "failed"; readonly error: SessionInitializationError }
 
 const GUARDED_TOOLS = new Set(["bash", "read", "write", "edit"])
+
 const CHECKPOINT_ENTRY_TYPE = "pi-safety-checkpoint"
 
 interface CheckpointEntryData {
@@ -40,8 +41,10 @@ export default function piSafety(pi: ExtensionAPI): void {
 	const checkpointWarnings = new Map<string, string>()
 	const features = { protection: false, checkpoints: true }
 	let bashWrapperRegistered = false
+
 	const registerBashWrapper = (context: ExtensionContext): void => {
 		if (bashWrapperRegistered) return
+
 		if (!pi.getAllTools().some((tool) => tool.name === "bash")) return
 		bashWrapperRegistered = true
 		const bashTool = createBashToolDefinition(context.cwd)
@@ -49,17 +52,25 @@ export default function piSafety(pi: ExtensionAPI): void {
 			...bashTool,
 			execute: async (id, params, signal, onUpdate, toolContext) => {
 				const cwd = toolContext.cwd
-				const environment = () => ({
-					PI_SAFETY_CHECKPOINT_READY: "1",
-					PI_SAFETY_AGENT_DIR: getAgentDir(),
-					...(initialization.kind === "ready" ? initialization.session.bashEnvironment() : {}),
-				})
+
+				const environment = () => {
+					const base = {
+						PI_SAFETY_CHECKPOINT_READY: "1",
+						PI_SAFETY_AGENT_DIR: getAgentDir(),
+					}
+
+					if (initialization.kind !== "ready") return base
+
+					return { ...base, ...initialization.session.bashEnvironment() }
+				}
+
 				const invocationTool = features.protection
 					? createBashToolDefinition(cwd, {
 							operations: createSandboxedBashOperations(() => {
 								if (initialization.kind !== "ready") {
 									throw new Error("pi-safety: Bash sandbox requested before session initialization")
 								}
+
 								return initialization.session.seatbeltProfile()
 							}, environment),
 						})
@@ -67,6 +78,7 @@ export default function piSafety(pi: ExtensionAPI): void {
 							shellPath: "/bin/bash",
 							spawnHook: (context) => ({ ...context, env: { ...context.env, ...environment() } }),
 						})
+
 				return invocationTool.execute(id, params, signal, onUpdate, toolContext)
 			},
 		})
@@ -78,22 +90,28 @@ export default function piSafety(pi: ExtensionAPI): void {
 		description: "Manage Pi Safety for this session or inspect its policy",
 		getArgumentCompletions: (prefix) => {
 			const query = prefix.trim()
+
 			const actions = [
 				{ value: "add", label: "add", description: "Add a session directory" },
 				{ value: "remove", label: "remove", description: "Remove a session directory" },
 				{ value: "status", label: "status", description: "Show current status" },
 				{ value: "policy", label: "policy", description: "Show ordered rules" },
 			]
+
 			const matches = actions.filter((action) => action.value.startsWith(query))
+
 			return matches.length > 0 ? matches : null
 		},
 		handler: async (args, context) => {
 			if (!context.hasUI) return
 			const [action, pathArgument] = splitCommandArguments(args)
+
 			if (action !== "" && action !== "add" && action !== "remove" && action !== "status" && action !== "policy") {
 				context.ui.notify("Usage: /pi-safety [add [path]|remove [path]|status|policy]", "warning")
+
 				return
 			}
+
 			switch (initialization.kind) {
 				case "not-started":
 					context.ui.notify("pi-safety: session initialization has not started", "warning")
@@ -109,20 +127,25 @@ export default function piSafety(pi: ExtensionAPI): void {
 						await addSessionPath(context, initialization.session, pathArgument)
 						break
 					}
+
 					if (action === "remove") {
 						await removeSessionPath(context, initialization.session, pathArgument)
 						break
 					}
+
 					if (action === "policy") {
 						context.ui.notify(initialization.session.policyDescription(), "info")
 						break
 					}
+
 					const session = initialization.session
+
 					if (action === "status") {
 						const statusLines = piSafetyStatusLines(session, features.protection, features.checkpoints)
 						context.ui.notify(`pi-safety: ${statusLines.join("\n")}`, "info")
 						break
 					}
+
 					await showPiSafetySettings(
 						context,
 						features.protection,
@@ -130,6 +153,7 @@ export default function piSafety(pi: ExtensionAPI): void {
 						session.seatbeltPolicy(),
 						(feature, enabled) => {
 							features[feature] = enabled
+
 							if (feature === "protection") updateSeatbeltFooter(pi, context, enabled)
 						},
 					)
@@ -145,13 +169,18 @@ export default function piSafety(pi: ExtensionAPI): void {
 		checkpointWarnings.clear()
 		features.protection = process.env.PI_SAFETY_PROTECTION === "1"
 		features.checkpoints = true
+
 		if (context.mode === "tui") updateSeatbeltFooter(pi, context, features.protection)
 		const projectConfiguration = loadProjectSafetyConfiguration(context.cwd)
+
 		if (!projectConfiguration.ok) {
 			initialization = { kind: "failed", error: { kind: "configuration", cause: projectConfiguration.error } }
+
 			return
 		}
+
 		const home = process.env.HOME ?? os.homedir()
+
 		const created = createSafetySession({
 			cwd: context.cwd,
 			home,
@@ -170,6 +199,7 @@ export default function piSafety(pi: ExtensionAPI): void {
 				nixRemote: process.env.NIX_REMOTE,
 			},
 		})
+
 		initialization = created.ok
 			? { kind: "ready", session: created.value }
 			: { kind: "failed", error: { kind: "session-creation", cause: created.error } }
@@ -178,13 +208,18 @@ export default function piSafety(pi: ExtensionAPI): void {
 	pi.on("before_agent_start", async (_event, context) => {
 		checkpointWarningReported = false
 		checkpointWarnings.clear()
+
 		if (initialization.kind !== "ready" || !features.checkpoints) return
 		const sessionId = parseSnapshotSessionId(context.sessionManager.getSessionId())
+
 		if (!sessionId.ok) {
 			initialization = { kind: "failed", error: { kind: "session-id" } }
+
 			return
 		}
+
 		const started = initialization.session.beginAgentRun({ kind: "pi-session", sessionId: sessionId.value })
+
 		if (!started.ok) {
 			initialization = { kind: "failed", error: { kind: "run-start", cause: started.error } }
 		}
@@ -192,37 +227,49 @@ export default function piSafety(pi: ExtensionAPI): void {
 
 	pi.on("session_shutdown", async (_event, context) => {
 		if (context.mode === "tui") context.ui.setFooter(undefined)
+
 		if (initialization.kind !== "ready") return
 		const cleaned = initialization.session.cleanup()
+
 		if (!cleaned.ok) throw new Error(`pi-safety: integration cleanup failed (${cleaned.error.kind})`)
 	})
 
 	pi.on("tool_call", async (event, context) => {
 		if (!GUARDED_TOOLS.has(event.toolName)) return
+
 		if (initialization.kind === "not-started") {
 			return { block: true, reason: "pi-safety: session initialization has not completed" }
 		}
+
 		if (initialization.kind === "failed") {
 			return {
 				block: true,
 				reason: `pi-safety: session initialization failed: ${formatInitializationError(initialization.error)}`,
 			}
 		}
+
 		if (features.protection) {
 			const guard = initialization.session.guard(event.toolName, event.input)
+
 			if (guard.kind === "block") return { block: true, reason: guard.reason }
 		}
+
 		if (features.checkpoints) {
 			const checkpointDecision = await initialization.session.checkpoint(event.toolName)
+
 			if (checkpointDecision.kind === "warning" && !checkpointWarningReported) {
 				checkpointWarningReported = true
 				checkpointWarnings.set(event.toolCallId, checkpointDecision.reason)
+
 				if (context.hasUI) context.ui.notify(checkpointDecision.reason, "warning")
 			}
 		}
+
 		const checkpoint = initialization.session.checkpointStatus()
+
 		if (checkpoint.kind === "ready" && checkpoint.snapshot.id !== recordedCheckpointId) {
 			recordedCheckpointId = checkpoint.snapshot.id
+
 			try {
 				pi.appendEntry<CheckpointEntryData>(CHECKPOINT_ENTRY_TYPE, {
 					version: 1,
@@ -238,13 +285,16 @@ export default function piSafety(pi: ExtensionAPI): void {
 				}
 			}
 		}
+
 		return undefined
 	})
 
 	pi.on("tool_result", (event) => {
 		const warning = checkpointWarnings.get(event.toolCallId)
+
 		if (!warning) return
 		checkpointWarnings.delete(event.toolCallId)
+
 		return {
 			content: [...event.content, { type: "text", text: `Warning: ${warning}` }],
 			structuredContent: event.structuredContent,
@@ -283,42 +333,55 @@ function piSafetyStatusLines(session: SafetySession, protection: boolean, checkp
 function splitCommandArguments(input: string): readonly [string, string] {
 	const trimmed = input.trim()
 	const separator = trimmed.search(/\s/)
+
 	return separator < 0 ? [trimmed, ""] : [trimmed.slice(0, separator), trimmed.slice(separator).trim()]
 }
 
 async function addSessionPath(context: ExtensionContext, session: SafetySession, argument: string): Promise<void> {
 	const pathname = argument || (await context.ui.input("Add Pi Safety session directory", "Absolute path or ~/path"))
+
 	if (!pathname) return
 	const choice = await context.ui.select("Directory access", ["Read-only", "Read-write — not checkpointed", "Cancel"])
+
 	if (!choice || choice === "Cancel") return
 	const access = choice === "Read-only" ? "read-only" : "read-write"
+
 	const confirmed = await context.ui.confirm(
 		`Add ${access} session directory?`,
 		`${pathname}\n\n${access === "read-write" ? "Writes are not included in Pi Safety checkpoints. " : ""}Protected paths remain inaccessible.`,
 	)
+
 	if (!confirmed) return
 	const added = session.addSessionPath(pathname, access)
+
 	if (!added.ok) {
 		context.ui.notify(`pi-safety: could not add session directory: ${JSON.stringify(added.error)}`, "error")
+
 		return
 	}
+
 	context.ui.notify(`pi-safety: added ${access} session directory ${added.value.path}`, "info")
 }
 
 async function removeSessionPath(context: ExtensionContext, session: SafetySession, argument: string): Promise<void> {
 	const grants = session.sessionPaths()
+
 	const pathname =
 		argument ||
 		(await context.ui.select(
 			"Remove Pi Safety session directory",
 			grants.map((grant) => grant.path),
 		))
+
 	if (!pathname) return
 	const removed = session.removeSessionPath(pathname)
+
 	if (!removed.ok) {
 		context.ui.notify(`pi-safety: could not remove session directory: ${JSON.stringify(removed.error)}`, "error")
+
 		return
 	}
+
 	context.ui.notify(
 		removed.value
 			? `pi-safety: removed session directory ${pathname}`
@@ -329,12 +392,16 @@ async function removeSessionPath(context: ExtensionContext, session: SafetySessi
 
 function updateSeatbeltFooter(pi: ExtensionAPI, context: ExtensionContext, enabled: boolean): void {
 	if (context.mode !== "tui") return
+
 	if (!enabled) {
 		context.ui.setFooter(undefined)
+
 		return
 	}
+
 	context.ui.setFooter((tui, theme, footerData) => {
 		const unsubscribe = footerData.onBranchChange(() => tui.requestRender())
+
 		return {
 			dispose: unsubscribe,
 			invalidate: () => {},
@@ -342,6 +409,7 @@ function updateSeatbeltFooter(pi: ExtensionAPI, context: ExtensionContext, enabl
 				if (width <= 0) return ["", ""]
 				const totals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }
 				let cacheHit: number | undefined
+
 				for (const entry of context.sessionManager.getEntries()) {
 					const usage =
 						entry.type === "usage" || entry.type === "compaction" || entry.type === "branch_summary"
@@ -349,60 +417,84 @@ function updateSeatbeltFooter(pi: ExtensionAPI, context: ExtensionContext, enabl
 							: entry.type === "message" && (entry.message.role === "assistant" || entry.message.role === "toolResult")
 								? entry.message.usage
 								: undefined
+
 					if (!usage) continue
 					totals.input += usage.input
 					totals.output += usage.output
 					totals.cacheRead += usage.cacheRead
 					totals.cacheWrite += usage.cacheWrite
 					totals.cost += usage.cost.total
+
 					if (entry.type === "message" && entry.message.role === "assistant") {
 						const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite
 						cacheHit = promptTokens > 0 ? (100 * usage.cacheRead) / promptTokens : undefined
 					}
 				}
+
 				const home = process.env.HOME ?? os.homedir()
 				const relative = path.relative(home, context.cwd)
+
 				const insideHome =
 					relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
+
 				let cwd = insideHome ? (relative ? `~${path.sep}${relative}` : "~") : context.cwd
 				const branch = footerData.getGitBranch()
+
 				if (branch) cwd += ` (${branch})`
 				const sessionName = context.sessionManager.getSessionName()
+
 				if (sessionName) cwd += ` • ${sessionName}`
 				const stats: string[] = []
+
 				if (totals.input) stats.push(`↑${formatFooterTokens(totals.input)}`)
+
 				if (totals.output) stats.push(`↓${formatFooterTokens(totals.output)}`)
+
 				if (totals.cacheRead) stats.push(`R${formatFooterTokens(totals.cacheRead)}`)
+
 				if (totals.cacheWrite) stats.push(`W${formatFooterTokens(totals.cacheWrite)}`)
+
 				if ((totals.cacheRead || totals.cacheWrite) && cacheHit !== undefined) stats.push(`CH${cacheHit.toFixed(1)}%`)
+
 				const subscription =
 					context.model &&
 					context.modelRegistry.isUsingOAuth(context.model) &&
 					context.modelRegistry.getProvider(context.model.provider)?.auth.oauth?.isSubscription === true
+
 				if (totals.cost || subscription) stats.push(`$${totals.cost.toFixed(3)}${subscription ? " (sub)" : ""}`)
 				const usage = context.getContextUsage()
 				const percent = usage?.percent
 				const contextText = `${percent == null ? "?" : `${percent.toFixed(1)}%`}/${formatFooterTokens(usage?.contextWindow ?? context.model?.contextWindow ?? 0)}`
+
 				const contextColor =
 					percent != null && percent > 90 ? "error" : percent != null && percent > 70 ? "warning" : "dim"
+
 				const left =
 					theme.fg("accent", "Seatbelt enabled") +
 					theme.fg("dim", ` · ${stats.join(" ")}${stats.length ? " " : ""}`) +
 					theme.fg(contextColor, contextText)
+
 				let right = context.model?.id ?? "no-model"
+
 				if (context.model?.reasoning) right += ` • ${context.thinkingLevel ?? pi.getThinkingLevel()}`
+
 				if (context.model && footerData.getAvailableProviderCount() > 1) {
 					const withProvider = `(${context.model.provider}) ${right}`
+
 					if (visibleWidth(left) + 2 + visibleWidth(withProvider) <= width) right = withProvider
 				}
+
 				const available = width - visibleWidth(left) - 2
 				const modelText = available > 0 ? truncateToWidth(theme.fg("dim", right), available, "") : ""
 				const padding = modelText ? " ".repeat(Math.max(2, width - visibleWidth(left) - visibleWidth(modelText))) : ""
+
 				const lines = [
 					truncateToWidth(theme.fg("dim", cwd), width, ""),
 					truncateToWidth(left + padding + modelText, width, ""),
 				]
+
 				const statuses = [...footerData.getExtensionStatuses()].sort(([a], [b]) => a.localeCompare(b))
+
 				if (statuses.length)
 					lines.push(
 						truncateToWidth(
@@ -418,6 +510,7 @@ function updateSeatbeltFooter(pi: ExtensionAPI, context: ExtensionContext, enabl
 							"",
 						),
 					)
+
 				return lines
 			},
 		}
@@ -426,9 +519,13 @@ function updateSeatbeltFooter(pi: ExtensionAPI, context: ExtensionContext, enabl
 
 function formatFooterTokens(count: number): string {
 	if (count < 1000) return String(count)
+
 	if (count < 10000) return `${(count / 1000).toFixed(1)}k`
+
 	if (count < 1000000) return `${Math.round(count / 1000)}k`
+
 	if (count < 10000000) return `${(count / 1000000).toFixed(1)}M`
+
 	return `${Math.round(count / 1000000)}M`
 }
 

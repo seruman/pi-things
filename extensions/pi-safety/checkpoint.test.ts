@@ -8,13 +8,15 @@ import { type PublishedSnapshotRef, createSnapshot, createSnapshotStore } from "
 import { canonicalPath, testPolicy } from "./test-domain-values"
 import { withTestTempDirectoryAsync } from "./test-temp-directory"
 
-function deferred(): { readonly promise: Promise<void>; readonly release: () => void } {
+function deferred() {
 	let release: () => void = () => {
 		throw new Error("deferred promise released before initialization")
 	}
+
 	const promise = new Promise<void>((resolve) => {
 		release = resolve
 	})
+
 	return { promise, release }
 }
 
@@ -24,6 +26,7 @@ async function publishedSnapshot(root: string): Promise<PublishedSnapshotRef> {
 	fs.mkdirSync(workspace)
 	fs.mkdirSync(state)
 	fs.writeFileSync(path.join(workspace, "file.txt"), "before")
+
 	const store = unwrap(
 		createSnapshotStore({
 			workspaceRoot: canonicalPath(workspace),
@@ -31,6 +34,7 @@ async function publishedSnapshot(root: string): Promise<PublishedSnapshotRef> {
 			policy: testPolicy(workspace, state),
 		}),
 	)
+
 	return unwrap(createSnapshot(store))
 }
 
@@ -39,9 +43,11 @@ test("concurrent first mutations share one checkpoint and later calls reuse it",
 		const published = await publishedSnapshot(root)
 		const gate = deferred()
 		let creations = 0
+
 		const run = new CheckpointRun(async () => {
 			creations += 1
 			await gate.promise
+
 			return ok(published)
 		})
 
@@ -66,8 +72,10 @@ test("checkpoint failure is terminal for the run", async () => {
 	await withTestTempDirectoryAsync("checkpoint-failure-", async (root) => {
 		const failure = { kind: "project-locked", path: path.join(root, ".lock") } as const
 		let creations = 0
+
 		const run = new CheckpointRun(async () => {
 			creations += 1
+
 			return err(failure)
 		})
 
@@ -83,6 +91,7 @@ test("unexpected creator rejection becomes a typed terminal failure", async () =
 	const run = new CheckpointRun(async () => {
 		throw new Error("creator exploded")
 	})
+
 	const result = await run.ensureCheckpoint()
 	assert.deepEqual(result, { ok: false, error: { kind: "creator-rejected", message: "creator exploded" } })
 	assert.deepEqual(run.status(), {

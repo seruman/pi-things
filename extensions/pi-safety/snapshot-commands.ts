@@ -43,12 +43,15 @@ export function runSnapshotCommand(
 	authority: SnapshotCommandAuthority,
 ): Result<string, SnapshotCommandRunError> {
 	const historyAccess = historyAccessFor(authority)
+
 	switch (command.kind) {
 		case "help":
 			return ok(SNAPSHOT_USAGE)
 		case "list": {
 			const listed = listSnapshots(store, historyAccess)
+
 			if (!listed.ok) return err({ kind: "history", cause: listed.error })
+
 			return ok(
 				formatTable([
 					["ID", "CREATED_AT", "ENTRIES", "RECLAIMABLE_BYTES", "SESSION", "WORKSPACE"],
@@ -63,26 +66,38 @@ export function runSnapshotCommand(
 				]),
 			)
 		}
+
 		case "create": {
 			const created = createSnapshot(store)
+
 			return created.ok ? ok(created.value.id) : err({ kind: "snapshot", cause: created.error })
 		}
+
 		case "verify": {
 			const loaded = loadSnapshot(store, command.id, historyAccess)
+
 			if (!loaded.ok) return err({ kind: "history", cause: loaded.error })
 			const verified = verifySnapshot(loaded.value)
+
 			return verified.ok ? ok(`${command.id}\tverified`) : err({ kind: "history", cause: verified.error })
 		}
+
 		case "show": {
 			const loaded = loadSnapshot(store, command.id, historyAccess)
+
 			if (!loaded.ok) return err({ kind: "history", cause: loaded.error })
 			const entry = loaded.value.manifest.entries.find((candidate) => candidate.path === command.path)
+
 			if (!entry) return err({ kind: "path-not-found", path: command.path })
+
 			if (entry.kind !== "file") return ok(JSON.stringify(entry, null, 2))
 			const storedPath = storedSnapshotPath(loaded.value.directory, entry)
+
 			try {
 				const content = fs.readFileSync(storedPath)
+
 				if (content.includes(0)) return err({ kind: "binary-content", path: command.path })
+
 				try {
 					return ok(new TextDecoder("utf-8", { fatal: true }).decode(content))
 				} catch {
@@ -92,35 +107,47 @@ export function runSnapshotCommand(
 				return ioError("show", storedPath, cause)
 			}
 		}
+
 		case "diff":
 			return diffSnapshot(store, command.id, command.comparison, command.scope, historyAccess)
 		case "restore": {
 			const loaded = loadSnapshot(store, command.id, historyAccess)
+
 			if (!loaded.ok) return err({ kind: "history", cause: loaded.error })
 			const planned = planRestore(store, loaded.value, command.scope)
+
 			if (!planned.ok) return err({ kind: "restore", message: JSON.stringify(planned.error) })
+
 			if (command.execution === "dry-run") return ok(describeRestorePlan(planned.value))
 			let redoId: string | undefined
+
 			switch (authority.kind) {
 				case "sandboxed":
 					break
 				case "direct-user": {
 					const redo = createSnapshot(store, { preserve: command.id })
+
 					if (!redo.ok) return err({ kind: "snapshot", cause: redo.error })
 					redoId = redo.value.id
 					break
 				}
+
 				default:
 					assertNever(authority)
 			}
+
 			const restored = executeRestore(planned.value)
+
 			if (!restored.ok) return err({ kind: "restore", message: JSON.stringify(restored.error) })
+
 			return ok(redoId === undefined ? `${command.id}\trestored` : `${command.id}\trestored\n${redoId}\tredo`)
 		}
+
 		case "export":
 			return exportSnapshot(store, command.id, command.destination, historyAccess)
 		case "gc": {
 			const collected = garbageCollectSnapshots(store)
+
 			return collected.ok ? ok("gc complete") : err({ kind: "snapshot", cause: collected.error })
 		}
 	}
@@ -138,6 +165,7 @@ function formatSnapshotSession(origin: SnapshotSummary["origin"]): string {
 
 function formatTable(rows: readonly (readonly string[])[]): string {
 	const widths = rows[0].map((_, column) => Math.max(...rows.map((row) => row[column].length)))
+
 	return rows
 		.map((row) =>
 			row.map((cell, column) => (column === row.length - 1 ? cell : cell.padEnd(widths[column]))).join("  "),
@@ -168,12 +196,15 @@ function diffSnapshot(
 	historyAccess: SnapshotHistoryAccess,
 ): Result<string, SnapshotCommandRunError> {
 	const loaded = loadSnapshot(store, id, historyAccess)
+
 	if (!loaded.ok) return err({ kind: "history", cause: loaded.error })
 	let comparedSnapshot: LoadedSnapshot | undefined
 	let afterEntries: readonly SnapshotPlanEntry[]
 	let nonComparable: ReadonlyMap<RelativeSnapshotPath, { readonly entryType: string }>
+
 	if (comparison.kind === "snapshot") {
 		const compared = loadSnapshot(store, comparison.id, historyAccess)
+
 		if (!compared.ok) return err({ kind: "history", cause: compared.error })
 		comparedSnapshot = compared.value
 		afterEntries = compared.value.manifest.entries
@@ -187,13 +218,16 @@ function diffSnapshot(
 						policy: store.policy,
 						paths: scope.paths,
 					})
+
 		if (!live.ok) return err({ kind: "snapshot", cause: live.error })
 		afterEntries = live.value.entries
 		nonComparable = new Map(live.value.nonComparable.map((entry) => [entry.path, entry]))
 	}
+
 	const snapshotEntries = new Map(loaded.value.manifest.entries.map((entry) => [entry.path, entry]))
 	const comparedEntries = new Map(afterEntries.map((entry) => [entry.path, entry]))
 	const candidatePaths = [...new Set([...snapshotEntries.keys(), ...comparedEntries.keys(), ...nonComparable.keys()])]
+
 	const paths = candidatePaths
 		.filter(
 			(relativePath) =>
@@ -201,34 +235,44 @@ function diffSnapshot(
 				scope.paths.some((selected) => relativePath === selected || relativePath.startsWith(`${selected}${path.sep}`)),
 		)
 		.sort()
+
 	const changes: string[] = []
 	const mutuallyExcluded: RelativeSnapshotPath[] = []
+
 	for (const relativePath of paths) {
 		const unsupported = nonComparable.get(relativePath)
+
 		if (unsupported !== undefined) {
 			changes.push(`non-comparable\t${relativePath}\t${unsupported.entryType}`)
 			continue
 		}
+
 		const before = snapshotEntries.get(relativePath)
 		const after = comparedEntries.get(relativePath)
+
 		if (before?.kind === "excluded" && after?.kind === "excluded") {
 			mutuallyExcluded.push(relativePath)
 			continue
 		}
+
 		if (before?.kind === "excluded" || after?.kind === "excluded") {
 			const excludedSide =
 				before?.kind === "excluded" ? loaded.value.manifest.id : (comparedSnapshot?.manifest.id ?? "live")
+
 			changes.push(`not-compared\t${relativePath}\texcluded in ${excludedSide}`)
 			continue
 		}
+
 		if (!before) changes.push(`added\t${relativePath}`)
 		else if (!after) changes.push(`deleted\t${relativePath}`)
 		else if (entryChanged(before, after)) changes.push(`modified\t${relativePath}`)
 		else if (before.kind === "file" && after.kind === "file") {
 			const beforePath = storedSnapshotPath(loaded.value.directory, before)
+
 			const afterPath = comparedSnapshot
 				? storedSnapshotPath(comparedSnapshot.directory, after)
 				: path.join(store.workspaceRoot, after.path)
+
 			try {
 				if (!fs.readFileSync(beforePath).equals(fs.readFileSync(afterPath))) {
 					changes.push(`modified\t${relativePath}`)
@@ -238,6 +282,7 @@ function diffSnapshot(
 			}
 		}
 	}
+
 	if (scope.kind === "selected") {
 		for (const selected of scope.paths) {
 			const patch = createSelectedTextPatch(
@@ -248,14 +293,19 @@ function diffSnapshot(
 				snapshotEntries.get(selected),
 				comparedEntries.get(selected),
 			)
+
 			if (!patch.ok) return patch
+
 			if (patch.value !== undefined) changes.push(patch.value)
 		}
 	}
+
 	if (changes.length === 0) changes.push("no differences in included paths")
+
 	if (mutuallyExcluded.length > 0) {
 		changes.push("", "not compared (excluded in both):", ...mutuallyExcluded.map((relativePath) => `  ${relativePath}`))
 	}
+
 	return ok(changes.join("\n"))
 }
 
@@ -270,8 +320,10 @@ function createSelectedTextPatch(
 	if (before?.kind !== "file" && after?.kind !== "file") return ok(undefined)
 	let beforeBytes = Buffer.alloc(0)
 	let afterBytes = Buffer.alloc(0)
+
 	try {
 		if (before?.kind === "file") beforeBytes = fs.readFileSync(storedSnapshotPath(snapshot.directory, before))
+
 		if (after?.kind === "file") {
 			afterBytes = fs.readFileSync(
 				comparedSnapshot
@@ -282,12 +334,15 @@ function createSelectedTextPatch(
 	} catch (cause) {
 		return ioError("diff-text", relativePath, cause)
 	}
+
 	if (beforeBytes.equals(afterBytes)) return ok(undefined)
 	const beforeText = decodeDiffText(beforeBytes)
 	const afterText = decodeDiffText(afterBytes)
+
 	if (beforeText === undefined || afterText === undefined) return ok(`binary-or-large\t${relativePath}`)
 	const beforeLabel = comparedSnapshot ? snapshot.manifest.id : "snapshot"
 	const afterLabel = comparedSnapshot?.manifest.id ?? "live"
+
 	return ok(
 		createTwoFilesPatch(
 			`${beforeLabel}/${relativePath}`,
@@ -302,6 +357,7 @@ function createSelectedTextPatch(
 
 function decodeDiffText(content: Buffer): string | undefined {
 	if (content.byteLength > 1024 * 1024 || content.includes(0)) return undefined
+
 	try {
 		return new TextDecoder("utf-8", { fatal: true }).decode(content)
 	} catch {
@@ -311,11 +367,15 @@ function decodeDiffText(content: Buffer): string | undefined {
 
 function entryChanged(before: SnapshotPlanEntry, after: SnapshotPlanEntry): boolean {
 	if (before.kind !== after.kind) return true
+
 	if (before.kind === "file" && after.kind === "file") {
 		return before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.mode !== after.mode
 	}
+
 	if (before.kind === "directory" && after.kind === "directory") return before.mode !== after.mode
+
 	if (before.kind === "symlink" && after.kind === "symlink") return before.target !== after.target
+
 	return false
 }
 
@@ -336,18 +396,24 @@ function exportSnapshot(
 			message: "destination must not exist or be inside managed roots",
 		})
 	}
+
 	const loaded = loadSnapshot(store, id, historyAccess)
+
 	if (!loaded.ok) return err({ kind: "history", cause: loaded.error })
 	const verified = verifySnapshot(loaded.value)
+
 	if (!verified.ok) return err({ kind: "history", cause: verified.error })
 	let created = false
+
 	try {
 		fs.mkdirSync(destination, { mode: 0o700 })
 		created = true
 		const directories: Array<Extract<SnapshotPlanEntry, { kind: "directory" }>> = []
+
 		for (const entry of loaded.value.manifest.entries) {
 			if (entry.kind === "excluded") continue
 			const target = path.join(destination, entry.path)
+
 			if (entry.kind === "directory") {
 				fs.mkdirSync(target, { recursive: true, mode: entry.mode })
 				directories.push(entry)
@@ -361,14 +427,17 @@ function exportSnapshot(
 				fs.utimesSync(target, entry.mtimeMs / 1000, entry.mtimeMs / 1000)
 			}
 		}
+
 		for (const directory of directories.reverse()) {
 			const target = path.join(destination, directory.path)
 			fs.chmodSync(target, directory.mode)
 			fs.utimesSync(target, directory.mtimeMs / 1000, directory.mtimeMs / 1000)
 		}
+
 		return ok(destination)
 	} catch (cause) {
 		if (created) fs.rmSync(destination, { recursive: true, force: true })
+
 		return ioError("export", destination, cause)
 	}
 }

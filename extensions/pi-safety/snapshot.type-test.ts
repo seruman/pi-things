@@ -10,7 +10,9 @@ import type {
 } from "./snapshot"
 
 declare const canonicalPath: CanonicalPath
+
 declare const snapshotId: SnapshotId
+
 declare const policy: Policy
 
 // @ts-expect-error Snapshot plans can only be produced by planSnapshot.
@@ -38,7 +40,11 @@ const forgedRelativePath: RelativeSnapshotPath = "../escape"
 const invalidStorage: SnapshotFileStorage = { kind: "ordinary", protected: true }
 
 void forgedPlan
+
 void forgedPublished
+
 void forgedStore
+
 void forgedRelativePath
+
 void invalidStorage

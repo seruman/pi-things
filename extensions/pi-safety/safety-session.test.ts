@@ -13,9 +13,11 @@ function fixture(root: string, gopath?: string) {
 	const stateHome = path.join(root, "state")
 	const piConfigDir = path.join(root, "pi-config")
 	const privateTemp = path.join(root, "tmp")
+
 	for (const directory of [workspace, home, stateHome, piConfigDir, privateTemp])
 		fs.mkdirSync(directory, { recursive: true })
 	fs.writeFileSync(path.join(workspace, "existing.txt"), "before")
+
 	return unwrap(
 		createSafetySession({
 			cwd: workspace,
@@ -116,6 +118,7 @@ test("records the Pi session that owns an automatic checkpoint", async () => {
 		assert.equal((await session.checkpoint("write")).kind, "allow")
 		const status = session.checkpointStatus()
 		assert.equal(status.kind, "ready")
+
 		if (status.kind !== "ready") return
 		const manifest = JSON.parse(fs.readFileSync(path.join(status.snapshot.directory, "manifest.json"), "utf8"))
 		assert.deepEqual(manifest.origin, { kind: "pi-session", sessionId })

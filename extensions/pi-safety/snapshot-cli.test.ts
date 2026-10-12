@@ -5,11 +5,13 @@ import { parseSnapshotCommand, parseSnapshotInvocation } from "./snapshot-cli"
 import { withTestTempDirectory } from "./test-temp-directory"
 
 const id = "20260713213049840-206bc3b657fa7807"
+
 const secondId = "20260713213100840-316bc3b657fa7808"
 
 test("parses legal snapshot CLI command shapes", () => {
 	withTestTempDirectory("snapshot-cli-", (root) => {
 		const destination = path.join(root, "export")
+
 		const cases = [
 			[["--help"], "help"],
 			[[], "list"],
@@ -30,9 +32,11 @@ test("parses legal snapshot CLI command shapes", () => {
 			[["verify", id], "verify"],
 			[["gc"], "gc"],
 		] as const
+
 		for (const [args, kind] of cases) {
 			const parsed = parseSnapshotCommand(args)
 			assert.equal(parsed.ok, true, args.join(" "))
+
 			if (parsed.ok) assert.equal(parsed.value.kind, kind)
 		}
 	})
@@ -42,19 +46,23 @@ test("parses an explicit project once and defaults restores to dry-run", () => {
 	withTestTempDirectory("snapshot-cli-project-", (root) => {
 		const parsed = parseSnapshotInvocation(["--project", root, "restore", id])
 		assert.equal(parsed.ok, true)
+
 		if (!parsed.ok) return
 		assert.deepEqual(parsed.value.project, { kind: "explicit", root })
 		assert.equal(parsed.value.command.kind, "restore")
+
 		if (parsed.value.command.kind === "restore") assert.equal(parsed.value.command.execution, "dry-run")
 
 		const apply = parseSnapshotInvocation(["--project", root, "restore", id, "--apply", "--", "file.txt"])
 		assert.equal(apply.ok, true)
+
 		if (apply.ok && apply.value.command.kind === "restore") {
 			assert.equal(apply.value.command.execution, "apply")
 		}
 
 		const compared = parseSnapshotInvocation(["--project", root, "diff", id, secondId, "--", "file.txt"])
 		assert.equal(compared.ok, true)
+
 		if (compared.ok && compared.value.command.kind === "diff") {
 			assert.deepEqual(compared.value.command.comparison, { kind: "snapshot", id: secondId })
 		}
@@ -83,6 +91,7 @@ test("rejects malformed IDs, paths, separators, and argument counts", () => {
 	]) {
 		assert.equal(parseSnapshotCommand(args).ok, false, args.join(" "))
 	}
+
 	assert.equal(parseSnapshotInvocation(["--project"]).ok, false)
 	assert.equal(parseSnapshotInvocation(["--project", "/definitely/not/a/project", "list"]).ok, false)
 })

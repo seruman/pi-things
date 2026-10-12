@@ -5,6 +5,9 @@ import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
 import { fileURLToPath } from "node:url"
+import { z } from "zod"
+import { type ScriptedResponse, jsonValueSchema } from "./headless-scripted-provider"
+import { snapshotIdSchema } from "./snapshot"
 import { withPrivateTmpDirectory, withTestTempDirectory } from "./test-temp-directory"
 
 interface HeadlessFixture {
@@ -29,30 +32,40 @@ function createFixture(root: string): HeadlessFixture {
 		temp: path.join(root, "tmp"),
 		piConfig: path.join(root, "pi-config"),
 	}
+
 	for (const directory of Object.values(fixture)) fs.mkdirSync(directory, { recursive: true })
+
 	return fixture
 }
 
 function resolveInstalledPi(): string {
 	const configured = process.env.PI_SAFETY_PI_BIN
+
 	if (configured) {
 		if (!path.isAbsolute(configured)) throw new Error("PI_SAFETY_PI_BIN must be absolute")
 		fs.accessSync(configured, fs.constants.X_OK)
+
 		return configured
 	}
+
 	for (const directory of (process.env.PATH ?? "").split(path.delimiter)) {
 		if (!directory || directory.includes(path.join("node_modules", ".bin"))) continue
 		const candidate = path.join(directory, "pi")
+
 		if (!fs.existsSync(candidate)) continue
 		const stat = fs.statSync(candidate)
+
 		if (stat.isFile() && (stat.mode & 0o111) !== 0) return candidate
 	}
+
 	throw new Error("an installed pi executable is not available on PATH")
 }
 
 function wbDaemonPids(): ReadonlySet<number> {
 	const found = spawnSync("/usr/bin/pgrep", ["-f", "wb __daemon"], { encoding: "utf8" })
+
 	if (found.status !== 0 && found.status !== 1) throw new Error(`pgrep failed: ${found.stderr}`)
+
 	return new Set(
 		found.stdout
 			.split("\n")
@@ -67,15 +80,61 @@ function stopNewWbDaemons(previous: ReadonlySet<number>): void {
 	}
 }
 
+const headlessEventSchema = z
+	.object({
+		type: z.string(),
+		toolName: z.string().optional(),
+		isError: z.boolean().optional(),
+		result: jsonValueSchema.optional(),
+	})
+	.passthrough()
+
+const sessionEntrySchema = z.object({
+	type: z.string(),
+	id: z.string().optional(),
+	customType: z.string().optional(),
+	data: jsonValueSchema.optional(),
+})
+
+const checkpointMarkerSchema = z.object({
+	version: z.literal(1),
+	snapshotId: snapshotIdSchema,
+	createdAt: z.string(),
+})
+
+const truncatedBashResultSchema = z.object({
+	details: z.object({
+		truncation: z.object({ truncated: z.literal(true) }),
+		fullOutputPath: z.string(),
+	}),
+})
+
 function runHeadlessPi(
 	fixture: HeadlessFixture,
-	responses: readonly unknown[],
+	responses: readonly ScriptedResponse[],
 	options: { readonly persistSession?: boolean; readonly protection?: boolean } = {},
 ) {
 	const piExecutable = resolveInstalledPi()
 	const extensionDirectory = path.dirname(fileURLToPath(import.meta.url))
 	const script = path.join(fixture.root, "script.json")
 	fs.writeFileSync(script, JSON.stringify(responses), { mode: 0o600 })
+
+	const environment: NodeJS.ProcessEnv = {
+		PATH: process.env.PATH,
+		LANG: "en_US.UTF-8",
+		HOME: fixture.home,
+		CFFIXED_USER_HOME: fixture.home,
+		TMPDIR: fixture.temp,
+		XDG_STATE_HOME: fixture.stateHome,
+		XDG_CONFIG_HOME: fixture.configHome,
+		XDG_CACHE_HOME: fixture.cacheHome,
+		PI_CODING_AGENT_DIR: fixture.piConfig,
+		PI_SAFETY_TEST_SCRIPT: script,
+		PI_OFFLINE: "1",
+	}
+
+	if (options.protection !== false) environment.PI_SAFETY_PROTECTION = "1"
+
 	const result = spawnSync(
 		piExecutable,
 		[
@@ -104,32 +163,21 @@ function runHeadlessPi(
 		],
 		{
 			cwd: fixture.workspace,
-			env: {
-				PATH: process.env.PATH,
-				LANG: "en_US.UTF-8",
-				HOME: fixture.home,
-				CFFIXED_USER_HOME: fixture.home,
-				TMPDIR: fixture.temp,
-				XDG_STATE_HOME: fixture.stateHome,
-				XDG_CONFIG_HOME: fixture.configHome,
-				XDG_CACHE_HOME: fixture.cacheHome,
-				PI_CODING_AGENT_DIR: fixture.piConfig,
-				...(options.protection === false ? {} : { PI_SAFETY_PROTECTION: "1" }),
-				PI_SAFETY_TEST_SCRIPT: script,
-				PI_OFFLINE: "1",
-			},
+			env: environment,
 			encoding: "utf8",
 			timeout: 30_000,
 			maxBuffer: 4 * 1024 * 1024,
 		},
 	)
+
 	assert.equal(result.error, undefined)
 	assert.equal(result.signal, null)
 	assert.equal(result.status, 0, `stderr:\n${result.stderr}\nstdout:\n${result.stdout}`)
+
 	return result.stdout
 		.split("\n")
 		.filter((line) => line.length > 0)
-		.map((line) => JSON.parse(line) as Record<string, unknown>)
+		.map((line) => headlessEventSchema.parse(JSON.parse(line)))
 }
 
 test("headless Pi defaults protection off while retaining checkpoints", () => {
@@ -154,19 +202,23 @@ test("headless Pi initializes and checkpoints linked worktrees", () => {
 		const fixture = createFixture(root)
 		const main = path.join(root, "main")
 		fs.mkdirSync(main)
+
 		const git = (...args: string[]) => {
 			const result = spawnSync("/usr/bin/git", ["-C", main, ...args], { encoding: "utf8" })
 			assert.equal(result.status, 0, result.stderr)
 		}
+
 		git("init", "-q")
 		git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-qm", "init")
 		git("worktree", "add", "--detach", fixture.workspace)
+
 		try {
 			const events = runHeadlessPi(fixture, [
 				{ kind: "tool", id: "write", name: "write", arguments: { path: "file.txt", content: "created" } },
 				{ kind: "tool", id: "bash", name: "bash", arguments: { command: "printf bash > bash.txt" } },
 				{ kind: "text", text: "done" },
 			])
+
 			const toolEnds = events.filter((event) => event.type === "tool_execution_end")
 			assert.equal(toolEnds.length, 2)
 			assert.ok(
@@ -188,6 +240,7 @@ test("headless Pi reports a failed checkpoint once and continues without weakeni
 			const fixture = createFixture(root)
 			assert.equal(spawnSync("/usr/bin/mkfifo", [path.join(fixture.workspace, "pipe")]).status, 0)
 			const outside = path.join(fixture.home, "outside.txt")
+
 			const events = runHeadlessPi(
 				fixture,
 				[
@@ -198,6 +251,7 @@ test("headless Pi reports a failed checkpoint once and continues without weakeni
 				],
 				{ protection },
 			)
+
 			assert.equal(fs.readFileSync(path.join(fixture.workspace, "first.txt"), "utf8"), "first")
 			assert.equal(fs.readFileSync(path.join(fixture.workspace, "second.txt"), "utf8"), "second")
 			assert.equal(fs.existsSync(outside), !protection)
@@ -205,9 +259,11 @@ test("headless Pi reports a failed checkpoint once and continues without weakeni
 			assert.equal(toolEnds[0].isError, false)
 			assert.equal(toolEnds[1].isError, false)
 			assert.equal(toolEnds[2].isError, protection)
+
 			const warnings = toolEnds.filter((event) =>
 				JSON.stringify(event.result).includes("continuing without rollback protection"),
 			)
+
 			assert.equal(warnings.length, 1)
 			assert.match(JSON.stringify(warnings[0].result), /checkpoint failed/)
 		})
@@ -218,6 +274,7 @@ test("headless Pi blocks denied calls before execution or checkpoint creation", 
 	withTestTempDirectory("headless-pi-denied-", (root) => {
 		const fixture = createFixture(root)
 		const outside = path.join(root, "outside.txt")
+
 		const events = runHeadlessPi(fixture, [
 			{ kind: "tool", id: "denied-1", name: "write", arguments: { path: outside, content: "forbidden" } },
 			{ kind: "text", text: "done" },
@@ -243,10 +300,12 @@ test("headless Pi loads strict project-specific secret paths", () => {
 		)
 		fs.mkdirSync(path.join(fixture.workspace, "private"))
 		fs.writeFileSync(path.join(fixture.workspace, "private", "token.txt"), "secret")
+
 		const events = runHeadlessPi(fixture, [
 			{ kind: "tool", id: "configured-secret-1", name: "read", arguments: { path: "private/token.txt" } },
 			{ kind: "text", text: "done" },
 		])
+
 		const toolEnd = events.find((event) => event.type === "tool_execution_end")
 		assert.equal(toolEnd?.isError, true)
 		assert.match(JSON.stringify(toolEnd?.result), /read access denied/)
@@ -264,10 +323,12 @@ test("headless Pi preserves built-in image read results", () => {
 				"base64",
 			),
 		)
+
 		const events = runHeadlessPi(fixture, [
 			{ kind: "tool", id: "image-1", name: "read", arguments: { path: "pixel.png" } },
 			{ kind: "text", text: "done" },
 		])
+
 		const toolEnd = events.find((event) => event.type === "tool_execution_end")
 		assert.equal(toolEnd?.isError, false)
 		assert.match(JSON.stringify(toolEnd?.result), /image/)
@@ -281,6 +342,7 @@ test("headless Pi preserves built-in offsets, parent creation, multi-edit, BOM, 
 		const fixture = createFixture(root)
 		fs.writeFileSync(path.join(fixture.workspace, "lines.txt"), "one\ntwo\nthree\nfour\n")
 		fs.writeFileSync(path.join(fixture.workspace, "bom-crlf.txt"), Buffer.from("\uFEFFone\r\ntwo\r\nthree\r\n"))
+
 		const events = runHeadlessPi(fixture, [
 			{
 				kind: "tool",
@@ -303,6 +365,7 @@ test("headless Pi preserves built-in offsets, parent creation, multi-edit, BOM, 
 			{ kind: "tool", id: "offset-read-1", name: "read", arguments: { path: "lines.txt", offset: 2, limit: 2 } },
 			{ kind: "text", text: "done" },
 		])
+
 		const toolEnds = events.filter((event) => event.type === "tool_execution_end")
 		assert.equal(toolEnds.length, 3)
 		assert.equal(
@@ -326,6 +389,7 @@ test("headless Pi protects persistence configuration in built-in tools and Bash"
 	withTestTempDirectory("headless-pi-persistence-", (root) => {
 		const fixture = createFixture(root)
 		fs.mkdirSync(path.join(fixture.workspace, ".git", "hooks"), { recursive: true })
+
 		const events = runHeadlessPi(fixture, [
 			{ kind: "tool", id: "persist-1", name: "write", arguments: { path: ".mcp.json", content: "x" } },
 			{
@@ -339,6 +403,7 @@ test("headless Pi protects persistence configuration in built-in tools and Bash"
 			},
 			{ kind: "text", text: "done" },
 		])
+
 		const toolEnds = events.filter((event) => event.type === "tool_execution_end")
 		assert.equal(toolEnds.length, 2)
 		assert.equal(toolEnds[0].isError, true)
@@ -354,6 +419,7 @@ test("headless Pi guards the same macOS Unicode fallback path that built-in read
 	withTestTempDirectory("headless-pi-fallback-", (root) => {
 		const fixture = createFixture(root)
 		fs.writeFileSync(path.join(fixture.workspace, "Capture d’archive.txt"), "fallback-content")
+
 		const events = runHeadlessPi(fixture, [
 			{
 				kind: "tool",
@@ -363,14 +429,24 @@ test("headless Pi guards the same macOS Unicode fallback path that built-in read
 			},
 			{ kind: "text", text: "done" },
 		])
+
 		const toolEnd = events.find((event) => event.type === "tool_execution_end")
-		assert.deepEqual(toolEnd, {
-			type: "tool_execution_end",
-			toolCallId: "fallback-1",
-			toolName: "read",
-			result: { content: [{ type: "text", text: "fallback-content" }] },
-			isError: false,
-		})
+		assert.ok(toolEnd)
+		// Timing and the SDK's duplicate structured output are not part of the read behavior checked here.
+		const { durationMs: _durationMs, result, ...event } = toolEnd
+		assert.ok(result instanceof Object && "content" in result && !Array.isArray(result))
+		const { structuredContent: _structuredContent, ...behavioralResult } = result
+
+		assert.deepEqual(
+			{ ...event, result: behavioralResult },
+			{
+				type: "tool_execution_end",
+				toolCallId: "fallback-1",
+				toolName: "read",
+				result: { content: [{ type: "text", text: "fallback-content" }] },
+				isError: false,
+			},
+		)
 		assert.equal(fs.existsSync(path.join(fixture.stateHome, "pi-safety", "snapshots")), false)
 	})
 })
@@ -384,6 +460,7 @@ test("headless Pi supports native wb with source-derived process-scoped permissi
 			'<html><body><input id="name"><button onclick="document.body.dataset.clicked=\'yes\'">Go</button></body></html>',
 		)
 		const existingWbDaemons = wbDaemonPids()
+
 		try {
 			const events = runHeadlessPi(fixture, [
 				{
@@ -406,6 +483,7 @@ test("headless Pi supports native wb with source-derived process-scoped permissi
 				},
 				{ kind: "text", text: "done" },
 			])
+
 			const toolEnd = events.find((event) => event.type === "tool_execution_end")
 			assert.equal(toolEnd?.toolName, "bash")
 			assert.equal(toolEnd?.isError, false, JSON.stringify(toolEnd?.result))
@@ -431,8 +509,10 @@ test("native wb cannot attach to an unsandboxed daemon on an alternate socket", 
 			const alternateSocket = path.join(shortRoot, "alternate.sock")
 			fs.writeFileSync(page, "<html><body>Alternate daemon</body></html>")
 			const wb = Bun.which("wb")
+
 			if (!wb) throw new Error("wb executable is not available on PATH")
 			const existingWbDaemons = wbDaemonPids()
+
 			try {
 				const started = spawnSync(wb, [`file://${page}`], {
 					cwd: fixture.workspace,
@@ -445,7 +525,9 @@ test("native wb cannot attach to an unsandboxed daemon on an alternate socket", 
 					encoding: "utf8",
 					timeout: 30_000,
 				})
+
 				assert.equal(started.status, 0, started.stderr)
+
 				const events = runHeadlessPi(fixture, [
 					{
 						kind: "tool",
@@ -458,6 +540,7 @@ test("native wb cannot attach to an unsandboxed daemon on an alternate socket", 
 					},
 					{ kind: "text", text: "done" },
 				])
+
 				const toolEnd = events.find((event) => event.type === "tool_execution_end")
 				assert.equal(toolEnd?.toolName, "bash")
 				assert.equal(toolEnd?.isError, true)
@@ -473,6 +556,7 @@ test("headless Pi Seatbelt denies Bash writes outside workspace", () => {
 	withTestTempDirectory("headless-pi-bash-denied-", (root) => {
 		const fixture = createFixture(root)
 		const forbidden = path.join(fixture.home, "forbidden.txt")
+
 		const events = runHeadlessPi(fixture, [
 			{
 				kind: "tool",
@@ -482,6 +566,7 @@ test("headless Pi Seatbelt denies Bash writes outside workspace", () => {
 			},
 			{ kind: "text", text: "done" },
 		])
+
 		assert.equal(fs.existsSync(forbidden), false)
 		const toolEnd = events.find((event) => event.type === "tool_execution_end")
 		assert.equal(toolEnd?.toolName, "bash")
@@ -496,6 +581,7 @@ test("sandboxed snapshot CLI cannot mutate history or read protected content", (
 		fs.writeFileSync(path.join(fixture.workspace, ".env"), "TOP_SECRET_VALUE")
 		fs.writeFileSync(path.join(fixture.workspace, "ordinary.txt"), "before")
 		const snapshotCli = path.join(path.dirname(fileURLToPath(import.meta.url)), "pi-snapshot.ts")
+
 		const command = [
 			"printf after > ordinary.txt",
 			`${JSON.stringify(snapshotCli)} create`,
@@ -514,10 +600,12 @@ test("sandboxed snapshot CLI cannot mutate history or read protected content", (
 			"echo create:$create_status show:$show_status restore:$restore_status atomic:$atomic_status diff:$diff_status selected:$selected_status",
 			"test $create_status -ne 0 -a $show_status -ne 0 -a $restore_status -ne 0 -a $atomic_status -eq 0 -a $diff_status -eq 0 -a $selected_status -eq 0",
 		].join("; ")
+
 		const events = runHeadlessPi(fixture, [
 			{ kind: "tool", id: "snapshot-cli-1", name: "bash", arguments: { command } },
 			{ kind: "text", text: "done" },
 		])
+
 		const toolEnd = events.find((event) => event.type === "tool_execution_end")
 		const output = JSON.stringify(toolEnd?.result)
 		assert.equal(toolEnd?.isError, false, output)
@@ -545,26 +633,29 @@ test("persists one non-context checkpoint marker for each mutating agent run", (
 		)
 
 		const sessionRoot = path.join(fixture.piConfig, "sessions")
+
 		const sessionFiles = fs
 			.readdirSync(sessionRoot, { recursive: true, encoding: "utf8" })
 			.filter((relativePath) => relativePath.endsWith(".jsonl"))
 			.map((relativePath) => path.join(sessionRoot, relativePath))
+
 		assert.equal(sessionFiles.length, 1)
+
 		const entries = fs
 			.readFileSync(sessionFiles[0], "utf8")
 			.trim()
 			.split("\n")
-			.map((line) => JSON.parse(line) as Record<string, unknown>)
+			.map((line) => sessionEntrySchema.parse(JSON.parse(line)))
+
 		const markers = entries.filter((entry) => entry.type === "custom" && entry.customType === "pi-safety-checkpoint")
 		assert.equal(markers.length, 1)
 		assert.equal(
 			entries.some((entry) => entry.type === "custom_message" && entry.customType === "pi-safety-checkpoint"),
 			false,
 		)
-		const marker = markers[0].data as Record<string, unknown>
+		const marker = checkpointMarkerSchema.parse(markers[0].data)
 		assert.equal(marker.version, 1)
-		assert.match(String(marker.snapshotId), /^\d{17}-[0-9a-f]{16}$/)
-		assert.equal(typeof marker.createdAt, "string")
+		assert.match(marker.snapshotId, /^\d{17}-[0-9a-f]{16}$/)
 		const snapshotRoot = path.join(fixture.stateHome, "pi-safety", "snapshots")
 		const project = fs.readdirSync(snapshotRoot)[0]
 		const snapshotDirectory = path.join(snapshotRoot, project, String(marker.snapshotId))
@@ -593,6 +684,7 @@ test("child Pi processes launched by Bash inherit the active Seatbelt", () => {
 			]),
 		)
 		const extensionDirectory = path.dirname(fileURLToPath(import.meta.url))
+
 		const childArgs = [
 			"--mode",
 			"json",
@@ -615,15 +707,18 @@ test("child Pi processes launched by Bash inherit the active Seatbelt", () => {
 			"deterministic",
 			"run child script",
 		]
+
 		// SDK credential reads acquire a lock. Keep the child's own runtime state
 		// writable so the test reaches the denied tool call, rather than failing bootstrap.
 		const childAgentDir = path.join(fixture.workspace, "child-agent")
 		fs.mkdirSync(childAgentDir)
 		const command = `PI_CODING_AGENT_DIR=${JSON.stringify(childAgentDir)} PI_SAFETY_TEST_SCRIPT=${JSON.stringify(childScript)} ${JSON.stringify(resolveInstalledPi())} ${childArgs.map((argument) => JSON.stringify(argument)).join(" ")}`
+
 		const events = runHeadlessPi(fixture, [
 			{ kind: "tool", id: "parent-bash-1", name: "bash", arguments: { command } },
 			{ kind: "text", text: "done" },
 		])
+
 		const toolEnd = events.find((event) => event.type === "tool_execution_end")
 		assert.equal(toolEnd?.isError, false, JSON.stringify(toolEnd?.result))
 		assert.match(JSON.stringify(toolEnd?.result), /child-bash-1/)
@@ -636,6 +731,7 @@ test("headless Pi runs Bash inside Seatbelt after checkpointing", () => {
 	withTestTempDirectory("headless-pi-bash-", (root) => {
 		const fixture = createFixture(root)
 		fs.writeFileSync(path.join(fixture.workspace, "existing.txt"), "before-bash")
+
 		const events = runHeadlessPi(fixture, [
 			{
 				kind: "tool",
@@ -645,6 +741,7 @@ test("headless Pi runs Bash inside Seatbelt after checkpointing", () => {
 			},
 			{ kind: "text", text: "done" },
 		])
+
 		assert.equal(fs.readFileSync(path.join(fixture.workspace, "bash-created.txt"), "utf8"), "sandboxed")
 		const toolEnd = events.find((event) => event.type === "tool_execution_end")
 		assert.equal(toolEnd?.toolName, "bash")
@@ -653,6 +750,7 @@ test("headless Pi runs Bash inside Seatbelt after checkpointing", () => {
 		const snapshotRoot = path.join(fixture.stateHome, "pi-safety", "snapshots")
 		const project = fs.readdirSync(snapshotRoot)[0]
 		const snapshot = fs.readdirSync(path.join(snapshotRoot, project)).find((name) => !name.startsWith("."))
+
 		if (!snapshot) throw new Error("headless Bash checkpoint was not published")
 		assert.equal(
 			fs.readFileSync(path.join(snapshotRoot, project, snapshot, "tree", "existing.txt"), "utf8"),
@@ -664,6 +762,7 @@ test("headless Pi runs Bash inside Seatbelt after checkpointing", () => {
 test("headless Pi preserves Bash errors, timeout, streaming, truncation, and full output", () => {
 	withTestTempDirectory("headless-pi-bash-parity-", (root) => {
 		const fixture = createFixture(root)
+
 		const events = runHeadlessPi(fixture, [
 			{
 				kind: "tool",
@@ -687,6 +786,7 @@ test("headless Pi preserves Bash errors, timeout, streaming, truncation, and ful
 			},
 			{ kind: "text", text: "done" },
 		])
+
 		const toolEnds = events.filter((event) => event.type === "tool_execution_end")
 		assert.equal(toolEnds.length, 3)
 		assert.equal(toolEnds[0].isError, true)
@@ -695,13 +795,9 @@ test("headless Pi preserves Bash errors, timeout, streaming, truncation, and ful
 		assert.equal(toolEnds[1].isError, true)
 		assert.match(JSON.stringify(toolEnds[1].result), /timed out after 0\.05 seconds/)
 		assert.equal(toolEnds[2].isError, false)
-		const finalResult = toolEnds[2].result as {
-			details?: { truncation?: { truncated?: boolean }; fullOutputPath?: string }
-		}
-		assert.equal(finalResult.details?.truncation?.truncated, true)
-		const fullOutputPath = finalResult.details?.fullOutputPath
-		assert.equal(typeof fullOutputPath, "string")
-		if (typeof fullOutputPath !== "string") return
+		const finalResult = truncatedBashResultSchema.parse(toolEnds[2].result)
+		assert.equal(finalResult.details.truncation.truncated, true)
+		const fullOutputPath = finalResult.details.fullOutputPath
 		assert.equal(path.dirname(fullOutputPath), fixture.temp)
 		const fullOutput = fs.readFileSync(fullOutputPath, "utf8")
 		assert.match(fullOutput, /^0\n1\n/)
@@ -717,6 +813,7 @@ test("headless Pi preserves built-in write, edit, and read while creating one ch
 	withTestTempDirectory("headless-pi-builtins-", (root) => {
 		const fixture = createFixture(root)
 		fs.writeFileSync(path.join(fixture.workspace, "existing.txt"), "before")
+
 		const events = runHeadlessPi(fixture, [
 			{ kind: "tool", id: "write-1", name: "write", arguments: { path: "created.txt", content: "alpha" } },
 			{
@@ -730,7 +827,16 @@ test("headless Pi preserves built-in write, edit, and read while creating one ch
 		])
 
 		const toolEnds = events.filter((event) => event.type === "tool_execution_end")
-		assert.deepEqual(toolEnds, [
+
+		// Ignore only SDK timing and duplicate structured output; compare every other field exactly.
+		const behavioralEvents = toolEnds.map(({ durationMs: _durationMs, result, ...event }) => {
+			assert.ok(result instanceof Object && "content" in result && !Array.isArray(result))
+			const { structuredContent: _structuredContent, ...behavioralResult } = result
+
+			return { ...event, result: behavioralResult }
+		})
+
+		assert.deepEqual(behavioralEvents, [
 			{
 				type: "tool_execution_end",
 				toolCallId: "write-1",

@@ -23,6 +23,7 @@ import { withTestTempDirectory } from "./test-temp-directory"
 test("the policy VM preserves a narrow read exception inside a denied tree", () => {
 	const protectedDirectory = canonicalPath("/tmp/pi-safety-policy-vm/protected")
 	const publicDirectory = canonicalPath(path.join(protectedDirectory, "public"))
+
 	const policy = definePolicy({
 		workspaceRoot: canonicalPath("/tmp/pi-safety-policy-vm/workspace"),
 		homeRoot: canonicalPath("/tmp/pi-safety-policy-vm/home"),
@@ -39,6 +40,7 @@ test("the policy VM preserves a narrow read exception inside a denied tree", () 
 		subject: { kind: "builtin" },
 		path: canonicalPath(path.join(publicDirectory, "metadata.txt")),
 	})
+
 	assert.equal(readable.effect, "allow")
 	assert.equal(readable.access, "read-only")
 
@@ -48,6 +50,7 @@ test("the policy VM preserves a narrow read exception inside a denied tree", () 
 		subject: { kind: "builtin" },
 		path: canonicalPath(path.join(protectedDirectory, "private.txt")),
 	})
+
 	assert.equal(denied.effect, "deny")
 	assert.equal(denied.access, "none")
 })
@@ -66,6 +69,7 @@ test("declarative rules cannot be placed after runtime capabilities", () => {
 
 test("runtime operation domains are inapplicable to built-in file evaluation", () => {
 	const root = canonicalPath("/")
+
 	const policy = definePolicy({
 		workspaceRoot: canonicalPath("/tmp/pi-safety-policy-domains/workspace"),
 		homeRoot: canonicalPath("/tmp/pi-safety-policy-domains/home"),
@@ -85,6 +89,7 @@ test("runtime operation domains are inapplicable to built-in file evaluation", (
 		subject: { kind: "builtin" },
 		path: canonicalPath("/tmp/pi-safety-policy-domains/public.txt"),
 	})
+
 	assert.equal(decision.effect, "allow")
 	assert.equal(decision.access, "read-only")
 })
@@ -95,13 +100,16 @@ test("the Seatbelt adapter enforces the same narrow read exception as the policy
 		const home = path.join(root, "home")
 		const protectedDirectory = path.join(home, "protected")
 		const publicDirectory = path.join(protectedDirectory, "public")
+
 		for (const directory of [workspace, home, protectedDirectory, publicDirectory]) {
 			fs.mkdirSync(directory)
 		}
+
 		const publicFile = path.join(publicDirectory, "metadata.txt")
 		const privateFile = path.join(protectedDirectory, "private.txt")
 		fs.writeFileSync(publicFile, "public metadata")
 		fs.writeFileSync(privateFile, "private material")
+
 		const policy = definePolicy({
 			workspaceRoot: canonicalPath(workspace),
 			homeRoot: canonicalPath(home),

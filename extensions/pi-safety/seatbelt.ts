@@ -21,6 +21,7 @@ import {
 
 export function emitSeatbelt(policy: Policy): CompiledSbpl {
 	const accessRules = policy.rules.filter((rule): rule is FileAccessRule => rule.kind === "file-access")
+
 	const rules: Rule[] = [
 		...accessCompilationGroups(policy, accessRules).flatMap((group) =>
 			group.rules.flatMap((rule) => [
@@ -31,6 +32,7 @@ export function emitSeatbelt(policy: Policy): CompiledSbpl {
 		),
 		...policy.rules.flatMap(runtimeRule),
 	]
+
 	return emitSbplProfile(rules)
 }
 
@@ -55,9 +57,12 @@ function accessCompilationGroups(policy: Policy, rules: readonly FileAccessRule[
 			),
 		),
 	]
+
 	const [first, ...rest] = executables
+
 	const genericScope: CompilationScope =
 		first === undefined ? { kind: "sandbox" } : { kind: "except-processes", executables: [first, ...rest] }
+
 	return [
 		{ rules: effectiveFileAccessRules(policy, { kind: "sandbox" }), scope: genericScope },
 		...executables.map(

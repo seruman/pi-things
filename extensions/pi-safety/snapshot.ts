@@ -7,25 +7,32 @@ import { type Policy, evaluatePolicy } from "./policy"
 import { type Result, err, ok } from "./result"
 
 const snapshotPlanBrand: unique symbol = Symbol("SnapshotPlan")
+
 const snapshotStoreBrand: unique symbol = Symbol("SnapshotStore")
+
 const stagedSnapshotBrand: unique symbol = Symbol("StagedSnapshot")
+
 const publishedSnapshotBrand: unique symbol = Symbol("PublishedSnapshotRef")
 
 export const snapshotIdSchema = z
 	.string()
 	.regex(/^\d{17}-[0-9a-f]{16}$/u, "invalid snapshot identifier")
 	.brand<"SnapshotId">()
+
 export const snapshotSessionIdSchema = z
 	.string()
 	.regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u, "invalid snapshot session ID")
 	.brand<"SnapshotSessionId">()
+
 export const relativeSnapshotPathSchema = z
 	.string()
 	.refine(isRelativeSnapshotPath, "snapshot path must be normalized and relative")
 	.brand<"RelativeSnapshotPath">()
 
 export type SnapshotId = z.infer<typeof snapshotIdSchema>
+
 export type SnapshotSessionId = z.infer<typeof snapshotSessionIdSchema>
+
 export type RelativeSnapshotPath = z.infer<typeof relativeSnapshotPathSchema>
 
 export type SnapshotCreationOrigin =
@@ -38,6 +45,7 @@ export type SnapshotSessionIdError = { readonly kind: "invalid-snapshot-session-
 
 export function parseSnapshotSessionId(input: string): Result<SnapshotSessionId, SnapshotSessionIdError> {
 	const parsed = snapshotSessionIdSchema.safeParse(input)
+
 	return parsed.success ? ok(parsed.data) : err({ kind: "invalid-snapshot-session-id" })
 }
 
@@ -49,6 +57,7 @@ export function isExcludedSnapshotPath(
 	relativePath: RelativeSnapshotPath,
 ): boolean {
 	const absolute = appendCanonicalPath(workspaceRoot, relativePath.split(path.sep))
+
 	return absolute.ok && evaluatePolicy(policy, { kind: "snapshot", path: absolute.value }).disposition === "exclude"
 }
 
@@ -89,6 +98,7 @@ export function storedSnapshotPath(
 	entry: Exclude<SnapshotPlanEntry, { readonly kind: "excluded" }>,
 ): string {
 	const storageRoot = entry.kind === "file" && entry.storage.kind === "protected" ? "protected" : "tree"
+
 	return path.join(snapshotDirectory, storageRoot, entry.path)
 }
 
@@ -109,6 +119,7 @@ export function classifySnapshotStorage(policy: Policy, path: CanonicalPath): Sn
 		subject: { kind: "snapshot" },
 		path,
 	})
+
 	return decision.access === "none" ? { kind: "protected" } : { kind: "ordinary" }
 }
 
@@ -149,18 +160,15 @@ function errorMessage(cause: unknown): string {
 	return cause instanceof Error ? cause.message : String(cause)
 }
 
-function errorCode(cause: unknown): string | undefined {
-	if (typeof cause !== "object" || cause === null || !("code" in cause)) return undefined
-	return typeof cause.code === "string" ? cause.code : undefined
-}
-
 function isRelativeSnapshotPath(input: string): boolean {
 	if (input.length === 0 || path.isAbsolute(input) || input.includes("\0")) return false
+
 	return input.split(path.sep).every((component) => component !== "" && component !== "." && component !== "..")
 }
 
 export function parseRelativeSnapshotPath(input: string): Result<RelativeSnapshotPath, SnapshotError> {
 	const parsed = relativeSnapshotPathSchema.safeParse(input)
+
 	return parsed.success
 		? ok(parsed.data)
 		: err({ kind: "path-resolution", path: input, message: "snapshot path must be normalized and relative" })
@@ -168,6 +176,7 @@ export function parseRelativeSnapshotPath(input: string): Result<RelativeSnapsho
 
 export function parseSnapshotId(input: string): Result<SnapshotId, SnapshotError> {
 	const parsed = snapshotIdSchema.safeParse(input)
+
 	return parsed.success
 		? ok(parsed.data)
 		: err({ kind: "path-resolution", path: input, message: "invalid snapshot identifier" })
@@ -175,21 +184,27 @@ export function parseSnapshotId(input: string): Result<SnapshotId, SnapshotError
 
 let lastGeneratedTimestamp = 0
 
-function generateSnapshotIdentity(): { readonly id: SnapshotId; readonly createdAt: string } {
+function generateSnapshotIdentity() {
 	const timestamp = Math.max(Date.now(), lastGeneratedTimestamp + 1)
 	lastGeneratedTimestamp = timestamp
 	const createdAt = new Date(timestamp).toISOString()
 	const compactTimestamp = createdAt.replace(/[^0-9]/g, "")
 	const parsed = parseSnapshotId(`${compactTimestamp}-${randomBytes(8).toString("hex")}`)
+
 	if (!parsed.ok) throw new TypeError("generated an invalid snapshot identifier")
+
 	return { id: parsed.value, createdAt }
 }
 
 function entryType(stat: fs.Stats): string {
 	if (stat.isFIFO()) return "fifo"
+
 	if (stat.isSocket()) return "socket"
+
 	if (stat.isBlockDevice()) return "block-device"
+
 	if (stat.isCharacterDevice()) return "character-device"
+
 	return "unknown"
 }
 
@@ -200,11 +215,14 @@ export function createSnapshotStore(input: {
 	readonly maxSnapshots?: number
 }): Result<SnapshotStore, SnapshotError> {
 	const maxSnapshots = input.maxSnapshots ?? 20
+
 	if (!Number.isSafeInteger(maxSnapshots) || maxSnapshots < 1) {
 		return err({ kind: "invalid-store", message: "maxSnapshots must be a positive safe integer" })
 	}
+
 	const projectId = createHash("sha256").update(input.workspaceRoot).digest("hex").slice(0, 24)
 	const projectDirectory = parseCanonicalPath(path.join(input.stateRoot, "pi-safety", "snapshots", projectId))
+
 	if (!projectDirectory.ok) {
 		return err({
 			kind: "path-resolution",
@@ -212,13 +230,16 @@ export function createSnapshotStore(input: {
 			message: JSON.stringify(projectDirectory.error),
 		})
 	}
+
 	if (
 		isCanonicalPathWithin(input.workspaceRoot, projectDirectory.value) ||
 		isCanonicalPathWithin(projectDirectory.value, input.workspaceRoot)
 	) {
 		return err({ kind: "invalid-store", message: "snapshot store and workspace must not contain each other" })
 	}
+
 	return ok(
+		// SAFETY: the limit is positive, projectDirectory is canonical, and the store/workspace containment checks passed.
 		Object.freeze({
 			workspaceRoot: input.workspaceRoot,
 			projectDirectory: projectDirectory.value,
@@ -258,19 +279,25 @@ function observeWorkspaceScope(
 		const absoluteDirectory = relativeDirectory
 			? path.join(input.workspaceRoot, relativeDirectory)
 			: input.workspaceRoot
+
 		let children: string[]
+
 		try {
 			children = fs.readdirSync(absoluteDirectory).sort()
 		} catch (cause) {
 			return err({ kind: "io", operation: "read-directory", path: absoluteDirectory, message: errorMessage(cause) })
 		}
+
 		for (const name of children) {
 			const relative = relativeDirectory ? path.join(relativeDirectory, name) : name
 			const parsedRelative = parseRelativeSnapshotPath(relative)
+
 			if (!parsedRelative.ok) return parsedRelative
 			const visited = visitEntry(parsedRelative.value, "required")
+
 			if (!visited.ok) return visited
 		}
+
 		return ok(undefined)
 	}
 
@@ -280,28 +307,39 @@ function observeWorkspaceScope(
 	): Result<undefined, SnapshotError> => {
 		if (isExcludedSnapshotPath(input.policy, input.workspaceRoot, relative)) {
 			entries.push({ kind: "excluded", path: relative, reason: "policy" })
+
 			return ok(undefined)
 		}
+
 		const absolute = path.join(input.workspaceRoot, relative)
 		let stat: fs.Stats
+
 		try {
 			stat = fs.lstatSync(absolute)
 		} catch (cause) {
-			if (presence === "optional" && errorCode(cause) === "ENOENT") return ok(undefined)
+			if (presence === "optional" && cause instanceof Error && "code" in cause && cause.code === "ENOENT")
+				return ok(undefined)
+
 			return err({ kind: "io", operation: "lstat", path: absolute, message: errorMessage(cause) })
 		}
+
 		if (stat.isDirectory()) {
 			entries.push({ kind: "directory", path: relative, mode: stat.mode & 0o7777, mtimeMs: stat.mtimeMs })
+
 			return visitDirectory(relative)
 		}
+
 		if (stat.isFile()) {
 			const canonical = parseCanonicalPath(absolute)
+
 			if (!canonical.ok) {
 				return err({ kind: "path-resolution", path: absolute, message: JSON.stringify(canonical.error) })
 			}
+
 			if (!isCanonicalPathWithin(input.workspaceRoot, canonical.value)) {
 				return err({ kind: "path-resolution", path: absolute, message: "file resolves outside workspace" })
 			}
+
 			entries.push({
 				kind: "file",
 				path: relative,
@@ -310,22 +348,28 @@ function observeWorkspaceScope(
 				size: stat.size,
 				storage: classifySnapshotStorage(input.policy, canonical.value),
 			})
+
 			return ok(undefined)
 		}
+
 		if (stat.isSymbolicLink()) {
 			try {
 				entries.push({ kind: "symlink", path: relative, target: fs.readlinkSync(absolute) })
+
 				return ok(undefined)
 			} catch (cause) {
 				return err({ kind: "io", operation: "readlink", path: absolute, message: errorMessage(cause) })
 			}
 		}
+
 		nonComparable.push({ path: relative, entryType: entryType(stat) })
+
 		return ok(undefined)
 	}
 
 	if (scope.kind === "all") {
 		const visited = visitDirectory("")
+
 		if (!visited.ok) return visited
 	} else {
 		const roots = scope.paths
@@ -333,11 +377,14 @@ function observeWorkspaceScope(
 				(candidate) => !scope.paths.some((other) => other !== candidate && candidate.startsWith(`${other}${path.sep}`)),
 			)
 			.sort()
+
 		for (const relative of roots) {
 			const visited = visitEntry(relative, "optional")
+
 			if (!visited.ok) return visited
 		}
 	}
+
 	return ok(
 		Object.freeze({
 			entries: Object.freeze(entries.map((entry) => Object.freeze(entry))),
@@ -351,8 +398,10 @@ export function planSnapshot(input: {
 	readonly policy: Policy
 }): Result<SnapshotPlan, SnapshotError> {
 	const observed = observeWorkspace(input)
+
 	if (!observed.ok) return observed
 	const unsupported = observed.value.nonComparable[0]
+
 	if (unsupported !== undefined) {
 		return err({
 			kind: "unsupported-entry",
@@ -360,7 +409,9 @@ export function planSnapshot(input: {
 			entryType: unsupported.entryType,
 		})
 	}
+
 	return ok(
+		// SAFETY: observation completed successfully and no unsupported filesystem entries remain in this plan.
 		Object.freeze({
 			workspaceRoot: input.workspaceRoot,
 			entries: observed.value.entries,
@@ -372,6 +423,7 @@ function ensureDirectory(directory: string): Result<undefined, SnapshotError> {
 	try {
 		fs.mkdirSync(directory, { recursive: true, mode: 0o700 })
 		fs.chmodSync(directory, 0o700)
+
 		return ok(undefined)
 	} catch (cause) {
 		return err({ kind: "io", operation: "create-directory", path: directory, message: errorMessage(cause) })
@@ -383,6 +435,7 @@ function probeCloneSupport(projectDirectory: CanonicalPath): Result<undefined, S
 	const source = path.join(projectDirectory, `.clone-probe-${suffix}`)
 	const destination = `${source}.clone`
 	let probeResult: Result<undefined, SnapshotError>
+
 	try {
 		fs.writeFileSync(source, "pi-safety-clone-probe", { mode: 0o600, flag: "wx" })
 		fs.copyFileSync(source, destination, fs.constants.COPYFILE_FICLONE_FORCE)
@@ -390,18 +443,22 @@ function probeCloneSupport(projectDirectory: CanonicalPath): Result<undefined, S
 	} catch (cause) {
 		probeResult = err({ kind: "clone-unsupported", message: errorMessage(cause) })
 	}
+
 	try {
 		fs.rmSync(source, { force: true })
 		fs.rmSync(destination, { force: true })
 	} catch (cause) {
 		return err({ kind: "io", operation: "clean-clone-probe", path: source, message: errorMessage(cause) })
 	}
+
 	return probeResult
 }
 
 function expectedKind(stat: fs.Stats, expected: "directory" | "file" | "symlink"): boolean {
 	if (expected === "directory") return stat.isDirectory()
+
 	if (expected === "file") return stat.isFile()
+
 	return stat.isSymbolicLink()
 }
 
@@ -411,8 +468,10 @@ function checkedLiveStat(
 	expected: "directory" | "file" | "symlink",
 ): Result<fs.Stats, SnapshotError> {
 	const source = path.join(workspaceRoot, entry.path)
+
 	try {
 		const stat = fs.lstatSync(source)
+
 		return expectedKind(stat, expected) ? ok(stat) : err({ kind: "filesystem-race", path: source, expected })
 	} catch {
 		return err({ kind: "filesystem-race", path: source, expected })
@@ -445,54 +504,69 @@ function stageSnapshotTransaction(
 	const stagingRaw = path.join(projectDirectory, `.staging-${id}`)
 	const finalRaw = path.join(projectDirectory, id)
 	const staging = parseCanonicalPath(stagingRaw)
+
 	if (!staging.ok) return err({ kind: "path-resolution", path: stagingRaw, message: JSON.stringify(staging.error) })
 	const finalDirectory = parseCanonicalPath(finalRaw)
+
 	if (!finalDirectory.ok) {
 		return err({ kind: "path-resolution", path: finalRaw, message: JSON.stringify(finalDirectory.error) })
 	}
 
 	let stagedSuccessfully = false
+
 	try {
 		fs.mkdirSync(staging.value, { mode: 0o700 })
 		fs.mkdirSync(path.join(staging.value, "tree"), { mode: 0o700 })
 		fs.mkdirSync(path.join(staging.value, "protected"), { mode: 0o700 })
 		const directories: Array<{ destination: string; mode: number; mtimeMs: number }> = []
+
 		for (const entry of plan.entries) {
 			if (entry.kind === "excluded") continue
 			const source = path.join(plan.workspaceRoot, entry.path)
+
 			if (entry.kind === "directory") {
 				const current = checkedLiveStat(plan.workspaceRoot, entry, "directory")
+
 				if (!current.ok) return current
 				const destination = path.join(staging.value, "tree", entry.path)
 				fs.mkdirSync(destination, { recursive: true, mode: entry.mode })
 				directories.push({ destination, mode: entry.mode, mtimeMs: entry.mtimeMs })
 				continue
 			}
+
 			if (entry.kind === "symlink") {
 				const current = checkedLiveStat(plan.workspaceRoot, entry, "symlink")
+
 				if (!current.ok) return current
+
 				if (fs.readlinkSync(source) !== entry.target) {
 					return err({ kind: "filesystem-race", path: source, expected: "symlink" })
 				}
+
 				const destination = path.join(staging.value, "tree", entry.path)
 				fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 })
 				fs.symlinkSync(entry.target, destination)
 				continue
 			}
+
 			const current = checkedLiveStat(plan.workspaceRoot, entry, "file")
+
 			if (!current.ok || current.value.size !== entry.size) {
 				return current.ok ? err({ kind: "filesystem-race", path: source, expected: "file" }) : current
 			}
+
 			const destination = storedSnapshotPath(staging.value, entry)
 			fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 })
 			fs.copyFileSync(source, destination, fs.constants.COPYFILE_FICLONE_FORCE)
 			fs.chmodSync(destination, entry.mode)
 			fs.utimesSync(destination, entry.mtimeMs / 1000, entry.mtimeMs / 1000)
 		}
+
 		for (const directory of directories.reverse()) {
 			fs.chmodSync(directory.destination, directory.mode)
 			fs.utimesSync(directory.destination, directory.mtimeMs / 1000, directory.mtimeMs / 1000)
 		}
+
 		const manifest = {
 			version: 3,
 			id,
@@ -501,12 +575,15 @@ function stageSnapshotTransaction(
 			origin,
 			entries: plan.entries,
 		}
+
 		fs.writeFileSync(path.join(staging.value, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, {
 			mode: 0o600,
 			flag: "wx",
 		})
 		stagedSuccessfully = true
+
 		return ok(
+			// SAFETY: all entries and the manifest were written successfully beneath the canonical staging directory.
 			Object.freeze({
 				id,
 				stagingDirectory: staging.value,
@@ -524,7 +601,9 @@ function stageSnapshotTransaction(
 export function publishSnapshot(staged: StagedSnapshot): Result<PublishedSnapshotRef, SnapshotError> {
 	try {
 		fs.renameSync(staged.stagingDirectory, staged.finalDirectory)
+
 		return ok(
+			// SAFETY: renameSync atomically moved the completed staging directory to its final canonical location.
 			Object.freeze({
 				id: staged.id,
 				directory: staged.finalDirectory,
@@ -552,15 +631,21 @@ function pruneSnapshots(store: SnapshotStore, preserved: ReadonlySet<string>): R
 			.filter((entry) => entry.isDirectory() && parseSnapshotId(entry.name).ok)
 			.map((entry) => entry.name)
 			.sort()
+
 		const expired: string[] = []
+
 		for (const name of published) {
 			if (published.length - expired.length <= store.maxSnapshots) break
+
 			if (!preserved.has(name)) expired.push(name)
 		}
+
 		if (published.length - expired.length > store.maxSnapshots) {
 			return err({ kind: "retention-conflict", maxSnapshots: store.maxSnapshots })
 		}
+
 		for (const name of expired) fs.rmSync(path.join(store.projectDirectory, name), { recursive: true })
+
 		return ok(undefined)
 	} catch (cause) {
 		return err({ kind: "io", operation: "prune-snapshots", path: store.projectDirectory, message: errorMessage(cause) })
@@ -588,35 +673,49 @@ function createSnapshotTransaction(
 	options: { readonly preserve?: SnapshotId; readonly origin?: SnapshotCreationOrigin },
 ): Result<PublishedSnapshotRef, SnapshotError> {
 	const plan = planSnapshot({ workspaceRoot: store.workspaceRoot, policy: store.policy })
+
 	if (!plan.ok) return plan
 	const directory = ensureDirectory(store.projectDirectory)
+
 	if (!directory.ok) return directory
 	const lockDirectory = path.join(store.projectDirectory, ".lock")
 	let lockAcquired = false
+
 	try {
 		try {
 			fs.mkdirSync(lockDirectory, { mode: 0o700 })
 			lockAcquired = true
 		} catch (cause) {
 			if (fs.existsSync(lockDirectory)) return err({ kind: "project-locked", path: lockDirectory })
+
 			return err({ kind: "io", operation: "acquire-lock", path: lockDirectory, message: errorMessage(cause) })
 		}
+
 		const cloneSupport = probeCloneSupport(store.projectDirectory)
+
 		if (!cloneSupport.ok) return cloneSupport
 		const staged = stageSnapshot(plan.value, store.projectDirectory, options.origin ?? { kind: "standalone" })
+
 		if (!staged.ok) return staged
 		const published = publishSnapshot(staged.value)
+
 		if (!published.ok) {
 			fs.rmSync(staged.value.stagingDirectory, { recursive: true, force: true })
+
 			return published
 		}
+
 		const preserved = new Set<string>([published.value.id])
+
 		if (options.preserve !== undefined) preserved.add(options.preserve)
 		const pruned = pruneSnapshots(store, preserved)
+
 		if (!pruned.ok) {
 			fs.rmSync(published.value.directory, { recursive: true, force: true })
+
 			return pruned
 		}
+
 		return published
 	} finally {
 		if (lockAcquired) fs.rmSync(lockDirectory, { recursive: true, force: true })

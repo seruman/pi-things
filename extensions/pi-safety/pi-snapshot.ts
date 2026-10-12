@@ -8,31 +8,43 @@ import { runSnapshotCommand } from "./snapshot-commands"
 
 export function main(args: readonly string[]): number {
 	const invocation = parseSnapshotInvocation(args)
+
 	if (!invocation.ok) {
 		console.error(`pi-snapshot: ${invocation.error.message}\n${SNAPSHOT_USAGE}`)
+
 		return 2
 	}
+
 	if (invocation.value.command.kind === "help") {
 		console.log(SNAPSHOT_USAGE)
+
 		return 0
 	}
+
 	const projectRoot = invocation.value.project.kind === "explicit" ? invocation.value.project.root : process.cwd()
 	const home = process.env.HOME ?? os.homedir()
 	const stateHome = process.env.XDG_STATE_HOME ?? path.join(home, ".local", "state")
 	const sandboxed = process.env.PI_SAFETY_CHECKPOINT_READY === "1"
+
 	if (sandboxed && (invocation.value.command.kind === "create" || invocation.value.command.kind === "gc")) {
 		console.error(`pi-snapshot: ${invocation.value.command.kind} is unavailable inside Pi Bash`)
+
 		return 1
 	}
+
 	let snapshotStore: ReturnType<typeof createSafetyFilesystem>
+
 	if (sandboxed) {
 		snapshotStore = createSandboxedSafetyFilesystem({ cwd: projectRoot, stateHome })
 	} else {
 		const projectConfiguration = loadProjectSafetyConfiguration(projectRoot)
+
 		if (!projectConfiguration.ok) {
 			console.error(`pi-snapshot: configuration failed (${projectConfiguration.error.message})`)
+
 			return 1
 		}
+
 		snapshotStore = createSafetyFilesystem({
 			cwd: projectRoot,
 			home,
@@ -42,17 +54,24 @@ export function main(args: readonly string[]): number {
 			additionalNoAccessPatterns: projectConfiguration.value.additionalNoAccessPatterns,
 		})
 	}
+
 	if (!snapshotStore.ok) {
 		console.error(`pi-snapshot: initialization failed (${snapshotStore.error.kind})`)
+
 		return 1
 	}
+
 	const authority = sandboxed ? { kind: "sandboxed" as const } : { kind: "direct-user" as const }
 	const result = runSnapshotCommand(snapshotStore.value, invocation.value.command, authority)
+
 	if (!result.ok) {
 		console.error(`pi-snapshot: ${JSON.stringify(result.error)}`)
+
 		return 1
 	}
+
 	if (result.value.length > 0) console.log(result.value)
+
 	return 0
 }
 

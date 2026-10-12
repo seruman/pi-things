@@ -18,6 +18,7 @@ function fixture(root: string) {
 	fs.mkdirSync(state)
 	fs.writeFileSync(path.join(workspace, "file.txt"), "before")
 	const workspaceRoot = canonicalPath(workspace)
+
 	const store = unwrap(
 		createSnapshotStore({
 			workspaceRoot,
@@ -25,7 +26,9 @@ function fixture(root: string) {
 			policy: unwrap(createSnapshotPolicy(workspaceRoot)),
 		}),
 	)
+
 	const snapshot = unwrap(createSnapshot(store))
+
 	return { workspace, store, snapshot }
 }
 
@@ -55,11 +58,13 @@ test("snapshot commands list, show, diff, verify, restore, export, and collect",
 		assert.match(diff, /added\tadded\.txt/)
 		assert.match(diff, /not-compared\tnode_modules\texcluded in live/)
 		assert.match(diff, /non-comparable\truntime\.fifo\tfifo/)
+
 		const textDiff = unwrap(
 			runSnapshotCommand(value.store, command(["diff", value.snapshot.id, "--", "file.txt"]), {
 				kind: "sandboxed",
 			}),
 		)
+
 		assert.match(textDiff, /--- snapshot\/file\.txt/)
 		assert.match(textDiff, /\+\+\+ live\/file\.txt/)
 		assert.match(textDiff, /-before/)
@@ -69,11 +74,13 @@ test("snapshot commands list, show, diff, verify, restore, export, and collect",
 			unwrap(runSnapshotCommand(value.store, command(["verify", value.snapshot.id]), { kind: "sandboxed" })),
 			/verified/,
 		)
+
 		const dryRun = unwrap(
 			runSnapshotCommand(value.store, command(["restore", value.snapshot.id, "--dry-run", "--", "file.txt"]), {
 				kind: "sandboxed",
 			}),
 		)
+
 		assert.match(dryRun, /file\tfile\.txt/)
 		assert.equal(fs.readFileSync(path.join(value.workspace, "file.txt"), "utf8"), "after-content")
 
@@ -103,6 +110,7 @@ test("diff compares two snapshots without consulting the live workspace", () => 
 		const compared = unwrap(
 			runSnapshotCommand(value.store, command(["diff", value.snapshot.id, second.id]), { kind: "sandboxed" }),
 		)
+
 		assert.match(compared, /modified\tfile\.txt/)
 		assert.match(compared, /added\tadded\.txt/)
 
@@ -111,6 +119,7 @@ test("diff compares two snapshots without consulting the live workspace", () => 
 				kind: "sandboxed",
 			}),
 		)
+
 		assert.match(selected, new RegExp(`--- ${value.snapshot.id}/file\\.txt`))
 		assert.match(selected, new RegExp(`\\+\\+\\+ ${second.id}/file\\.txt`))
 		assert.match(selected, /-before/)
@@ -120,6 +129,7 @@ test("diff compares two snapshots without consulting the live workspace", () => 
 		const reversed = unwrap(
 			runSnapshotCommand(value.store, command(["diff", second.id, value.snapshot.id]), { kind: "sandboxed" }),
 		)
+
 		assert.match(reversed, /deleted\tadded\.txt/)
 	})
 })
@@ -134,6 +144,7 @@ test("diff distinguishes identical included paths from mutually excluded paths",
 		const compared = unwrap(
 			runSnapshotCommand(value.store, command(["diff", first.id, second.id]), { kind: "sandboxed" }),
 		)
+
 		assert.equal(compared, "no differences in included paths\n\nnot compared (excluded in both):\n  node_modules")
 	})
 })
@@ -143,6 +154,7 @@ test("diff compares bytes when file metadata is unchanged", () => {
 		const value = fixture(root)
 		const manifest = JSON.parse(fs.readFileSync(path.join(value.snapshot.directory, "manifest.json"), "utf8"))
 		const entry = manifest.entries.find((candidate: { path: string }) => candidate.path === "file.txt")
+
 		if (!entry) throw new Error("snapshot file entry missing")
 		const liveFile = path.join(value.workspace, "file.txt")
 		fs.writeFileSync(liveFile, "BEFORE")
@@ -153,19 +165,29 @@ test("diff compares bytes when file metadata is unchanged", () => {
 	})
 })
 
-test("direct restore creates a redo checkpoint before mutation", () => {
+test("direct restore returns a redo checkpoint that recovers the overwritten workspace", () => {
 	withTestTempDirectory("snapshot-command-redo-", (root) => {
 		const value = fixture(root)
 		fs.writeFileSync(path.join(value.workspace, "file.txt"), "redo-state")
-		unwrap(
+		fs.writeFileSync(path.join(value.workspace, "added.txt"), "also recover this")
+
+		const restored = unwrap(
 			runSnapshotCommand(value.store, command(["restore", value.snapshot.id, "--apply"]), {
 				kind: "direct-user",
 			}),
 		)
+
 		assert.equal(fs.readFileSync(path.join(value.workspace, "file.txt"), "utf8"), "before")
-		const snapshots = fs
-			.readdirSync(value.store.projectDirectory, { withFileTypes: true })
-			.filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
-		assert.equal(snapshots.length, 2)
+		assert.equal(fs.existsSync(path.join(value.workspace, "added.txt")), false)
+		const redo = restored.split("\n").find((line) => line.endsWith("\tredo"))
+		assert.ok(redo, "restore must return a usable redo snapshot ID")
+		const [redoId] = redo.split("\t")
+		assert.equal(
+			unwrap(runSnapshotCommand(value.store, command(["show", redoId, "file.txt"]), { kind: "direct-user" })),
+			"redo-state",
+		)
+		unwrap(runSnapshotCommand(value.store, command(["restore", redoId, "--apply"]), { kind: "direct-user" }))
+		assert.equal(fs.readFileSync(path.join(value.workspace, "file.txt"), "utf8"), "redo-state")
+		assert.equal(fs.readFileSync(path.join(value.workspace, "added.txt"), "utf8"), "also recover this")
 	})
 })

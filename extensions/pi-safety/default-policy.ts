@@ -110,13 +110,16 @@ function createDefaultPolicyFromParsedRoots(input: {
 		| { readonly kind: "enabled"; readonly privateTemp: CanonicalPath; readonly integrations: BashIntegrations }
 }): Result<Policy, DefaultPolicyError> {
 	const root = parseCanonicalPath("/")
+
 	if (!root.ok) return err({ kind: "fixed-path", path: "/" })
 	const sshDirectory = pathValue(input.paths.home, ".ssh")
 	const snapshotStore = pathValue(input.paths.stateHome, "pi-safety", "snapshots")
+
 	const gitPaths = resolveGitPolicyPaths(
 		input.paths.workspace,
 		input.sandbox.kind === "enabled" ? input.sandbox.integrations.gitExecutable : "/usr/bin/git",
 	)
+
 	if (!gitPaths.ok) return gitPaths
 	const rules: PolicyRule[] = []
 
@@ -189,9 +192,11 @@ function createDefaultPolicyFromParsedRoots(input: {
 			readWrite(sandbox(), seatbeltPrefix(fixedPath("/dev/pty"))),
 			...gitPaths.value.map((pathname) => readWrite(executable(integrations.gitExecutable), tree(pathname))),
 		)
+
 		if (integrations.nix.kind === "enabled") {
 			rules.push(readWrite(executable(integrations.nix.executable), tree(integrations.nix.cacheDirectory)))
 		}
+
 		if (integrations.wb.kind === "enabled") {
 			rules.push(
 				readWrite(executable(integrations.wb.executable), tree(integrations.wb.runtimeDirectory)),
@@ -203,6 +208,7 @@ function createDefaultPolicyFromParsedRoots(input: {
 
 	// Credentials and sensitive host state. Later exceptions are intentional.
 	rules.push(noAccess(shared(), tree(sshDirectory)))
+
 	const sshReadable = parsePatterns(
 		"access",
 		[
@@ -217,6 +223,7 @@ function createDefaultPolicyFromParsedRoots(input: {
 		],
 		input.paths.workspace,
 	)
+
 	if (!sshReadable.ok) return sshReadable
 	rules.push(
 		...sshReadable.value.map((selector) => readOnly(shared(), pattern(selector))),
@@ -241,6 +248,7 @@ function createDefaultPolicyFromParsedRoots(input: {
 		],
 		input.paths.workspace,
 	)
+
 	if (!projectSecrets.ok) return projectSecrets
 	rules.push(...projectSecrets.value.map((selector) => noAccess(shared(), pattern(selector))))
 
@@ -250,11 +258,13 @@ function createDefaultPolicyFromParsedRoots(input: {
 		[path.join(snapshotStore, "*", "*", "protected"), path.join(snapshotStore, "*", "*", "protected", "**")],
 		input.paths.workspace,
 	)
+
 	if (!protectedSnapshots.ok) return protectedSnapshots
 	rules.push(...protectedSnapshots.value.map((selector) => noAccess(shared(), pattern(selector))))
 
 	// Snapshot inclusion is an independent last-match-wins policy axis.
 	const snapshotExclusions = parseSnapshotExclusions(input.paths.workspace)
+
 	if (!snapshotExclusions.ok) return snapshotExclusions
 	rules.push(...snapshotExclusions.value.map((selector) => excludeFromSnapshots(pattern(selector))))
 
@@ -298,6 +308,7 @@ function createDefaultPolicyFromParsedRoots(input: {
 				rules.push(unixConnectRule({ effect: "allow", matchers: [unixSocketPath(integration.socket)] }))
 			}
 		}
+
 		if (integrations.nix.kind === "enabled" && integrations.nix.daemon.kind === "unix-socket") {
 			rules.push(
 				unixConnectRule({
@@ -312,12 +323,14 @@ function createDefaultPolicyFromParsedRoots(input: {
 		if (integrations.wb.kind === "enabled") {
 			const wb = integrations.wb
 			const process = wb.executable
+
 			const noAccessMatchers = rules
 				.filter(
 					(rule): rule is FileAccessRule =>
 						rule.kind === "file-access" && rule.subject.kind === "shared" && rule.access === "none",
 				)
 				.flatMap((rule) => matchersForSelector(rule.selector))
+
 			const webKitReadRoots = [
 				fixedPath("/private/tmp"),
 				fixedPath("/nix/store"),
@@ -325,6 +338,7 @@ function createDefaultPolicyFromParsedRoots(input: {
 				fixedPath("/usr"),
 				fixedPath("/Library"),
 			] as const
+
 			rules.push(
 				allowWebKitBrokerExtension("generic", process),
 				allowWebKitBrokerExtension("iokit", process),
@@ -385,9 +399,12 @@ function createDefaultPolicyFromParsedRoots(input: {
 
 export function createSnapshotPolicy(workspace: CanonicalPath): Result<Policy, DefaultPolicyError> {
 	const root = parseCanonicalPath("/")
+
 	if (!root.ok) return err({ kind: "fixed-path", path: "/" })
 	const snapshotExclusions = parseSnapshotExclusions(workspace)
+
 	if (!snapshotExclusions.ok) return snapshotExclusions
+
 	return ok(
 		definePolicy({
 			workspaceRoot: workspace,
@@ -418,11 +435,14 @@ function parsePatterns(
 	relativeTo: CanonicalPath,
 ): Result<readonly PathPattern[], DefaultPolicyError> {
 	const patterns: PathPattern[] = []
+
 	for (const input of inputs) {
 		const parsed = parsePathPattern(input, relativeTo)
+
 		if (!parsed.ok) return err({ kind: "pattern", purpose, input, cause: parsed.error })
 		patterns.push(parsed.value)
 	}
+
 	return ok(Object.freeze(patterns))
 }
 
@@ -464,13 +484,17 @@ function matchersForSelector(selector: FileSelector): readonly PathMatcher[] {
 
 function fixedPath(input: string): SeatbeltPath {
 	const parsed = parseLexicalAbsolutePath(input)
+
 	if (!parsed.ok) throw new TypeError(`failed to parse fixed default path: ${input}`)
+
 	return parsed.value
 }
 
 function fixedPosixSharedMemoryRule(input: string): RuntimePolicyRule {
 	const parsed = allowPosixSharedMemoryRead(input)
+
 	if (!parsed.ok) throw new TypeError(`failed to parse fixed POSIX shared memory name: ${input}`)
+
 	return parsed.value
 }
 
@@ -487,7 +511,9 @@ function temporaryContainer(privateTemp: CanonicalPath): CanonicalPath {
 	if (path.basename(privateTemp) !== "T") return privateTemp
 	const container = path.dirname(privateTemp)
 	const parsed = parseCanonicalPath(container)
+
 	if (!parsed.ok) throw new DefaultPolicyPathFailure(container, parsed.error)
+
 	return parsed.value
 }
 
@@ -498,21 +524,26 @@ function resolveGitPolicyPaths(
 	const gitDirectory = pathValue(workspace, ".git")
 	const names = ["hooks", "config", "config.worktree"]
 	let isGitFile: boolean
+
 	try {
 		isGitFile = statSync(gitDirectory).isFile()
 	} catch (cause) {
 		if (!(cause instanceof Error && "code" in cause && cause.code === "ENOENT")) {
 			return err({ kind: "git-path", path: gitDirectory, message: String(cause) })
 		}
+
 		isGitFile = false
 	}
+
 	if (!isGitFile) return ok(names.map((name) => pathValue(gitDirectory, name)))
 
 	// Linked worktrees and submodules use a gitfile. Git knows which paths are
 	// shared through commondir (hooks/config) and which are worktree-local.
 	const paths: CanonicalPath[] = []
+
 	for (const name of names) {
 		let resolved: string
+
 		try {
 			resolved = execFileSync(
 				gitExecutable,
@@ -522,16 +553,21 @@ function resolveGitPolicyPaths(
 		} catch (cause) {
 			return err({ kind: "git-path", path: gitDirectory, message: String(cause) })
 		}
+
 		const parsed = parseCanonicalPath(resolved)
+
 		if (!parsed.ok) return err({ kind: "rule-path", path: resolved, cause: parsed.error })
 		paths.push(parsed.value)
 	}
+
 	return ok(paths)
 }
 
 function pathValue(root: CanonicalPath, ...components: string[]): CanonicalPath {
 	const pathname = path.join(root, ...components)
 	const parsed = parseCanonicalPath(pathname)
+
 	if (!parsed.ok) throw new DefaultPolicyPathFailure(pathname, parsed.error)
+
 	return parsed.value
 }

@@ -8,6 +8,7 @@ import { withTestTempDirectory } from "./test-temp-directory"
 
 function runCli(cwd: string, env: NodeJS.ProcessEnv, args: readonly string[]) {
 	const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "pi-snapshot.ts")
+
 	return spawnSync(script, [...args], { cwd, env, encoding: "utf8", timeout: 30_000 })
 }
 
@@ -19,9 +20,11 @@ test("standalone pi-snapshot creates, lists, shows, and restores in isolated XDG
 		const temp = path.join(root, "tmp")
 		const piConfig = path.join(root, "pi-config")
 		const administration = path.join(root, "administration")
+
 		for (const directory of [workspace, home, state, temp, piConfig, administration]) fs.mkdirSync(directory)
 		const file = path.join(workspace, "file.txt")
 		fs.writeFileSync(file, "before")
+
 		const env = {
 			PATH: process.env.PATH,
 			HOME: home,

@@ -16,8 +16,11 @@ export type FileOperation =
 	| "file-write-unlink"
 
 export type RuleEffect = "allow" | "deny"
+
 export type FileExtensionClass = "com.apple.app-sandbox.read" | "com.apple.app-sandbox.read-write"
+
 export type WebKitBrokerExtension = "generic" | "iokit" | "mach"
+
 export type RuntimeOperation =
 	| "appleevent-send"
 	| "lsopen"
@@ -27,7 +30,9 @@ export type RuntimeOperation =
 	| "pseudo-tty"
 	| "sysctl-read"
 	| "system-socket"
+
 export type SameSandboxOperation = "mach-priv-task-port" | "process-info*" | "signal"
+
 export type IpNetworkOperation = "network-bind" | "network-inbound" | "network-outbound"
 
 export type MachServiceNameError = {
@@ -41,14 +46,21 @@ export type PosixIpcNameError = {
 }
 
 declare const globalServiceNameBrand: unique symbol
+
 declare const xpcServiceNameBrand: unique symbol
+
 declare const pathMatcherBrand: unique symbol
+
 declare const unixSocketMatcherBrand: unique symbol
+
 declare const ruleBrand: unique symbol
+
 declare const posixIpcNameBrand: unique symbol
 
 type GlobalServiceName = string & { readonly [globalServiceNameBrand]: true }
+
 type XpcServiceName = string & { readonly [xpcServiceNameBrand]: true }
+
 type PosixIpcName = string & { readonly [posixIpcNameBrand]: true }
 
 type MachService =
@@ -161,6 +173,7 @@ type RuleNode =
 	| IpNetworkRule
 	| NetworkPathRule
 	| PosixIpcRule
+
 export type Rule = RuleNode & { readonly [ruleBrand]: true }
 
 export type CompiledSbpl = {
@@ -174,38 +187,48 @@ export type SbplParameter = {
 }
 
 export function literal(path: SeatbeltPath): PathMatcher {
+	// SAFETY: the literal matcher contains a validated absolute Seatbelt path and no raw SBPL.
 	return Object.freeze({ kind: "literal", path }) as PathMatcher
 }
 
 export function subpath(path: SeatbeltPath): PathMatcher {
+	// SAFETY: the subpath root is a validated absolute Seatbelt path.
 	return Object.freeze({ kind: "subpath", path }) as PathMatcher
 }
 
 export function pathPrefix(path: SeatbeltPath): PathMatcher {
+	// SAFETY: the prefix is a validated absolute path; the emitter escapes it before using it as regex source.
 	return Object.freeze({ kind: "prefix", path }) as PathMatcher
 }
 
 export function pathRegex(pattern: CompiledPathRegex): PathMatcher {
+	// SAFETY: CompiledPathRegex is produced only after compiling and checking the supported Seatbelt regex dialect.
 	return Object.freeze({ kind: "regex", pattern }) as PathMatcher
 }
 
 export function unixSocketPath(path: SeatbeltPath): UnixSocketMatcher {
+	// SAFETY: a Unix socket path matcher requires only the validated absolute Seatbelt path supplied here.
 	return Object.freeze({ kind: "path", path }) as UnixSocketMatcher
 }
 
 export function unixSocketSubpath(path: SeatbeltPath): UnixSocketMatcher {
+	// SAFETY: a Unix socket subtree matcher requires only the validated absolute root supplied here.
 	return Object.freeze({ kind: "subpath", path }) as UnixSocketMatcher
 }
 
 export function globalMachService(input: string): Result<MachService, MachServiceNameError> {
 	if (!isMachServiceName(input)) return invalidMachServiceName(input)
+	// SAFETY: isMachServiceName accepted a nonempty string containing only the allowed service-name characters.
 	const name = input as GlobalServiceName
+
 	return ok(Object.freeze({ kind: "global-name", name }))
 }
 
 export function xpcMachService(input: string): Result<MachService, MachServiceNameError> {
 	if (!isMachServiceName(input)) return invalidMachServiceName(input)
+	// SAFETY: isMachServiceName accepted a nonempty string containing only the allowed XPC-name characters.
 	const name = input as XpcServiceName
+
 	return ok(Object.freeze({ kind: "xpc-service-name", name }))
 }
 
@@ -230,11 +253,13 @@ export function allowNetworkPath(path: SeatbeltPath): Rule {
 
 export function allowPosixSharedMemoryRead(input: string): Result<Rule, PosixIpcNameError> {
 	if (!isMachServiceName(input)) return err({ kind: "invalid-posix-ipc-name", input })
+
 	return ok(
 		freezeRule({
 			kind: "posix-ipc",
 			effect: "allow",
 			operation: "ipc-posix-shm-read-data",
+			// SAFETY: isMachServiceName rejected empty names and characters outside the supported POSIX IPC name subset.
 			name: input as PosixIpcName,
 		}),
 	)
@@ -246,13 +271,14 @@ export function fileRule(input: {
 	readonly matchers: NonEmptyReadonlyArray<PathMatcher>
 	readonly process?: CanonicalExecutable
 }): Rule {
-	return freezeRule({
+	const rule: FileRule = {
 		kind: "file",
 		effect: input.effect,
 		operations: freezeTuple(input.operations),
 		matchers: freezeTuple(input.matchers),
-		...(input.process === undefined ? {} : { process: input.process }),
-	})
+	}
+
+	return freezeRule(input.process === undefined ? rule : { ...rule, process: input.process })
 }
 
 export function fileRuleExceptProcess(input: {
@@ -284,12 +310,13 @@ export function machLookupRule(input: {
 	readonly services: NonEmptyReadonlyArray<MachService>
 	readonly process?: CanonicalExecutable
 }): Rule {
-	return freezeRule({
+	const rule: MachLookupRule = {
 		kind: "mach-lookup",
 		effect: input.effect,
 		services: freezeTuple(input.services),
-		...(input.process === undefined ? {} : { process: input.process }),
-	})
+	}
+
+	return freezeRule(input.process === undefined ? rule : { ...rule, process: input.process })
 }
 
 export function unixConnectRule(input: {
@@ -318,6 +345,7 @@ export function allowFileExtensionIssues(input: {
 			matchers: freezeTuple(grant.matchers),
 		}),
 	)
+
 	return freezeRule({
 		kind: "file-extension-issue",
 		effect: "allow",
@@ -359,11 +387,13 @@ export function allowWebKitBrokerExtension(extension: WebKitBrokerExtension, pro
 export function emitSbpl(rules: readonly Rule[]): CompiledSbpl {
 	const parameters = new ParameterEmitter()
 	const source = rules.map((rule) => emitRule(rule, parameters)).join("\n")
+
 	return Object.freeze({ source, parameters: Object.freeze(parameters.definitions()) })
 }
 
 export function emitSbplProfile(rules: readonly Rule[]): CompiledSbpl {
 	const compiled = emitSbpl(rules)
+
 	return Object.freeze({
 		source: `(version 1)\n(deny default)\n${compiled.source}\n`,
 		parameters: compiled.parameters,
@@ -378,25 +408,30 @@ function unixSocketRule(
 		readonly process?: CanonicalExecutable
 	},
 ): Rule {
-	return freezeRule({
+	const rule: UnixSocketRule = {
 		kind,
 		effect: input.effect,
 		matchers: freezeTuple(input.matchers),
-		...(input.process === undefined ? {} : { process: input.process }),
-	})
+	}
+
+	return freezeRule(input.process === undefined ? rule : { ...rule, process: input.process })
 }
 
 function emitRule(rule: RuleNode, parameters: ParameterEmitter): string {
 	if (rule.kind === "file-except-processes") {
 		const processFilters = rule.processes.map((process) => `(process-path ${parameters.reference(process)})`)
+
 		const excluded =
 			processFilters.length === 1
 				? `(require-not ${processFilters[0]})`
 				: `(require-not (require-any ${processFilters.join(" ")}))`
+
 		return [`(with-filter ${excluded}`, indent(emitFileRule({ ...rule, kind: "file" }, parameters)), ")"].join("\n")
 	}
+
 	if (!("process" in rule) || rule.process === undefined) return emitUnscopedRule(rule, parameters)
 	const filter = `(process-path ${parameters.reference(rule.process)})`
+
 	return [`(with-filter ${filter}`, indent(emitUnscopedRule(rule, parameters)), ")"].join("\n")
 }
 
@@ -434,12 +469,14 @@ function emitUnscopedRule(rule: RuleNode, parameters: ParameterEmitter): string 
 function emitFileRule(rule: FileRule, parameters: ParameterEmitter): string {
 	const head = `(${rule.effect} ${rule.operations.join(" ")}`
 	const filters = rule.matchers.map((matcher) => emitPathMatcher(matcher, parameters))
+
 	return [head, ...filters.map(indent), ")"].join("\n")
 }
 
 function emitMachLookupRule(rule: MachLookupRule, parameters: ParameterEmitter): string {
 	const globalNames: string[] = []
 	const xpcNames: string[] = []
+
 	for (const service of rule.services) {
 		switch (service.kind) {
 			case "global-name":
@@ -454,8 +491,11 @@ function emitMachLookupRule(rule: MachLookupRule, parameters: ParameterEmitter):
 	}
 
 	const filters: string[] = []
+
 	if (globalNames.length > 0) filters.push(`(global-name ${globalNames.join(" ")})`)
+
 	if (xpcNames.length > 0) filters.push(`(xpc-service-name ${xpcNames.join(" ")})`)
+
 	return [`(${rule.effect} mach-lookup`, ...filters.map(indent), ")"].join("\n")
 }
 
@@ -468,12 +508,14 @@ function emitUnixSocketRule(
 	const filters = rule.matchers.map(
 		(matcher) => `(${endpoint} unix-socket ${emitUnixSocketMatcher(matcher, parameters)})`,
 	)
+
 	return [`(${rule.effect} ${operation}`, ...filters.map(indent), ")"].join("\n")
 }
 
 function emitFileExtensionIssueRule(rule: FileExtensionIssueRule, parameters: ParameterEmitter): string {
 	const grants = rule.grants.flatMap((grant) => {
 		const matchers = grant.matchers.map((matcher) => emitPathMatcher(matcher, parameters))
+
 		return [
 			"  (require-all",
 			`    (extension-class \"${grant.extensionClass}\")`,
@@ -483,11 +525,13 @@ function emitFileExtensionIssueRule(rule: FileExtensionIssueRule, parameters: Pa
 			"  )",
 		]
 	})
+
 	return [`(${rule.effect} file-issue-extension`, ...grants, ")"].join("\n")
 }
 
 function emitBrokerExtensionIssueRule(rule: BrokerExtensionIssueRule): string {
 	const [operation, extensionClass] = webKitBrokerExtension(rule.extension)
+
 	return `(allow ${operation} (extension-class \"${extensionClass}\"))`
 }
 
@@ -528,11 +572,13 @@ class ParameterEmitter {
 
 	reference(value: string): string {
 		const existing = this.#namesByValue.get(value)
+
 		if (existing !== undefined) return `(param \"${existing}\")`
 
 		const name = `PI_SAFETY_${this.#parameters.length}`
 		this.#namesByValue.set(value, name)
 		this.#parameters.push(Object.freeze({ name, value }))
+
 		return `(param \"${name}\")`
 	}
 
@@ -542,12 +588,15 @@ class ParameterEmitter {
 }
 
 function freezeRule(rule: RuleNode): Rule {
+	// SAFETY: RuleNode restricts operations and payloads to validated matchers, service names, and executable paths; freezing seals the node.
 	return Object.freeze(rule) as Rule
 }
 
 function freezeTuple<T>(items: readonly T[]): NonEmptyReadonlyArray<T> {
 	if (items.length === 0) throw new TypeError("expected a non-empty tuple")
-	return Object.freeze([...items]) as unknown as NonEmptyReadonlyArray<T>
+	const [first, ...rest] = items
+
+	return Object.freeze([first, ...rest] as const)
 }
 
 function isMachServiceName(input: string): boolean {

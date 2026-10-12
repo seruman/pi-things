@@ -16,20 +16,26 @@ test("linked worktrees protect shared Git config and hooks and per-worktree conf
 		const main = path.join(root, "main")
 		const workspace = path.join(root, "worktree")
 		fs.mkdirSync(main)
+
 		const git = (cwd: string, ...args: string[]) =>
 			execFileSync("/usr/bin/git", ["-C", cwd, ...args], { encoding: "utf8" }).trim()
+
 		git(main, "init", "-q")
 		git(main, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-qm", "init")
 		git(main, "worktree", "add", "--detach", workspace)
+
 		try {
 			assert.equal(fs.statSync(path.join(workspace, ".git")).isFile(), true)
+
 			const paths = {
 				workspace: canonicalPath(workspace),
 				home: canonicalPath(path.join(root, "home")),
 				stateHome: canonicalPath(path.join(root, "state")),
 				piConfigDirectory: canonicalPath(path.join(root, "agent")),
 			}
+
 			const gitExecutable = canonicalExecutable("/usr/bin/git")
+
 			for (const sandbox of [
 				{ kind: "disabled" } as const,
 				{
@@ -45,6 +51,7 @@ test("linked worktrees protect shared Git config and hooks and per-worktree conf
 				},
 			]) {
 				const policy = unwrap(createDefaultPolicy({ paths, additionalNoAccessPatterns: [], sandbox }))
+
 				for (const name of ["hooks", "config", "config.worktree"]) {
 					const target = canonicalPath(git(workspace, "rev-parse", "--path-format=absolute", "--git-path", name))
 					assert.equal(
@@ -76,6 +83,7 @@ test("linked worktrees protect shared Git config and hooks and per-worktree conf
 								rule.selector.path === target,
 						),
 					)
+
 					if (sandbox.kind === "enabled") {
 						assert.equal(
 							evaluatePolicy(policy, {
@@ -102,7 +110,9 @@ test("a final shared denial constrains sandbox runtime capabilities", () => {
 		const stateHome = path.join(root, "state")
 		const piConfigDirectory = path.join(root, "pi-agent")
 		const privateTemp = path.join(root, "tmp")
+
 		for (const directory of [workspace, home, stateHome, piConfigDirectory, privateTemp]) fs.mkdirSync(directory)
+
 		const policy = unwrap(
 			createDefaultPolicy({
 				paths: {
@@ -125,6 +135,7 @@ test("a final shared denial constrains sandbox runtime capabilities", () => {
 				},
 			}),
 		)
+
 		const nullDevice = canonicalPath("/dev/null")
 		assert.equal(
 			evaluatePolicy(policy, {
@@ -149,11 +160,14 @@ test("Nix daemon access is scoped to the canonical Nix executable", () => {
 		const piConfigDirectory = path.join(root, "pi-agent")
 		const privateTemp = path.join(root, "tmp")
 		const cacheDirectory = path.join(home, ".cache", "nix")
+
 		for (const directory of [workspace, home, stateHome, piConfigDirectory, privateTemp, cacheDirectory]) {
 			fs.mkdirSync(directory, { recursive: true })
 		}
+
 		const nixExecutable = canonicalExecutable(process.execPath)
 		const daemonSocket = canonicalPath(path.join(root, "nix-daemon.sock"))
+
 		const policy = unwrap(
 			createDefaultPolicy({
 				paths: {
@@ -181,13 +195,16 @@ test("Nix daemon access is scoped to the canonical Nix executable", () => {
 				},
 			}),
 		)
+
 		const daemonRule = policy.rules.find(
 			(rule) =>
 				rule.kind === "unix-connect" &&
 				rule.effect === "allow" &&
 				rule.matchers.some((matcher) => matcher.kind === "path" && matcher.path === daemonSocket),
 		)
+
 		assert.equal(daemonRule?.kind, "unix-connect")
+
 		if (daemonRule?.kind === "unix-connect") assert.equal(daemonRule.process, nixExecutable)
 	})
 })
@@ -199,8 +216,10 @@ test("every default access and snapshot declaration has an observable policy dec
 		const stateHome = path.join(root, "state")
 		const piConfigDirectory = path.join(root, "pi-agent")
 		const privateTemp = path.join(root, "tmp")
+
 		for (const directory of [workspace, home, stateHome, piConfigDirectory, privateTemp]) fs.mkdirSync(directory)
 		const git = canonicalExecutable("/usr/bin/git")
+
 		const policy = unwrap(
 			createDefaultPolicy({
 				paths: {
@@ -223,6 +242,7 @@ test("every default access and snapshot declaration has an observable policy dec
 				},
 			}),
 		)
+
 		const access = (pathname: string, operation: "read" | "write", subject: EvaluationSubject = { kind: "builtin" }) =>
 			evaluatePolicy(policy, {
 				kind: "file-access",
@@ -238,6 +258,7 @@ test("every default access and snapshot declaration has an observable policy dec
 		assert.equal(access(path.join(privateTemp, "sandbox-file"), "write", { kind: "sandbox" }), "allow")
 		assert.equal(access("/private/tmp/pi-safety-file", "write"), "allow")
 		assert.equal(access("/private/tmp/pi-safety-file", "write", { kind: "sandbox" }), "allow")
+
 		for (const writableToolPath of [
 			path.join(home, ".cache", "zig", "zls"),
 			path.join(home, "Library", "Caches", "go-build", "entry"),
@@ -267,11 +288,13 @@ test("every default access and snapshot declaration has an observable policy dec
 			[".vscode", "tasks.json"],
 			[".vscode", "mcp.json"],
 		] as const
+
 		for (const components of projectConfiguration) {
 			const pathname = path.join(workspace, ...components)
 			assert.equal(access(pathname, "read"), "allow", pathname)
 			assert.equal(access(pathname, "write"), "deny", pathname)
 		}
+
 		for (const components of [
 			[".git", "hooks", "post-commit"],
 			[".git", "config"],
@@ -299,6 +322,7 @@ test("every default access and snapshot declaration has an observable policy dec
 		}
 
 		const sshDirectory = path.join(home, ".ssh")
+
 		for (const components of [
 			["id_ed25519.pub"],
 			["team", "deploy.pub"],
@@ -314,6 +338,7 @@ test("every default access and snapshot declaration has an observable policy dec
 			assert.equal(access(pathname, "read"), "allow", pathname)
 			assert.equal(access(pathname, "write"), "deny", pathname)
 		}
+
 		for (const pathname of [
 			path.join(sshDirectory, "id_ed25519"),
 			path.join(home, ".env"),
@@ -335,6 +360,7 @@ test("every default access and snapshot declaration has an observable policy dec
 		}
 
 		const snapshotOnlyPolicy = unwrap(createSnapshotPolicy(canonicalPath(workspace)))
+
 		const excludedComponents = [
 			".git",
 			".pi",
@@ -349,6 +375,7 @@ test("every default access and snapshot declaration has an observable policy dec
 			"__pycache__",
 			".pytest_cache",
 		] as const
+
 		for (const component of excludedComponents) {
 			for (const candidate of [path.join(workspace, component), path.join(workspace, "nested", component, "file")]) {
 				assert.equal(
@@ -361,6 +388,7 @@ test("every default access and snapshot declaration has an observable policy dec
 				)
 			}
 		}
+
 		for (const candidate of [path.join(workspace, "src", "index.ts"), path.join(workspace, ".env")]) {
 			assert.equal(evaluatePolicy(policy, { kind: "snapshot", path: canonicalPath(candidate) }).disposition, "include")
 		}
@@ -375,9 +403,11 @@ test("the default policy expresses shared restrictions and sandbox capabilities 
 		const piConfigDirectory = path.join(root, "pi-agent")
 		const privateTemp = path.join(root, "tmp")
 		const sshDirectory = path.join(home, ".ssh")
+
 		for (const directory of [workspace, home, stateHome, piConfigDirectory, privateTemp, sshDirectory]) {
 			fs.mkdirSync(directory, { recursive: true })
 		}
+
 		const readableSshFiles = [
 			path.join(sshDirectory, "id_ed25519.pub"),
 			path.join(sshDirectory, "nested", "deploy.pub"),
@@ -388,12 +418,16 @@ test("the default policy expresses shared restrictions and sandbox capabilities 
 			path.join(sshDirectory, "allowed_signers"),
 			path.join(sshDirectory, "authorized_keys"),
 		]
+
 		const privateKey = canonicalPath(path.join(sshDirectory, "id_ed25519"))
+
 		for (const file of readableSshFiles) {
 			fs.mkdirSync(path.dirname(file), { recursive: true })
 			fs.writeFileSync(file, "public metadata")
 		}
+
 		fs.writeFileSync(privateKey, "private material")
+
 		const policy = unwrap(
 			createDefaultPolicy({
 				paths: {
@@ -435,6 +469,7 @@ test("the default policy expresses shared restrictions and sandbox capabilities 
 			}).effect,
 			"allow",
 		)
+
 		for (const subject of [{ kind: "builtin" }, { kind: "sandbox" }] as const) {
 			for (const readable of readableSshFiles) {
 				assert.equal(
@@ -448,6 +483,7 @@ test("the default policy expresses shared restrictions and sandbox capabilities 
 					readable,
 				)
 			}
+
 			assert.equal(
 				evaluatePolicy(policy, { kind: "file-access", operation: "read", subject, path: privateKey }).effect,
 				"deny",
@@ -455,11 +491,13 @@ test("the default policy expresses shared restrictions and sandbox capabilities 
 		}
 
 		const profile = emitSeatbelt(policy)
+
 		for (const readable of readableSshFiles) {
 			const publicRead = runWithSeatbeltProfile(profile, "/bin/cat", [readable], workspace)
 			assert.equal(publicRead.status, 0, `${readable}: ${publicRead.stderr}`)
 			assert.equal(publicRead.stdout, "public metadata")
 		}
+
 		assertDenied(runWithSeatbeltProfile(profile, "/bin/cat", [privateKey], workspace))
 	})
 })

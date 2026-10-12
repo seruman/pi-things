@@ -17,6 +17,7 @@ import {
 import { type LoadedSnapshot, type SnapshotHistoryError, verifySnapshotEntries } from "./snapshot-history"
 
 const restorePlanBrand: unique symbol = Symbol("RestorePlan")
+
 const selectedRestoreScopeBrand: unique symbol = Symbol("SelectedRestoreScope")
 
 export type RestoreScope =
@@ -59,19 +60,28 @@ export function selectedRestoreScope(inputs: readonly string[]): Result<RestoreS
 		return err({ kind: "invalid-selection", input: "", message: "at least one path is required" })
 	const paths: RelativeSnapshotPath[] = []
 	const seen = new Set<string>()
+
 	for (const input of inputs) {
 		const parsed = parseRelativeSnapshotPath(input)
+
 		if (!parsed.ok) return err({ kind: "invalid-selection", input, message: JSON.stringify(parsed.error) })
+
 		if (!seen.has(parsed.value)) {
 			seen.add(parsed.value)
 			paths.push(parsed.value)
 		}
 	}
-	if (paths.length === 0) return err({ kind: "invalid-selection", input: "", message: "at least one path is required" })
+
+	const [first, ...rest] = paths
+
+	if (first === undefined)
+		return err({ kind: "invalid-selection", input: "", message: "at least one path is required" })
+
 	return ok(
+		// SAFETY: every path was parsed and deduplicated, and first proves the frozen selection is nonempty.
 		Object.freeze({
 			kind: "selected",
-			paths: Object.freeze(paths) as readonly [RelativeSnapshotPath, ...RelativeSnapshotPath[]],
+			paths: Object.freeze([first, ...rest] as const),
 		}) as RestoreScope,
 	)
 }
@@ -85,12 +95,16 @@ export function planRestore(
 		const excluded = scope.paths.find((candidate) =>
 			isExcludedSnapshotPath(store.policy, store.workspaceRoot, candidate),
 		)
+
 		if (excluded !== undefined) return err({ kind: "excluded-selection", path: excluded })
 	}
+
 	const targetEntries = snapshot.manifest.entries.filter((entry) => entry.kind !== "excluded")
 	const affectedTarget = targetEntries.filter((entry) => isTargetAffected(entry, scope))
 	const verified = verifySnapshotEntries(snapshot, affectedTarget)
+
 	if (!verified.ok) return err({ kind: "snapshot-verification", cause: verified.error })
+
 	const live =
 		scope.kind === "all"
 			? planSnapshot({ workspaceRoot: store.workspaceRoot, policy: store.policy })
@@ -99,8 +113,10 @@ export function planRestore(
 					policy: store.policy,
 					paths: scope.paths,
 				})
+
 	if (!live.ok) return err({ kind: "live-tree", cause: live.error })
 	const unsupported = "nonComparable" in live.value ? live.value.nonComparable[0] : undefined
+
 	if (unsupported !== undefined) {
 		return err({
 			kind: "live-tree",
@@ -113,26 +129,34 @@ export function planRestore(
 	}
 
 	const liveEntries = live.value.entries.filter((entry) => entry.kind !== "excluded")
+
 	const liveExcluded = live.value.entries.filter(
 		(entry): entry is Extract<SnapshotPlanEntry, { kind: "excluded" }> => entry.kind === "excluded",
 	)
+
 	const targetByPath = new Map(targetEntries.map((entry) => [entry.path, entry]))
 	const affectedLive = liveEntries.filter((entry) => isPathAffected(entry.path, scope))
 
 	const deletionCandidates: RelativeSnapshotPath[] = []
+
 	for (const entry of affectedLive) {
 		const target = targetByPath.get(entry.path)
+
 		if (!target || target.kind !== entry.kind || target.kind === "file" || target.kind === "symlink") {
 			const excluded = liveExcluded.find((candidate) => isSameOrDescendant(candidate.path, entry.path))
+
 			if (excluded) {
 				if (target && target.kind !== "directory") {
 					return err({ kind: "excluded-conflict", path: entry.path, excluded: excluded.path })
 				}
+
 				continue
 			}
+
 			deletionCandidates.push(entry.path)
 		}
 	}
+
 	const deletions = deletionCandidates
 		.filter(
 			(candidate) => !deletionCandidates.some((other) => other !== candidate && isSameOrDescendant(candidate, other)),
@@ -141,6 +165,7 @@ export function planRestore(
 		.map((relativePath): RestoreAction => ({ kind: "delete", path: relativePath }))
 
 	const creations: RestoreAction[] = []
+
 	for (const entry of affectedTarget) {
 		if (entry.kind === "directory") {
 			creations.push({ kind: "directory", entry })
@@ -149,11 +174,14 @@ export function planRestore(
 		} else if (entry.kind === "file") {
 			const sourcePath = storedSnapshotPath(snapshot.directory, entry)
 			const source = parseCanonicalPath(sourcePath)
+
 			if (!source.ok) return err({ kind: "source-path", path: sourcePath, message: JSON.stringify(source.error) })
 			creations.push({ kind: "file", entry, source: source.value })
 		}
 	}
+
 	return ok(
+		// SAFETY: stored entries were verified, the live tree was observed, and exclusion conflicts rejected before building actions.
 		Object.freeze({
 			workspaceRoot: store.workspaceRoot,
 			snapshot,
@@ -167,6 +195,7 @@ export function describeRestorePlan(plan: RestorePlan): string {
 	return plan.actions
 		.map((action) => {
 			const relativePath = action.kind === "delete" ? action.path : action.entry.path
+
 			return `${action.kind}\t${relativePath}`
 		})
 		.join("\n")
@@ -174,8 +203,10 @@ export function describeRestorePlan(plan: RestorePlan): string {
 
 export function executeRestore(plan: RestorePlan): Result<undefined, RestoreError> {
 	const directories: Array<Extract<RestoreAction, { kind: "directory" }>> = []
+
 	for (const action of plan.actions) {
 		const destination = path.join(plan.workspaceRoot, action.kind === "delete" ? action.path : action.entry.path)
+
 		try {
 			switch (action.kind) {
 				case "delete":
@@ -192,6 +223,7 @@ export function executeRestore(plan: RestorePlan): Result<undefined, RestoreErro
 				case "file": {
 					fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 })
 					const temporary = `${destination}.pi-safety-restore-${randomBytes(8).toString("hex")}`
+
 					try {
 						fs.copyFileSync(action.source, temporary, fs.constants.COPYFILE_FICLONE_FORCE)
 						fs.chmodSync(temporary, action.entry.mode)
@@ -200,6 +232,7 @@ export function executeRestore(plan: RestorePlan): Result<undefined, RestoreErro
 					} finally {
 						fs.rmSync(temporary, { force: true })
 					}
+
 					break
 				}
 			}
@@ -212,8 +245,10 @@ export function executeRestore(plan: RestorePlan): Result<undefined, RestoreErro
 			})
 		}
 	}
+
 	for (const action of directories.reverse()) {
 		const destination = path.join(plan.workspaceRoot, action.entry.path)
+
 		try {
 			fs.chmodSync(destination, action.entry.mode)
 			fs.utimesSync(destination, action.entry.mtimeMs / 1000, action.entry.mtimeMs / 1000)
@@ -226,11 +261,13 @@ export function executeRestore(plan: RestorePlan): Result<undefined, RestoreErro
 			})
 		}
 	}
+
 	return ok(undefined)
 }
 
 function isTargetAffected(entry: SnapshotPlanEntry, scope: RestoreScope): boolean {
 	if (scope.kind === "all") return true
+
 	return (
 		isPathAffected(entry.path, scope) ||
 		(entry.kind === "directory" && scope.paths.some((selected) => isSameOrDescendant(selected, entry.path)))

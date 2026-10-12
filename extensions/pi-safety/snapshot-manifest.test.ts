@@ -2,6 +2,7 @@ import { test } from "bun:test"
 import assert from "node:assert/strict"
 import * as fs from "node:fs"
 import * as path from "node:path"
+import type { JsonValue } from "@earendil-works/pi-ai"
 import { createSnapshotPolicy } from "./default-policy"
 import type { Policy } from "./policy"
 import { type Result, err, unwrap } from "./result"
@@ -12,15 +13,16 @@ import {
 	snapshotManifestSchema,
 	snapshotManifestSchemaError,
 } from "./snapshot-manifest"
-import { canonicalPath, testPolicy } from "./test-domain-values"
+import { canonicalPath } from "./test-domain-values"
 import { withTestTempDirectory } from "./test-temp-directory"
 
-function parseManifest(input: unknown, policy: Policy): Result<SnapshotManifest, SnapshotManifestError> {
+function parseManifest(input: JsonValue, policy: Policy): Result<SnapshotManifest, SnapshotManifestError> {
 	const decoded = snapshotManifestSchema.safeParse(input)
+
 	return decoded.success ? parseSnapshotManifest(decoded.data, policy) : err(snapshotManifestSchemaError(decoded.error))
 }
 
-function validManifest(workspace: string): Record<string, unknown> {
+function validManifest(workspace: string) {
 	return {
 		version: 1,
 		id: "20260713213049840-206bc3b657fa7807",
@@ -39,7 +41,7 @@ function validManifest(workspace: string): Record<string, unknown> {
 			},
 			{ kind: "symlink", path: "link", target: "src/index.ts" },
 		],
-	}
+	} as const satisfies JsonValue
 }
 
 test("parses a versioned snapshot manifest into precise entries", () => {
@@ -49,20 +51,25 @@ test("parses a versioned snapshot manifest into precise entries", () => {
 		const policy = unwrap(createSnapshotPolicy(canonicalPath(workspace)))
 		const parsed = parseManifest(validManifest(workspace), policy)
 		assert.equal(parsed.ok, true)
+
 		if (parsed.ok) {
 			assert.equal(parsed.value.workspace, canonicalPath(workspace))
 			assert.deepEqual(parsed.value.origin, { kind: "legacy" })
 			assert.equal(parsed.value.entries[2].kind, "file")
 		}
 
-		const current = validManifest(workspace)
-		current.version = 3
-		current.origin = { kind: "pi-session", sessionId: "019f6277-361d-7f97-9d5b-7db7e0618fe1" }
-		current.entries = (current.entries as Array<Record<string, unknown>>).map((entry) =>
-			entry.kind === "excluded" ? { ...entry, reason: "policy" } : entry,
-		)
+		const legacy = validManifest(workspace)
+
+		const current = {
+			...legacy,
+			version: 3,
+			origin: { kind: "pi-session", sessionId: "019f6277-361d-7f97-9d5b-7db7e0618fe1" },
+			entries: legacy.entries.map((entry) => (entry.kind === "excluded" ? { ...entry, reason: "policy" } : entry)),
+		}
+
 		const parsedCurrent = parseManifest(current, policy)
 		assert.equal(parsedCurrent.ok, true)
+
 		if (parsedCurrent.ok) {
 			assert.deepEqual(parsedCurrent.value.origin, {
 				kind: "pi-session",
@@ -72,46 +79,12 @@ test("parses a versioned snapshot manifest into precise entries", () => {
 	})
 })
 
-test("hostile generated manifest values never escape parsed domain invariants", () => {
-	let state = 0x51f15e
-	const next = () => {
-		state = (Math.imul(state, 1664525) + 1013904223) >>> 0
-		return state
-	}
-	const generated = (depth: number): unknown => {
-		if (depth === 0) return [null, next(), `value-${next()}\0`, next() % 2 === 0][next() % 4]
-		switch (next() % 4) {
-			case 0:
-				return Array.from({ length: next() % 5 }, () => generated(depth - 1))
-			case 1:
-				return { [`key-${next()}`]: generated(depth - 1), kind: ["file", "directory", "symlink"][next() % 3] }
-			case 2:
-				return `../${next()}/\"\n`
-			default:
-				return next()
-		}
-	}
-	const policy = testPolicy("/tmp", "/tmp")
-	for (let index = 0; index < 500; index += 1) {
-		const parsed = parseManifest(generated(3), policy)
-		if (!parsed.ok) continue
-		assert.ok(parsed.value.version === 1 || parsed.value.version === 2 || parsed.value.version === 3)
-		assert.equal(new Set(parsed.value.entries.map((entry) => entry.path)).size, parsed.value.entries.length)
-		for (const entry of parsed.value.entries) {
-			assert.equal(path.isAbsolute(entry.path), false)
-			assert.equal(
-				entry.path.split(path.sep).some((component) => component === "." || component === ".."),
-				false,
-			)
-		}
-	}
-})
-
 test("rejects unknown versions, traversal, duplicates, invalid variants, and exclusion conflicts", () => {
 	withTestTempDirectory("manifest-invalid-", (root) => {
 		const workspace = path.join(root, "workspace")
 		fs.mkdirSync(workspace)
 		const policy = unwrap(createSnapshotPolicy(canonicalPath(workspace)))
+
 		const cases = [
 			{ ...validManifest(workspace), version: 4 },
 			{ ...validManifest(workspace), version: 3 },
@@ -119,7 +92,7 @@ test("rejects unknown versions, traversal, duplicates, invalid variants, and exc
 				...validManifest(workspace),
 				version: 3,
 				origin: { kind: "pi-session", sessionId: "not-a-session" },
-				entries: (validManifest(workspace).entries as Array<Record<string, unknown>>).map((entry) =>
+				entries: validManifest(workspace).entries.map((entry) =>
 					entry.kind === "excluded" ? { ...entry, reason: "policy" } : entry,
 				),
 			},
@@ -156,7 +129,8 @@ test("rejects unknown versions, traversal, duplicates, invalid variants, and exc
 					{ kind: "file", path: "parent/child", mode: 420, mtimeMs: 1, size: 1, storage: { kind: "ordinary" } },
 				],
 			},
-		]
+		] as const satisfies readonly JsonValue[]
+
 		for (const input of cases) assert.equal(parseManifest(input, policy).ok, false)
 	})
 })

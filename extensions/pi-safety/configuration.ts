@@ -25,9 +25,12 @@ export function loadProjectSafetyConfiguration(
 	cwd: string,
 ): Result<ProjectSafetyConfiguration, SafetyConfigurationError> {
 	const configurationPath = path.join(cwd, ".pi", "pi-safety.json")
+
 	if (!fs.existsSync(configurationPath)) return ok({ additionalNoAccessPatterns: [] })
 	const configuration = readJsonFile(configurationPath, projectSafetyConfigurationSchema)
+
 	if (!configuration.ok) return invalid(configurationPath, configuration.error.message)
+
 	return ok(
 		Object.freeze({
 			additionalNoAccessPatterns: Object.freeze(configuration.value.protectedPaths),

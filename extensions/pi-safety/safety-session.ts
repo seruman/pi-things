@@ -1,4 +1,5 @@
 import * as path from "node:path"
+import type { ToolCallEvent } from "@earendil-works/pi-coding-agent"
 import { type CanonicalPath, parseCanonicalPath } from "./canonical-path"
 import { type CheckpointError, CheckpointRun, type CheckpointStatus } from "./checkpoint"
 import { type DefaultPolicyError, createDefaultPolicy } from "./default-policy"
@@ -48,6 +49,7 @@ export type SafetySessionError =
 	| { readonly kind: "snapshot-store"; readonly cause: SnapshotError }
 
 export type SafetyDecision = { readonly kind: "allow" } | { readonly kind: "block"; readonly reason: string }
+
 export type CheckpointDecision = { readonly kind: "allow" } | { readonly kind: "warning"; readonly reason: string }
 
 export type SafetySessionCheckpointStatus = CheckpointStatus | { readonly kind: "run-not-started" }
@@ -69,7 +71,7 @@ export interface SafetySession {
 		access: SessionPathAccess,
 	): Result<SessionPathGrant, SessionPathError | DefaultPolicyError>
 	removeSessionPath(path: string): Result<boolean, SessionPathError | DefaultPolicyError>
-	guard(toolName: string, input: unknown): SafetyDecision
+	guard(toolName: string, input: ToolCallEvent["input"]): SafetyDecision
 	checkpoint(toolName: string): Promise<CheckpointDecision>
 }
 
@@ -101,7 +103,9 @@ class ManagedSafetySession implements SafetySession {
 		if (this.#checkpointRun?.status().kind === "creating") {
 			return err({ kind: "checkpoint-creation-in-progress" })
 		}
+
 		this.#checkpointRun = new CheckpointRun(async () => createSnapshot(this.snapshotStore, { origin }))
+
 		return ok(undefined)
 	}
 
@@ -145,17 +149,21 @@ class ManagedSafetySession implements SafetySession {
 			home: this.#policyInput.paths.home,
 			allowTilde: true,
 		})
+
 		if (!parsed.ok) return parsed
 		const next = [...this.#sessionPaths.filter((grant) => grant.path !== parsed.value.path), parsed.value]
 		const updated = createDefaultPolicy({ ...this.#policyInput, sessionPaths: next })
+
 		if (!updated.ok) return updated
 		this.#sessionPaths = Object.freeze(next)
 		this.#policy = updated.value
+
 		return parsed
 	}
 
 	removeSessionPath(pathname: string): Result<boolean, SessionPathError | DefaultPolicyError> {
 		const existing = this.#sessionPaths.find((grant) => grant.path === pathname)
+
 		const parsed = existing
 			? ok(existing)
 			: parseSessionPathGrant({
@@ -164,18 +172,23 @@ class ManagedSafetySession implements SafetySession {
 					home: this.#policyInput.paths.home,
 					allowTilde: true,
 				})
+
 		if (!parsed.ok) return parsed
 		const next = this.#sessionPaths.filter((grant) => grant.path !== parsed.value.path)
+
 		if (next.length === this.#sessionPaths.length) return ok(false)
 		const updated = createDefaultPolicy({ ...this.#policyInput, sessionPaths: next })
+
 		if (!updated.ok) return updated
 		this.#sessionPaths = Object.freeze(next)
 		this.#policy = updated.value
+
 		return ok(true)
 	}
 
-	guard(toolName: string, input: unknown): SafetyDecision {
+	guard(toolName: string, input: ToolCallEvent["input"]): SafetyDecision {
 		const authorization = authorizeBuiltinToolCall(toolName, input, this.#policy)
+
 		return authorization.ok
 			? { kind: "allow" }
 			: { kind: "block", reason: formatAuthorizationError(authorization.error) }
@@ -183,51 +196,67 @@ class ManagedSafetySession implements SafetySession {
 
 	async checkpoint(toolName: string): Promise<CheckpointDecision> {
 		if (toolName !== "bash" && toolName !== "write" && toolName !== "edit") return { kind: "allow" }
+
 		if (!this.#checkpointRun) {
 			return {
 				kind: "warning",
 				reason: "pi-safety: checkpoint run has not started; continuing without rollback protection",
 			}
 		}
+
 		const checkpoint = await this.#checkpointRun.ensureCheckpoint()
+
 		if (!checkpoint.ok) {
 			return {
 				kind: "warning",
 				reason: `pi-safety: checkpoint failed (${formatCheckpointError(checkpoint.error)}); continuing without rollback protection`,
 			}
 		}
+
 		return { kind: "allow" }
 	}
 }
 
 export function createSafetySession(raw: RawSafetySessionConfiguration): Result<SafetySession, SafetySessionError> {
 	const configuration = parseInitialSafetyConfiguration(raw)
+
 	if (!configuration.ok) return err({ kind: "policy-configuration", cause: configuration.error })
 	const privateTemp = parseCanonicalPath(raw.privateTemp)
+
 	if (!privateTemp.ok) return err({ kind: "private-temp", message: JSON.stringify(privateTemp.error) })
 	const goPaths = parseGoPaths(raw.gopath, configuration.value.paths.home)
+
 	if (!goPaths.ok) return goPaths
 	const sessionPaths = parseSessionPathsEnvironment(raw.sessionPathsEnvironment, configuration.value.paths.home)
+
 	if (!sessionPaths.ok) return err({ kind: "session-path", cause: sessionPaths.error })
+
 	const integrations = parseBashIntegrations({
 		environment: raw.integrationEnvironment,
 		home: configuration.value.paths.home,
 	})
+
 	if (!integrations.ok) return err({ kind: "integration", cause: integrations.error })
 	const preparedIntegrations = prepareBashIntegrations(integrations.value)
+
 	if (!preparedIntegrations.ok) return err({ kind: "integration", cause: preparedIntegrations.error })
+
 	const policyInput = {
 		paths: configuration.value.paths,
 		additionalNoAccessPatterns: configuration.value.additionalNoAccessPatterns,
 		goPaths: goPaths.value,
 		sandbox: { kind: "enabled" as const, privateTemp: privateTemp.value, integrations: integrations.value },
 	}
+
 	const policy = createDefaultPolicy({ ...policyInput, sessionPaths: sessionPaths.value })
+
 	if (!policy.ok) return cleanupAfterFailure(integrations.value, { kind: "policy", cause: policy.error })
 	const snapshotStore = createConfiguredSnapshotStore(configuration.value, policy.value)
+
 	if (!snapshotStore.ok) {
 		return cleanupAfterFailure(integrations.value, { kind: "snapshot-store", cause: snapshotStore.error })
 	}
+
 	return ok(
 		new ManagedSafetySession(policy.value, integrations.value, snapshotStore.value, policyInput, sessionPaths.value),
 	)
@@ -239,11 +268,14 @@ function parseGoPaths(
 ): Result<readonly CanonicalPath[], SafetySessionError> {
 	const values = input === undefined || input.length === 0 ? [path.join(home, "go")] : input.split(path.delimiter)
 	const parsed: CanonicalPath[] = []
+
 	for (const value of values) {
 		const goPath = parseCanonicalPath(value)
+
 		if (!goPath.ok) return err({ kind: "go-path", path: value, message: JSON.stringify(goPath.error) })
 		parsed.push(goPath.value)
 	}
+
 	return ok(Object.freeze(parsed))
 }
 
@@ -252,6 +284,7 @@ function cleanupAfterFailure(
 	error: Extract<SafetySessionError, { readonly kind: "policy" | "snapshot-store" }>,
 ): Result<never, SafetySessionError> {
 	const cleaned = cleanupBashIntegrations(integrations)
+
 	return cleaned.ok ? err(error) : err({ kind: "integration", cause: cleaned.error })
 }
 

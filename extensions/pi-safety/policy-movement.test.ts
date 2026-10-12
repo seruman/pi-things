@@ -33,6 +33,7 @@ test("movement protection blocks protected paths and ancestors without blocking 
 		fs.writeFileSync(path.join(workspace, "nested", "api.key"), "secret")
 
 		const canonicalRoot = canonicalPath(root)
+
 		const policy = definePolicy({
 			workspaceRoot: canonicalPath(workspace),
 			homeRoot: canonicalPath(home),
@@ -45,6 +46,7 @@ test("movement protection blocks protected paths and ancestors without blocking 
 				allowRuntime(["process-exec", "sysctl-read"]),
 			],
 		})
+
 		const compiled = emitSeatbelt(policy)
 
 		assert.equal(
@@ -107,6 +109,7 @@ test("an executable exception overrides movement protection only for that execut
 		const canonicalRoot = canonicalPath(root)
 		const textFiles = pattern(pathPattern(path.join(root, "**", "*.txt"), canonicalRoot))
 		const perl = canonicalExecutable("/usr/bin/perl")
+
 		const policy = definePolicy({
 			workspaceRoot: canonicalRoot,
 			homeRoot: canonicalRoot,
@@ -118,6 +121,7 @@ test("an executable exception overrides movement protection only for that execut
 				allowRuntime(["process-exec", "sysctl-read"]),
 			],
 		})
+
 		const compiled = emitSeatbelt(policy)
 
 		assertDenied(runWithSeatbeltProfile(compiled, "/bin/mv", [first, second]))
@@ -137,6 +141,7 @@ test("an executable denial does not constrain other executables", () => {
 		fs.writeFileSync(first, "scoped")
 		const canonicalRoot = canonicalPath(root)
 		const textFiles = pattern(pathPattern(path.join(root, "**", "*.txt"), canonicalRoot))
+
 		const policy = definePolicy({
 			workspaceRoot: canonicalRoot,
 			homeRoot: canonicalRoot,
@@ -147,6 +152,7 @@ test("an executable denial does not constrain other executables", () => {
 				allowRuntime(["process-exec", "sysctl-read"]),
 			],
 		})
+
 		const compiled = emitSeatbelt(policy)
 
 		assertDenied(runWithSeatbeltProfile(compiled, "/bin/mv", [first, second]))

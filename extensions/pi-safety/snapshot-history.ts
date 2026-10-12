@@ -53,6 +53,7 @@ export function listSnapshots(
 ): Result<readonly SnapshotSummary[], SnapshotHistoryError> {
 	if (!fs.existsSync(store.projectDirectory)) return ok([])
 	let names: string[]
+
 	try {
 		names = fs
 			.readdirSync(store.projectDirectory, { withFileTypes: true })
@@ -63,11 +64,15 @@ export function listSnapshots(
 	} catch (cause) {
 		return ioError("list-snapshots", store.projectDirectory, cause)
 	}
+
 	const summaries: SnapshotSummary[] = []
+
 	for (const name of names) {
 		const id = parseSnapshotId(name)
+
 		if (!id.ok) continue
 		const loaded = loadSnapshot(store, id.value, access)
+
 		if (!loaded.ok) return loaded
 		summaries.push(
 			Object.freeze({
@@ -80,6 +85,7 @@ export function listSnapshots(
 			}),
 		)
 	}
+
 	return ok(Object.freeze(summaries))
 }
 
@@ -90,43 +96,57 @@ export function loadSnapshot(
 ): Result<LoadedSnapshot, SnapshotHistoryError> {
 	const directoryPath = path.join(store.projectDirectory, id)
 	const parsedDirectory = parseCanonicalPath(directoryPath)
+
 	if (!parsedDirectory.ok) return ioError("resolve-snapshot", directoryPath, JSON.stringify(parsedDirectory.error))
 	const directory = parsedDirectory.value
+
 	if (!isCanonicalPathWithin(store.projectDirectory, directory)) {
 		return ioError("resolve-snapshot", directoryPath, "snapshot resolves outside its project store")
 	}
+
 	const manifestPath = path.join(directory, "manifest.json")
 	const input = readJsonFile(manifestPath, snapshotManifestSchema)
+
 	if (!input.ok) {
 		return input.error.kind === "json-file-schema"
 			? err({ kind: "manifest", path: manifestPath, cause: snapshotManifestSchemaError(input.error.cause) })
 			: ioError("read-manifest", manifestPath, input.error.message)
 	}
+
 	const manifest = parseSnapshotManifest(input.value, store.policy)
+
 	if (!manifest.ok) return err({ kind: "manifest", path: manifestPath, cause: manifest.error })
+
 	if (manifest.value.id !== id) {
 		return err({ kind: "snapshot-id-mismatch", expected: id, actual: manifest.value.id })
 	}
+
 	if (manifest.value.workspace !== store.workspaceRoot) {
 		return err({ kind: "workspace-mismatch", expected: store.workspaceRoot, actual: manifest.value.workspace })
 	}
+
 	switch (access.kind) {
 		case "verify-policy":
 			for (const entry of manifest.value.entries) {
 				if (entry.kind !== "file") continue
 				const workspacePath = path.join(store.workspaceRoot, entry.path)
 				const canonical = appendCanonicalPath(store.workspaceRoot, entry.path.split(path.sep))
+
 				if (!canonical.ok) return ioError("classify-snapshot-entry", workspacePath, JSON.stringify(canonical.error))
+
 				if (classifySnapshotStorage(store.policy, canonical.value).kind !== entry.storage.kind) {
 					return err({ kind: "storage-classification-mismatch", path: entry.path })
 				}
 			}
+
 			break
 		case "immutable-store":
 			break
 		default:
 			return assertNever(access)
 	}
+
+	// SAFETY: directory is inside the store, manifest ID/workspace match, and the requested storage-classification checks passed.
 	return ok(Object.freeze({ directory, manifest: manifest.value }) as LoadedSnapshot)
 }
 
@@ -137,15 +157,20 @@ function reclaimableSnapshotBytes(snapshot: LoadedSnapshot): bigint | undefined 
 		path.join(snapshot.directory, "tree"),
 		path.join(snapshot.directory, "protected"),
 	])
+
 	for (const entry of snapshot.manifest.entries) {
 		if (entry.kind !== "excluded") paths.add(storedSnapshotPath(snapshot.directory, entry))
 	}
+
 	let total = 0n
+
 	for (const pathname of paths) {
 		const size = readApfsPrivateSize(pathname)
+
 		if (!size.ok) return undefined
 		total += size.value
 	}
+
 	return total
 }
 
@@ -161,11 +186,13 @@ export function verifySnapshotEntries(
 		if (entry.kind === "excluded") continue
 		const storedPath = storedSnapshotPath(snapshot.directory, entry)
 		let stat: fs.Stats
+
 		try {
 			stat = fs.lstatSync(storedPath)
 		} catch {
 			return err({ kind: "stored-entry-mismatch", path: storedPath, expected: entry.kind })
 		}
+
 		if (
 			entry.kind === "directory" &&
 			(!stat.isDirectory() || (stat.mode & 0o7777) !== entry.mode || !sameTimestamp(stat.mtimeMs, entry.mtimeMs))
@@ -176,6 +203,7 @@ export function verifySnapshotEntries(
 				expected: "directory with recorded mode and modification time",
 			})
 		}
+
 		if (
 			entry.kind === "file" &&
 			(!stat.isFile() ||
@@ -189,10 +217,12 @@ export function verifySnapshotEntries(
 				expected: `file of ${entry.size} bytes with recorded mode and modification time`,
 			})
 		}
+
 		if (entry.kind === "symlink") {
 			if (!stat.isSymbolicLink()) {
 				return err({ kind: "stored-entry-mismatch", path: storedPath, expected: "symlink" })
 			}
+
 			try {
 				if (fs.readlinkSync(storedPath) !== entry.target) {
 					return err({ kind: "stored-entry-mismatch", path: storedPath, expected: `symlink to ${entry.target}` })
@@ -202,6 +232,7 @@ export function verifySnapshotEntries(
 			}
 		}
 	}
+
 	return ok(undefined)
 }
 

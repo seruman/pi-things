@@ -17,6 +17,7 @@ test("initial policy protects ambient credentials, project secrets, snapshots, a
 		const ssh = path.join(home, ".ssh")
 		const aws = path.join(home, ".aws")
 		const protectedSnapshot = path.join(stateHome, "pi-safety", "snapshots", "project-1", "snapshot-1", "protected")
+
 		for (const directory of [workspace, home, stateHome, piConfigDir, ssh, aws, protectedSnapshot]) {
 			fs.mkdirSync(directory, { recursive: true })
 		}
@@ -28,6 +29,7 @@ test("initial policy protects ambient credentials, project secrets, snapshots, a
 		const configuredSecret = path.join(workspace, "secrets", "custom.txt")
 		const piAuth = path.join(piConfigDir, "auth.json")
 		const snapshotSecret = path.join(protectedSnapshot, "nested", "token.txt")
+
 		for (const file of [privateKey, publicKey, credentials, envFile, configuredSecret, piAuth, snapshotSecret]) {
 			fs.mkdirSync(path.dirname(file), { recursive: true })
 			fs.writeFileSync(file, "x")
@@ -42,6 +44,7 @@ test("initial policy protects ambient credentials, project secrets, snapshots, a
 				additionalNoAccessPatterns: ["secrets/custom.txt"],
 			}),
 		)
+
 		const policy = unwrap(
 			createDefaultPolicy({
 				paths: configuration.paths,
@@ -53,6 +56,7 @@ test("initial policy protects ambient credentials, project secrets, snapshots, a
 		for (const secret of [privateKey, credentials, envFile, configuredSecret, piAuth]) {
 			const result = authorizeBuiltinToolCall("read", { path: secret }, policy)
 			assert.equal(result.ok, false, `expected ${secret} to be protected`)
+
 			if (!result.ok) assert.equal(result.error.kind, "access-denied")
 		}
 
@@ -61,6 +65,7 @@ test("initial policy protects ambient credentials, project secrets, snapshots, a
 
 		const protectedRead = authorizeBuiltinToolCall("read", { path: snapshotSecret }, policy)
 		assert.equal(protectedRead.ok, false)
+
 		if (!protectedRead.ok) assert.equal(protectedRead.error.kind, "access-denied")
 
 		for (const protectedWrite of [
@@ -71,6 +76,7 @@ test("initial policy protects ambient credentials, project secrets, snapshots, a
 		]) {
 			const result = authorizeBuiltinToolCall("write", { path: protectedWrite, content: "x" }, policy)
 			assert.equal(result.ok, false, `expected ${protectedWrite} to be write-protected`)
+
 			if (!result.ok) assert.equal(result.error.kind, "access-denied")
 		}
 
@@ -81,6 +87,7 @@ test("initial policy protects ambient credentials, project secrets, snapshots, a
 		]) {
 			const result = authorizeBuiltinToolCall("write", { path: immutable, content: "x" }, policy)
 			assert.equal(result.ok, false, `expected ${immutable} to be immutable`)
+
 			if (!result.ok) assert.equal(result.error.kind, "access-denied")
 		}
 	})
@@ -92,6 +99,7 @@ test("default policy path failures are returned instead of thrown", () => {
 		const home = path.join(root, "home")
 		const stateHome = path.join(root, "state")
 		const piConfigDir = path.join(root, "pi-agent")
+
 		for (const directory of [workspace, home, stateHome, piConfigDir]) fs.mkdirSync(directory)
 		fs.symlinkSync(path.join(root, "missing-ssh"), path.join(home, ".ssh"))
 
@@ -104,12 +112,15 @@ test("default policy path failures are returned instead of thrown", () => {
 				additionalNoAccessPatterns: [],
 			}),
 		)
+
 		const policy = createDefaultPolicy({
 			paths: configuration.paths,
 			additionalNoAccessPatterns: configuration.additionalNoAccessPatterns,
 			sandbox: { kind: "disabled" },
 		})
+
 		assert.equal(policy.ok, false)
+
 		if (!policy.ok) assert.equal(policy.error.kind, "rule-path")
 	})
 })

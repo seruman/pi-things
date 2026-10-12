@@ -18,6 +18,7 @@ test("describes every rule in a fully integrated default policy", () => {
 		const wbRuntime = path.join(root, "wb-runtime")
 		const webKitState = path.join(home, "Library", "WebKit", "wb")
 		const cacheState = path.join(home, "Library", "Caches", "wb")
+
 		for (const directory of [
 			workspace,
 			home,
@@ -30,6 +31,7 @@ test("describes every rule in a fully integrated default policy", () => {
 		]) {
 			fs.mkdirSync(directory, { recursive: true })
 		}
+
 		const policy = unwrap(
 			createDefaultPolicy({
 				paths: {
@@ -77,9 +79,11 @@ test("describes every rule in a fully integrated default policy", () => {
 		).toBe(true)
 		const lines = description.split("\n")
 		expect(lines).toHaveLength(policy.rules.length + 4)
+
 		for (const [index] of policy.rules.entries()) {
 			expect(lines[index + 4]?.startsWith(String(index + 1).padStart(3, "0"))).toBe(true)
 		}
+
 		for (const fragment of [
 			"file shared none glob=",
 			"file sandbox read-write seatbelt-file=",

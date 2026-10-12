@@ -7,13 +7,11 @@ import * as path from "node:path"
  * Run a test inside a uniquely named direct child of the OS temp directory.
  * Cleanup refuses to recurse unless the path still has exactly that shape.
  */
-function createGuardedTestDirectory(
-	prefix: string,
-	parent: string = fs.realpathSync.native(os.tmpdir()),
-): { readonly root: string; readonly cleanup: () => void } {
+function createGuardedTestDirectory(prefix: string, parent: string = fs.realpathSync.native(os.tmpdir())) {
 	assert.match(prefix, /^[A-Za-z0-9-]+-$/)
 	const tempRoot = fs.realpathSync.native(parent)
 	const root = fs.mkdtempSync(path.join(tempRoot, prefix))
+
 	return {
 		root,
 		cleanup: () => {
@@ -26,6 +24,7 @@ function createGuardedTestDirectory(
 
 export function withTestTempDirectory<T>(prefix: string, run: (root: string) => T): T {
 	const directory = createGuardedTestDirectory(prefix)
+
 	try {
 		return run(directory.root)
 	} finally {
@@ -35,6 +34,7 @@ export function withTestTempDirectory<T>(prefix: string, run: (root: string) => 
 
 export function withPrivateTmpDirectory<T>(prefix: string, run: (root: string) => T): T {
 	const directory = createGuardedTestDirectory(prefix, "/private/tmp")
+
 	try {
 		return run(directory.root)
 	} finally {
@@ -44,6 +44,7 @@ export function withPrivateTmpDirectory<T>(prefix: string, run: (root: string) =
 
 export async function withTestTempDirectoryAsync<T>(prefix: string, run: (root: string) => Promise<T>): Promise<T> {
 	const directory = createGuardedTestDirectory(prefix)
+
 	try {
 		return await run(directory.root)
 	} finally {

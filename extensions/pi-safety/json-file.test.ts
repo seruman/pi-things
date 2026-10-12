@@ -16,6 +16,7 @@ test("reads unknown JSON or validates it into the schema output type", () => {
 
 		const value = readJsonFile(file, z.object({ name: z.string(), count: z.number().int() }).strict())
 		assert.equal(value.ok, true)
+
 		if (value.ok) {
 			const name: string = value.value.name
 			assert.equal(name, "snapshot")
@@ -30,11 +31,13 @@ test("returns errors for malformed JSON and schema mismatches", () => {
 		fs.writeFileSync(file, "{")
 		const malformed = readJsonFile(file)
 		assert.equal(malformed.ok, false)
+
 		if (!malformed.ok) assert.equal(malformed.error.kind, "json-file")
 
 		fs.writeFileSync(file, JSON.stringify({ name: 3 }))
 		const mismatched = readJsonFile(file, z.object({ name: z.string() }))
 		assert.equal(mismatched.ok, false)
+
 		if (!mismatched.ok) assert.equal(mismatched.error.kind, "json-file-schema")
 	})
 })

@@ -12,7 +12,9 @@ import { withTestTempDirectory } from "./test-temp-directory"
 
 function installedGit() {
 	const git = Bun.which("git")
+
 	if (!git) throw new Error("Git must be installed for Seatbelt policy tests")
+
 	return canonicalExecutable(git)
 }
 
@@ -32,7 +34,9 @@ function fixture(root: string, sessionPaths: Parameters<typeof createDefaultPoli
 	const privateTemp = path.join(root, "tmp")
 	const stateHome = path.join(root, "state")
 	const piConfigDirectory = path.join(root, "pi-agent")
+
 	for (const directory of [workspace, home, privateTemp, stateHome, piConfigDirectory]) fs.mkdirSync(directory)
+
 	const policy = unwrap(
 		createDefaultPolicy({
 			paths: {
@@ -46,6 +50,7 @@ function fixture(root: string, sessionPaths: Parameters<typeof createDefaultPoli
 			sandbox: { kind: "enabled", privateTemp: canonicalPath(privateTemp), integrations: disabledIntegrations() },
 		}),
 	)
+
 	return { workspace, home, privateTemp, stateHome, compiled: emitSeatbelt(policy), policy }
 }
 
@@ -65,12 +70,14 @@ test("Seatbelt grants confirmed session directories without changing the checkpo
 test("Seatbelt permits workspace workflows and sandbox-only temporary files", () => {
 	withTestTempDirectory("seatbelt-policy-workspace-", (root) => {
 		const value = fixture(root)
+
 		const command = [
 			"printf workspace > ordinary.txt",
 			`printf temporary > ${JSON.stringify(path.join(value.privateTemp, "temporary.txt"))}`,
 			"mv ordinary.txt renamed.txt",
 			"rm renamed.txt",
 		].join(" && ")
+
 		const result = runWithSeatbelt(value.compiled, "/bin/bash", ["-c", command], value.workspace)
 		assert.equal(result.status, 0, result.stderr)
 		assert.equal(fs.readFileSync(path.join(value.privateTemp, "temporary.txt"), "utf8"), "temporary")
@@ -86,22 +93,27 @@ test("Seatbelt supports a disposable login-style Keychain", () => {
 		const keychain = path.join(keychainDirectory, "pi-safety-test.keychain-db")
 		const environment = { ...process.env, HOME: value.home }
 		fs.mkdirSync(keychainDirectory, { recursive: true })
+
 		const created = Bun.spawnSync(["/usr/bin/security", "create-keychain", "-p", "pi-safety-test", keychain], {
 			env: environment,
 			stderr: "pipe",
 			stdout: "pipe",
 		})
+
 		assert.equal(created.exitCode, 0, created.stderr.toString())
+
 		try {
 			const unlocked = Bun.spawnSync(["/usr/bin/security", "unlock-keychain", "-p", "pi-safety-test", keychain], {
 				env: environment,
 				stderr: "pipe",
 				stdout: "pipe",
 			})
+
 			assert.equal(unlocked.exitCode, 0, unlocked.stderr.toString())
 
 			const runSecurity = (args: readonly string[]) =>
 				runWithSeatbelt(value.compiled, "/usr/bin/security", args, value.workspace, environment)
+
 			const added = runSecurity([
 				"add-generic-password",
 				"-a",
@@ -112,6 +124,7 @@ test("Seatbelt supports a disposable login-style Keychain", () => {
 				"temporary-test-value",
 				keychain,
 			])
+
 			assert.equal(added.status, 0, added.stderr)
 			const found = runSecurity(["find-generic-password", "-a", "pi-safety-test", "-s", "pi-safety-test", keychain])
 			assert.equal(found.status, 0, found.stderr)
@@ -136,6 +149,7 @@ test("Seatbelt preserves later writable exceptions under read-only parents", () 
 		fs.mkdirSync(writableChild, { recursive: true })
 		const runtimeStart = value.policy.rules.findIndex((rule) => rule.kind !== "file-access" && rule.kind !== "snapshot")
 		assert.notEqual(runtimeStart, -1)
+
 		const policy = definePolicy({
 			workspaceRoot: value.policy.workspaceRoot,
 			homeRoot: value.policy.homeRoot,
@@ -146,14 +160,17 @@ test("Seatbelt preserves later writable exceptions under read-only parents", () 
 				...value.policy.rules.slice(runtimeStart),
 			],
 		})
+
 		const compiled = emitSeatbelt(policy)
 		assertDenied(runWithSeatbelt(compiled, "/bin/bash", ["-c", "printf denied > protected/denied"], value.workspace))
+
 		const allowed = runWithSeatbelt(
 			compiled,
 			"/bin/bash",
 			["-c", "printf allowed > protected/generated/file && mv protected/generated/file protected/generated/moved"],
 			value.workspace,
 		)
+
 		assert.equal(allowed.status, 0, allowed.stderr)
 	})
 })
@@ -173,6 +190,7 @@ test("Seatbelt keeps HOME read-only and protects secrets and safety state", () =
 			),
 		)
 		assert.equal(fs.readFileSync(secret, "utf8"), "TOKEN=secret")
+
 		for (const deniedFile of [path.join(value.home, "bad"), path.join(value.stateHome, "bad")]) {
 			assertDenied(
 				runWithSeatbelt(
@@ -195,9 +213,11 @@ test("native wb grants remain scoped to the wb executable", () => {
 		const piConfigDirectory = path.join(root, "pi-agent")
 		const webKitState = path.join(home, "Library", "WebKit", "wb")
 		const cacheState = path.join(home, "Library", "Caches", "wb")
+
 		for (const directory of [workspace, privateTemp, stateHome, piConfigDirectory, webKitState, cacheState]) {
 			fs.mkdirSync(directory, { recursive: true })
 		}
+
 		const integrations = {
 			gitExecutable: installedGit(),
 			nix: { kind: "disabled" },
@@ -213,6 +233,7 @@ test("native wb grants remain scoped to the wb executable", () => {
 				cacheState: canonicalPath(cacheState),
 			},
 		} as const
+
 		const policy = unwrap(
 			createDefaultPolicy({
 				paths: {
@@ -225,14 +246,17 @@ test("native wb grants remain scoped to the wb executable", () => {
 				sandbox: { kind: "enabled", privateTemp: canonicalPath(privateTemp), integrations },
 			}),
 		)
+
 		const compiled = emitSeatbelt(policy)
 		const allowedFile = path.join(webKitState, "allowed")
+
 		const allowed = runWithSeatbelt(
 			compiled,
 			"/bin/bash",
 			["-c", `printf allowed > ${JSON.stringify(allowedFile)}`],
 			workspace,
 		)
+
 		assert.equal(allowed.status, 0, allowed.stderr)
 		const deniedFile = path.join(webKitState, "denied")
 		assertDenied(
@@ -251,6 +275,7 @@ test("native wb grants remain scoped to the wb executable", () => {
 test("Seatbelt preserves ordinary Git working-tree operations", () => {
 	withTestTempDirectory("seatbelt-policy-git-", (root) => {
 		const value = fixture(root)
+
 		const command = [
 			"git init -q",
 			"git config pi-safety.test true",
@@ -269,6 +294,7 @@ test("Seatbelt preserves ordinary Git working-tree operations", () => {
 			"git clean -fdq",
 			"test ! -e untracked.txt",
 		].join(" && ")
+
 		const result = runWithSeatbelt(value.compiled, "/bin/bash", ["-c", command], value.workspace)
 		assert.equal(result.status, 0, result.stderr)
 		assert.equal(fs.existsSync(path.join(value.workspace, ".git", "index")), true)
@@ -289,9 +315,11 @@ test("Seatbelt runs installed language and developer toolchains", () => {
 		const bun = Bun.which("bun")
 		const docker = Bun.which("docker")
 		const pi = Bun.which("pi")
+
 		if (!node || !bun || !docker || !pi) {
 			throw new Error("Node, Bun, Docker, and Pi must be installed for the toolchain policy test")
 		}
+
 		for (const command of [
 			["/usr/bin/git", "--version"],
 			[node, "--version"],

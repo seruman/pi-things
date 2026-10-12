@@ -10,6 +10,7 @@ import { withTestTempDirectory } from "./test-temp-directory"
 
 function globPattern(pattern: PathPattern): Extract<PathPattern, { kind: "glob" }> {
 	if (pattern.kind !== "glob") assert.fail(`expected glob pattern, received ${pattern.kind}`)
+
 	return pattern
 }
 
@@ -20,6 +21,7 @@ test("parses literal paths relative to a canonical root", () => {
 		const parsed = unwrap(parsePathPattern("literal\\*.env", canonicalPath(root)))
 
 		assert.equal(parsed.kind, "literal")
+
 		if (parsed.kind === "literal") assert.equal(parsed.path, literalFile)
 	})
 })
@@ -58,6 +60,7 @@ test("supports component wildcards and character classes", () => {
 test("rejects patterns outside the intentionally supported subset", () => {
 	withTestTempDirectory("pi-safety-pattern-", (root) => {
 		const base = canonicalPath(root)
+
 		for (const [input, kind] of [
 			["/**/*.env", "glob-too-broad"],
 			["foo\\*?.env", "unsupported-glob"],
@@ -66,6 +69,7 @@ test("rejects patterns outside the intentionally supported subset", () => {
 		] as const) {
 			const parsed = parsePathPattern(input, base)
 			assert.equal(parsed.ok, false, input)
+
 			if (!parsed.ok) assert.equal(parsed.error.kind, kind, input)
 		}
 	})

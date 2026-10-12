@@ -29,20 +29,28 @@ export {
 } from "./sbpl"
 
 declare const fileSelectorBrand: unique symbol
+
 declare const policyRuleBrand: unique symbol
+
 declare const policyBrand: unique symbol
+
 declare const ruleSubjectBrand: unique symbol
 
 export type FileAccess = "none" | "read-only" | "read-write"
+
 export type SnapshotDisposition = "include" | "exclude"
+
 export type FileOperation = "read" | "write" | "movement"
 
 export type SharedRuleSubject = { readonly kind: "shared" } & { readonly [ruleSubjectBrand]: true }
+
 export type SandboxRuleSubject = { readonly kind: "sandbox" } & { readonly [ruleSubjectBrand]: true }
+
 export type ExecutableRuleSubject = {
 	readonly kind: "executable"
 	readonly executable: CanonicalExecutable
 } & { readonly [ruleSubjectBrand]: true }
+
 export type RuleSubject = SharedRuleSubject | SandboxRuleSubject | ExecutableRuleSubject
 
 export type EvaluationSubject =
@@ -78,6 +86,7 @@ export type SnapshotRule = {
 }
 
 export type RuntimePolicyRule = Rule
+
 export type PolicyRule = FileAccessRule | SnapshotRule | RuntimePolicyRule
 
 export interface Policy {
@@ -108,7 +117,10 @@ export type SnapshotDecision = {
 	readonly disposition: SnapshotDisposition
 }
 
+// SAFETY: the frozen shared discriminant is the entire payload of a shared subject.
 const sharedSubject = Object.freeze({ kind: "shared" }) as SharedRuleSubject
+
+// SAFETY: the frozen sandbox discriminant is the entire payload of a sandbox subject.
 const sandboxSubject = Object.freeze({ kind: "sandbox" }) as SandboxRuleSubject
 
 export function shared(): SharedRuleSubject {
@@ -120,31 +132,40 @@ export function sandbox(): SandboxRuleSubject {
 }
 
 export function executable(executable: CanonicalExecutable): ExecutableRuleSubject {
+	// SAFETY: the executable parameter has already passed canonical-file and executable-access validation.
 	return Object.freeze({ kind: "executable", executable }) as ExecutableRuleSubject
 }
 
 export function file(path: CanonicalPath): FileSelector {
+	// SAFETY: an exact-file selector requires only the canonical path supplied by the caller.
 	return Object.freeze({ kind: "file", path }) as FileSelector
 }
 
 export function tree(path: CanonicalPath): FileSelector {
+	// SAFETY: a tree selector requires only the canonical root supplied by the caller.
 	return Object.freeze({ kind: "tree", path }) as FileSelector
 }
 
 export function seatbeltFile(path: SeatbeltPath): FileSelector {
+	// SAFETY: Seatbelt exact-path selectors accept either canonical paths or validated lexical absolute paths.
 	return Object.freeze({ kind: "seatbelt-file", path }) as FileSelector
 }
 
 export function seatbeltTree(path: SeatbeltPath): FileSelector {
+	// SAFETY: Seatbelt tree selectors accept either canonical roots or validated lexical absolute roots.
 	return Object.freeze({ kind: "seatbelt-tree", path }) as FileSelector
 }
 
 export function seatbeltPrefix(path: SeatbeltPath): FileSelector {
+	// SAFETY: the prefix is a validated absolute Seatbelt path, not arbitrary regex source.
 	return Object.freeze({ kind: "seatbelt-prefix", path }) as FileSelector
 }
 
 export function pattern(pattern: PathPattern): FileSelector {
-	return pattern.kind === "literal" ? tree(pattern.path) : (Object.freeze({ kind: "glob", pattern }) as FileSelector)
+	if (pattern.kind === "literal") return tree(pattern.path)
+
+	// SAFETY: narrowing retains the parser-validated glob pattern, including its canonical base and compiled regex.
+	return Object.freeze({ kind: "glob", pattern }) as FileSelector
 }
 
 export function noAccess(subject: RuleSubject, selector: FileSelector): FileAccessRule {
@@ -177,6 +198,7 @@ export function definePolicy(input: {
 	readonly rules: readonly PolicyRule[]
 }): Policy {
 	let runtimeRulesStarted = false
+
 	for (const rule of input.rules) {
 		if (rule.kind === "file-access" || rule.kind === "snapshot") {
 			if (runtimeRulesStarted) throw new TypeError("declarative policy rules must precede runtime rules")
@@ -184,6 +206,8 @@ export function definePolicy(input: {
 			runtimeRulesStarted = true
 		}
 	}
+
+	// SAFETY: roots and rules are already branded; the loop enforced declarative-before-runtime ordering, and the copy is frozen.
 	return Object.freeze({
 		workspaceRoot: input.workspaceRoot,
 		homeRoot: input.homeRoot,
@@ -209,20 +233,25 @@ export function evaluatePolicy(
 
 function evaluateFileAccess(policy: Policy, request: FileAccessRequest): FileAccessDecision {
 	let access: FileAccess = "none"
+
 	for (const rule of effectiveFileAccessRules(policy, request.subject)) {
 		const matches =
 			request.operation === "movement"
 				? matchesMovementSelector(rule.selector, request.path, rule.access)
 				: matchesSelector(rule.selector, request.path)
+
 		if (!matches) continue
 		access = rule.access
 	}
+
 	const allowed = request.operation === "read" ? access !== "none" : access === "read-write"
+
 	return Object.freeze({ effect: allowed ? "allow" : "deny", access })
 }
 
 function evaluateSnapshot(policy: Policy, request: SnapshotRequest): SnapshotDecision {
 	let disposition: SnapshotDisposition = "include"
+
 	for (const rule of policy.rules) {
 		switch (rule.kind) {
 			case "snapshot":
@@ -247,20 +276,25 @@ function evaluateSnapshot(policy: Policy, request: SnapshotRequest): SnapshotDec
 				rule satisfies never
 		}
 	}
+
 	return Object.freeze({ disposition })
 }
 
 export function effectiveFileAccessRules(policy: Policy, subject: EvaluationSubject): readonly FileAccessRule[] {
 	const seen = new Set<string>()
 	const retained: FileAccessRule[] = []
+
 	for (let index = policy.rules.length - 1; index >= 0; index -= 1) {
 		const rule = policy.rules[index]
+
 		if (rule === undefined || rule.kind !== "file-access" || !matchesSubject(rule.subject, subject)) continue
 		const key = selectorKey(rule.selector)
+
 		if (seen.has(key)) continue
 		seen.add(key)
 		retained.push(rule)
 	}
+
 	return Object.freeze(retained.reverse())
 }
 
@@ -285,7 +319,9 @@ export function matchesSelector(selector: FileSelector, candidate: CanonicalPath
 
 function matchesMovementSelector(selector: FileSelector, candidate: CanonicalPath, access: FileAccess): boolean {
 	if (matchesSelector(selector, candidate)) return true
+
 	if (access === "read-write") return false
+
 	switch (selector.kind) {
 		case "file":
 		case "tree":
@@ -338,9 +374,11 @@ function matchesSubject(rule: RuleSubject, request: EvaluationSubject): boolean 
 }
 
 function accessRule(access: FileAccess, subject: RuleSubject, selector: FileSelector): FileAccessRule {
+	// SAFETY: subject and selector are validated constructor products; access is restricted to the FileAccess union.
 	return Object.freeze({ kind: "file-access", subject, selector, access }) as FileAccessRule
 }
 
 function snapshotRule(disposition: SnapshotDisposition, selector: FileSelector): SnapshotRule {
+	// SAFETY: the selector is validated and disposition can only be include or exclude.
 	return Object.freeze({ kind: "snapshot", selector, disposition }) as SnapshotRule
 }

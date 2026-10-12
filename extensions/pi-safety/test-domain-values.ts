@@ -47,6 +47,7 @@ export function testPolicy(
 	} = {},
 ): Policy {
 	const workspaceRoot = canonicalPath(workspace)
+
 	const rules: PolicyRule[] = [
 		readOnly(shared(), tree(canonicalPath("/"))),
 		readWrite(shared(), tree(workspaceRoot)),
@@ -58,5 +59,6 @@ export function testPolicy(
 		...(options.snapshotExclusions ?? []).map((value) => excludeFromSnapshots(pattern(value))),
 		...(options.additionalRules ?? []),
 	]
+
 	return definePolicy({ workspaceRoot, homeRoot: canonicalPath(home), rules })
 }

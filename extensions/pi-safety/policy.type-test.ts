@@ -21,6 +21,9 @@ const forgedRule: PolicyRule = {
 const forgedPolicy: Policy = { workspaceRoot: canonicalPath, homeRoot: canonicalPath, rules: [] }
 
 void forgedSubject
+
 void forgedSelector
+
 void forgedRule
+
 void forgedPolicy

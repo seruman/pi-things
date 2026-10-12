@@ -30,10 +30,12 @@ test("canonicalizes existing paths and symlinked ancestors", () => {
 test("rejects relative paths, NUL bytes, and dangling symlinks", () => {
 	const relative = parseCanonicalPath("relative/path")
 	assert.equal(relative.ok, false)
+
 	if (!relative.ok) assert.equal(relative.error.kind, "not-absolute")
 
 	const nul = parseCanonicalPath("/tmp/nul\0path")
 	assert.equal(nul.ok, false)
+
 	if (!nul.ok) assert.equal(nul.error.kind, "nul-byte")
 
 	withTestTempDirectory("pi-safety-path-", (root) => {
@@ -41,6 +43,7 @@ test("rejects relative paths, NUL bytes, and dangling symlinks", () => {
 		fs.symlinkSync(path.join(root, "missing-target"), dangling)
 		const parsed = parseCanonicalPath(path.join(dangling, "child"))
 		assert.equal(parsed.ok, false)
+
 		if (!parsed.ok) assert.equal(parsed.error.kind, "dangling-symlink")
 	})
 })
@@ -72,6 +75,7 @@ test("distinguishes canonical executable paths", () => {
 		fs.writeFileSync(ordinaryFile, "not executable")
 		const parsed = parseCanonicalExecutable(ordinaryFile)
 		assert.equal(parsed.ok, false)
+
 		if (!parsed.ok) assert.equal(parsed.error.kind, "not-executable")
 	})
 })

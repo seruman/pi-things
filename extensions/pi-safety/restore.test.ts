@@ -23,6 +23,7 @@ function fixture(root: string) {
 	fs.mkdirSync(path.join(workspace, "node_modules"))
 	fs.writeFileSync(path.join(workspace, "node_modules", "preserved.js"), "before-generated")
 	const workspaceRoot = canonicalPath(workspace)
+
 	const store = unwrap(
 		createSnapshotStore({
 			workspaceRoot,
@@ -30,8 +31,10 @@ function fixture(root: string) {
 			policy: unwrap(createSnapshotPolicy(workspaceRoot)),
 		}),
 	)
+
 	const published = unwrap(createSnapshot(store))
 	const loaded = unwrap(loadSnapshot(store, published.id))
+
 	return { workspace, store, loaded }
 }
 
@@ -80,6 +83,7 @@ test("selected ordinary restore verifies only required snapshot sources", () => 
 		fs.writeFileSync(path.join(workspace, "ordinary.txt"), "before")
 		fs.writeFileSync(path.join(workspace, ".env"), "secret")
 		const workspaceRoot = canonicalPath(workspace)
+
 		const store = unwrap(
 			createSnapshotStore({
 				workspaceRoot,
@@ -89,6 +93,7 @@ test("selected ordinary restore verifies only required snapshot sources", () => 
 				}),
 			}),
 		)
+
 		const published = unwrap(createSnapshot(store))
 		const loaded = unwrap(loadSnapshot(store, published.id))
 		fs.rmSync(path.join(published.directory, "protected", ".env"))
@@ -106,6 +111,7 @@ test("selected restore rejects excluded paths before mutation", () => {
 		const scope = unwrap(selectedRestoreScope(["node_modules/preserved.js"]))
 		const plan = planRestore(value.store, value.loaded, scope)
 		assert.equal(plan.ok, false)
+
 		if (!plan.ok) assert.equal(plan.error.kind, "excluded-selection")
 	})
 })

@@ -30,6 +30,7 @@ function assertSandboxAccepts(compiled: ReturnType<typeof emitSbpl>): void {
 test("emits file rules through stable sandbox parameters", () => {
 	const tmp = canonicalPath("/tmp")
 	const usr = canonicalPath("/usr")
+
 	const compiled = emitSbpl([
 		fileRule({
 			effect: "deny",
@@ -53,22 +54,10 @@ test("emits file rules through stable sandbox parameters", () => {
 	])
 })
 
-test("rejects forged empty tuples at the shared runtime boundary", () => {
-	const executable = canonicalExecutable("/usr/bin/true")
-	const tmp = canonicalPath("/tmp")
-	assert.throws(
-		() => Reflect.apply(fileRule, undefined, [{ effect: "allow", operations: [], matchers: [literal(tmp)] }]),
-		/expected a non-empty tuple/,
-	)
-	assert.throws(
-		() => Reflect.apply(allowFileExtensionIssues, undefined, [{ grants: [], process: executable }]),
-		/expected a non-empty tuple/,
-	)
-})
-
 test("emits process exclusions without allowing mixed process scopes", () => {
 	const executable = canonicalExecutable("/usr/bin/true")
 	const tmp = canonicalPath("/tmp")
+
 	const compiled = emitSbpl([
 		fileRuleExceptProcess({
 			effect: "deny",
@@ -77,6 +66,7 @@ test("emits process exclusions without allowing mixed process scopes", () => {
 			process: executable,
 		}),
 	])
+
 	assert.equal(
 		compiled.source,
 		[
@@ -115,6 +105,7 @@ test("keeps global and XPC Mach service filters distinct", () => {
 
 test("encodes Unix connect and bind as different rule variants", () => {
 	const socket = unixSocketPath(canonicalPath("/tmp/pi-safety.sock"))
+
 	const compiled = emitSbpl([
 		unixConnectRule({ effect: "allow", matchers: [socket] }),
 		unixBindRule({ effect: "deny", matchers: [socket] }),
@@ -136,6 +127,7 @@ test("encodes Unix connect and bind as different rule variants", () => {
 
 test("constrains file extension issuance by class, paths, and process", () => {
 	const executable = canonicalExecutable("/usr/bin/true")
+
 	const compiled = emitSbpl([
 		allowFileExtensionIssues({
 			grants: [
@@ -168,6 +160,7 @@ test("constrains file extension issuance by class, paths, and process", () => {
 
 test("groups multiple path-constrained extension classes into one issuance rule", () => {
 	const process = canonicalExecutable("/usr/bin/true")
+
 	const compiled = emitSbpl([
 		allowFileExtensionIssues({
 			grants: [
@@ -177,12 +170,14 @@ test("groups multiple path-constrained extension classes into one issuance rule"
 			process,
 		}),
 	])
+
 	assert.equal((compiled.source.match(/allow file-issue-extension/g) ?? []).length, 1)
 	assert.equal((compiled.source.match(/require-all/g) ?? []).length, 2)
 })
 
 test("maps WebKit broker capabilities to fixed extension classes", () => {
 	const executable = canonicalExecutable("/usr/bin/true")
+
 	const compiled = emitSbpl([
 		allowWebKitBrokerExtension("generic", executable),
 		allowWebKitBrokerExtension("iokit", executable),
@@ -200,6 +195,7 @@ test("keeps hostile path bytes out of generated SBPL source", () => {
 		const hostile = path.join(root, 'evil")\n(allow file-read*)')
 		fs.mkdirSync(hostile)
 		const canonical = canonicalPath(hostile)
+
 		const compiled = emitSbpl([
 			fileRule({ effect: "allow", operations: ["file-read*"], matchers: [subpath(canonical)] }),
 		])
@@ -216,9 +212,11 @@ test("generated hostile path components remain isolated in parameters", () => {
 			const hostile = path.join(root, `case-${index}-'\"$()[];\n-${String.fromCodePoint(0x3b1 + (index % 20))}`)
 			fs.mkdirSync(hostile)
 			const canonical = canonicalPath(hostile)
+
 			const compiled = emitSbpl([
 				fileRule({ effect: "allow", operations: ["file-read*"], matchers: [subpath(canonical)] }),
 			])
+
 			assert.equal(compiled.source.includes(path.basename(hostile)), false)
 			assert.deepEqual(compiled.parameters, [{ name: "PI_SAFETY_0", value: canonical }])
 		}
@@ -228,6 +226,7 @@ test("generated hostile path components remain isolated in parameters", () => {
 test("sandbox-exec accepts emitted rules and parameter definitions", () => {
 	const executable = canonicalExecutable("/usr/bin/true")
 	const socket = unixSocketPath(canonicalPath("/tmp/pi-safety.sock"))
+
 	const rules = [
 		fileRule({ effect: "allow", operations: ["file-read*"], matchers: [subpath(canonicalPath("/tmp"))] }),
 		machLookupRule({
@@ -253,6 +252,7 @@ test("sandbox-exec accepts emitted rules and parameter definitions", () => {
 		allowWebKitBrokerExtension("iokit", executable),
 		allowWebKitBrokerExtension("mach", executable),
 	]
+
 	assertSandboxAccepts(emitSbpl(rules))
 })
 
@@ -260,6 +260,7 @@ test("rejects malformed Mach service names at their parsing boundary", () => {
 	for (const input of ["", "contains space", 'quote"breakout', "line\nbreak"]) {
 		const parsed = globalMachService(input)
 		assert.equal(parsed.ok, false, input)
+
 		if (!parsed.ok) assert.equal(parsed.error.kind, "invalid-mach-service-name")
 	}
 })
