@@ -368,14 +368,46 @@ test("completion reads metadata and the transcript after asynchronous process in
 	expect(await call("agent_wait", { handle: run.handle })).toMatchObject({ answer: "JUST FINISHED" })
 })
 
-test("cancellation closes the block but preserves the transcript", async () => {
+test.each(["polling", "process inspection"])("cancelling wait during %s leaves the child usable", async (phase) => {
 	const run = await spawn()
+	const c = await child(run)
+	await c.begin()
 	const controller = new AbortController()
+	if (phase === "process inspection") {
+		onProcess = () => {
+			onProcess = undefined
+			controller.abort()
+			controller.signal.throwIfAborted()
+		}
+	}
 	const waiting = call("agent_wait", { handle: run.handle }, controller.signal)
 	await tick()
+	if (phase === "polling") {
+		controller.abort()
+		await tick(500)
+	}
+	expect(await waiting).toMatchObject({ status: "aborted" })
+	expect(blocks.has(run.blockId)).toBe(true)
+	expect(getRun(run.handle).state).toBe("busy")
+	expect(existsSync(run.sessionFile)).toBe(true)
+	await call("agent_send", { handle: run.handle, message: "continue the task" })
+	await tick(250)
+	expect(c.sent).toEqual([{ message: "continue the task", deliverAs: "steer" }])
+	await c.reply("DONE")
+	expect(await call("agent_wait", { handle: run.handle })).toMatchObject({ status: "success", answer: "DONE" })
+	await call("agent_stop", { handle: run.handle })
+	expect(blocks.has(run.blockId)).toBe(false)
+})
+
+test("cancelling foreground spawn still closes the block and preserves the transcript", async () => {
+	const controller = new AbortController()
+	const spawning = call("agent_spawn", { prompt: "task" }, controller.signal)
+	await tick()
+	const run = listRuns()[0]
+	if (!run) throw new Error("Missing spawned run")
 	controller.abort()
 	await tick(500)
-	expect(await waiting).toMatchObject({ status: "aborted" })
+	expect(await spawning).toMatchObject({ status: "aborted" })
 	expect(blocks.has(run.blockId)).toBe(false)
 	expect(existsSync(run.sessionFile)).toBe(true)
 })

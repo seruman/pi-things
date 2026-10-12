@@ -187,7 +187,12 @@ const spawnParameters = Type.Object({
 	tools: Type.Optional(Type.Union([Type.Literal("readonly"), Type.Array(Type.String())])),
 	excludeTools: Type.Optional(Type.Array(Type.String())),
 	noTools: Type.Optional(Type.Union([Type.Literal("all"), Type.Literal("builtin")])),
-	background: Type.Optional(Type.Boolean()),
+	background: Type.Optional(
+		Type.Boolean({
+			description:
+				"Return immediately instead of waiting for the initial turn. Successful completion leaves the child alive in either mode.",
+		}),
+	),
 })
 
 type SpawnParameters = Static<typeof spawnParameters>
@@ -307,11 +312,8 @@ async function settle(
 	while (Date.now() < deadline) {
 		run = readMetadata(runDirectory(run.handle)) ?? run
 
-		if (signal?.aborted) {
-			await closeBlock(exec, run.blockId)
-
-			return finish("aborted")
-		}
+		// Waiting observes the child; the caller decides whether cancellation also stops it.
+		if (signal?.aborted) return finish("aborted")
 
 		if (run.state === "error") return finish("error", run.error ?? `${run.handle} failed`)
 		let alive: boolean
@@ -320,7 +322,6 @@ async function settle(
 			alive = (await readProcess(exec, run.blockId, signal)).alive
 		} catch (error) {
 			if (!signal?.aborted) throw error
-			await closeBlock(exec, run.blockId)
 
 			return finish("aborted")
 		}
@@ -642,6 +643,9 @@ function registerTools(pi: ParentAPI, exec: Exec): void {
 		label: "List agents",
 		description:
 			"List subagents spawned by this session, including detached and exited children. Failed status queries return unknown with an error; other children are still listed.",
+		promptGuidelines: [
+			"Use agent_list to rediscover children and their handles, names, and current states if you no longer remember them.",
+		],
 		exposure: "codemode",
 		parameters: Type.Object({}),
 		outputSchema: listSchema,
@@ -678,7 +682,14 @@ function registerTools(pi: ParentAPI, exec: Exec): void {
 	pi.registerTool({
 		name: "agent_spawn",
 		label: "Spawn agent",
-		description: "Launch an external Pi child in a detached Rex block.",
+		description: "Launch a persistent external Pi child in a detached Rex block.",
+		promptGuidelines: [
+			"Spawning a new child for one-off work is fine. Read its result, then call agent_stop when no follow-up work is needed.",
+			"Children persist after completion in either mode. Neither a successful spawn result nor agent_wait stops the child.",
+			"With background omitted or false, cancelling agent_spawn closes the child but preserves its transcript. Its 1800-second wait timeout leaves the child running; use agent_wait or agent_stop afterward.",
+			"Keep an idle child alive only when concrete follow-up work is expected. It retains its conversation history; use agent_send for that follow-up, then stop it afterward.",
+			"Children survive /reload. Parent shutdown suspends them, and resuming the parent relaunches them with their history; this is not permanent cleanup.",
+		],
 		exposure: "codemode",
 		parameters: spawnParameters,
 		outputSchema: spawnSchema,
@@ -699,14 +710,24 @@ function registerTools(pi: ParentAPI, exec: Exec): void {
 				return toolResult(body, `Spawned ${runDisplayName(run)}`)
 			}
 
-			return settledResult(await settle(exec, run, signal))
+			try {
+				return settledResult(await settle(exec, run, signal))
+			} finally {
+				if (signal?.aborted) {
+					const current = readMetadata(runDirectory(run.handle)) ?? run
+					await closeBlock(exec, current.blockId)
+				}
+			}
 		},
 	})
 
 	pi.registerTool({
 		name: "agent_send",
 		label: "Message agent",
-		description: "Send a message to a running child.",
+		description: "Prompt an idle child, steer active work, or queue a follow-up.",
+		promptGuidelines: [
+			"Idle children start a new turn with their existing history. Busy children receive steering by default; followUp: true queues another turn after the current work finishes.",
+		],
 		exposure: "codemode",
 		parameters: Type.Object({
 			handle: Type.String({ minLength: 1 }),
@@ -728,7 +749,11 @@ function registerTools(pi: ParentAPI, exec: Exec): void {
 	pi.registerTool({
 		name: "agent_wait",
 		label: "Wait for agent",
-		description: "Wait until a child finishes. Defaults to a 1800-second timeout.",
+		description: "Wait for a child's current work to finish and return its result. Defaults to a 1800-second timeout.",
+		promptGuidelines: [
+			"A completed wait does not stop the child. Read its result, then use agent_send for concrete follow-up work or agent_stop when it is no longer needed.",
+			"Cancelling or timing out agent_wait stops only the wait, not the child. Use agent_stop to terminate the child explicitly.",
+		],
 		exposure: "codemode",
 		parameters: Type.Object({
 			handle: Type.String({ minLength: 1 }),
@@ -743,7 +768,11 @@ function registerTools(pi: ParentAPI, exec: Exec): void {
 	pi.registerTool({
 		name: "agent_stop",
 		label: "Stop agent",
-		description: "Close the child's Rex block and remove its run directory.",
+		description: "Terminate a child by closing its Rex block and deleting its run transcript and metadata.",
+		promptGuidelines: [
+			"Stopping permanently deletes the child's transcript and metadata. Read its result and preserve anything needed before stopping it.",
+			"Explicitly stop every child when it is no longer needed; do not leave completed children running idle.",
+		],
 		exposure: "codemode",
 		parameters: Type.Object({ handle: Type.String({ minLength: 1 }) }),
 		outputSchema: handleSchema,
