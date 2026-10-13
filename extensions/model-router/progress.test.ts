@@ -35,6 +35,7 @@ function harness(mode: ExtensionContext["mode"] = "tui", hasUI = true) {
 	function advance(ms: number) {
 		now += ms
 
+		// oxlint-disable-next-line unicorn/no-useless-spread -- Snapshot timers before callbacks mutate the map.
 		for (const [callback, timer] of [...timers]) {
 			if (timer.at > now) continue
 

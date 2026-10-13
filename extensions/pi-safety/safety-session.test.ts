@@ -14,8 +14,10 @@ function fixture(root: string, gopath?: string) {
 	const piConfigDir = path.join(root, "pi-config")
 	const privateTemp = path.join(root, "tmp")
 
-	for (const directory of [workspace, home, stateHome, piConfigDir, privateTemp])
+	for (const directory of [workspace, home, stateHome, piConfigDir, privateTemp]) {
 		fs.mkdirSync(directory, { recursive: true })
+	}
+
 	fs.writeFileSync(path.join(workspace, "existing.txt"), "before")
 
 	return unwrap(

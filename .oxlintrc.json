@@ -1,0 +1,72 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "unicorn", "oxc", "import"],
+  "categories": {
+    "correctness": "error"
+  },
+  "env": {
+    "node": true,
+    "bun": true
+  },
+  "ignorePatterns": [
+    "node_modules/**",
+    ".pi/**",
+    ".tmp/**",
+    ".tmp-task-tools-drive/**",
+    "skills/**",
+    "extensions/web-tools/skills/**",
+    "tools/oxlint/anti-slop/**"
+  ],
+  "jsPlugins": [
+    {
+      "name": "anti-slop",
+      "specifier": "./tools/oxlint/anti-slop/index.ts"
+    }
+  ],
+  "rules": {
+    "no-unused-vars": [
+      "error",
+      {
+        "args": "all",
+        "argsIgnorePattern": "^_",
+        "varsIgnorePattern": "^_",
+        "caughtErrors": "all",
+        "caughtErrorsIgnorePattern": "^_",
+        "ignoreRestSiblings": true
+      }
+    ],
+    "eqeqeq": [
+      "error",
+      "always",
+      {
+        "null": "ignore"
+      }
+    ],
+    "curly": ["error", "multi-line"],
+    "no-var": "error",
+    "prefer-const": "error",
+    "no-debugger": "error",
+    "typescript/consistent-type-imports": "error",
+    "typescript/no-explicit-any": "error",
+    "import/no-duplicates": "error",
+    "oxc/no-accumulating-spread": "error",
+    "anti-slop/no-array-filter-map": "error",
+    "anti-slop/no-reduce-accumulator-copy": "error",
+    "anti-slop/no-chained-type-assertions": "error",
+    "anti-slop/no-conditional-empty-object-spread": "error",
+    "anti-slop/no-known-value-widening": "error",
+    "anti-slop/no-module-mocking": "error",
+    "anti-slop/no-object-parameters": "error",
+    "anti-slop/no-reflect-apply": "error",
+    "anti-slop/no-reflect-get": "error",
+    "anti-slop/no-runtime-typeof": "error",
+    "anti-slop/no-shape-in-symbol-names": "error",
+    "anti-slop/no-unknown-parameters": "error",
+    "anti-slop/no-unknown-returns": "error",
+    "anti-slop/no-unknown-type-aliases": "error",
+    "anti-slop/no-unsafe-dictionary-type": "error",
+    "anti-slop/no-widen-then-assert": "error",
+    "anti-slop/require-readable-spacing": "error",
+    "anti-slop/require-safety-comment-for-type-assertion": "error"
+  }
+}

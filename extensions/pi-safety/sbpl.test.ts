@@ -209,7 +209,7 @@ test("keeps hostile path bytes out of generated SBPL source", () => {
 test("generated hostile path components remain isolated in parameters", () => {
 	withTestTempDirectory("pi-safety-sbpl-generated-", (root) => {
 		for (let index = 0; index < 32; index += 1) {
-			const hostile = path.join(root, `case-${index}-'\"$()[];\n-${String.fromCodePoint(0x3b1 + (index % 20))}`)
+			const hostile = path.join(root, `case-${index}-'"$()[];\n-${String.fromCodePoint(0x3b1 + (index % 20))}`)
 			fs.mkdirSync(hostile)
 			const canonical = canonicalPath(hostile)
 

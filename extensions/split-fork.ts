@@ -190,7 +190,7 @@ export function parseSplitForkArgs(raw: string): SplitForkArgs {
 		}
 
 		if (!isSplitDirection(value)) {
-			throw new Error(`Invalid direction \"${value}\". Expected one of: right, left, down, up.`)
+			throw new Error(`Invalid direction "${value}". Expected one of: right, left, down, up.`)
 		}
 
 		return { direction: value, prompt }
@@ -206,7 +206,7 @@ export function parseSplitForkArgs(raw: string): SplitForkArgs {
 		}
 
 		if (!isSplitDirection(value)) {
-			throw new Error(`Invalid direction \"${value}\". Expected one of: right, left, down, up.`)
+			throw new Error(`Invalid direction "${value}". Expected one of: right, left, down, up.`)
 		}
 
 		return { direction: value, prompt }

@@ -65,8 +65,9 @@ function target(config: RouterConfig, tier: Tier, ctx: RouterContext): ModelRout
 	const choice = config.tiers[tier]
 	const model = ctx.modelRegistry.find(choice.provider, choice.model)
 
-	if (!model)
+	if (!model) {
 		throw new Error(`model-router: model ${choice.provider}/${choice.model} for ${tier} is not in Pi's catalog`)
+	}
 
 	return { model, thinkingLevel: choice.thinking }
 }
@@ -88,8 +89,10 @@ function restoreSelection(state: RouterState, ctx: RouterContext): ModelRoute<Ro
 function toolFailures(state: RouterState, branch: readonly SessionEntry[], threshold: number) {
 	const start = state.toolCursor === null ? -1 : branch.findIndex((entry) => entry.id === state.toolCursor)
 
-	if (state.toolCursor !== null && start === -1)
+	if (state.toolCursor !== null && start === -1) {
 		return { failures: 0, escalate: false, cursor: branch.at(-1)?.id ?? null }
+	}
+
 	let failures = state.failures
 	let escalate = false
 	let cursor = state.toolCursor
@@ -225,8 +228,10 @@ export function createRouter(
 
 					if (decision.kind === "classified") warnedUnavailable = false
 					else if (decision.reason !== "attachments" && !warnedUnavailable) {
-						if (ctx.hasUI)
+						if (ctx.hasUI) {
 							ctx.ui.notify(`model-router: local classification failed (${decision.reason}); using strong`, "warning")
+						}
+
 						warnedUnavailable = true
 					}
 

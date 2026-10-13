@@ -56,8 +56,10 @@ export type RestoreError =
 	| { readonly kind: "io"; readonly operation: string; readonly path: string; readonly message: string }
 
 export function selectedRestoreScope(inputs: readonly string[]): Result<RestoreScope, RestoreError> {
-	if (inputs.length === 0)
+	if (inputs.length === 0) {
 		return err({ kind: "invalid-selection", input: "", message: "at least one path is required" })
+	}
+
 	const paths: RelativeSnapshotPath[] = []
 	const seen = new Set<string>()
 
@@ -74,8 +76,9 @@ export function selectedRestoreScope(inputs: readonly string[]): Result<RestoreS
 
 	const [first, ...rest] = paths
 
-	if (first === undefined)
+	if (first === undefined) {
 		return err({ kind: "invalid-selection", input: "", message: "at least one path is required" })
+	}
 
 	return ok(
 		// SAFETY: every path was parsed and deduplicated, and first proves the frozen selection is nonempty.

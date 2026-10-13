@@ -495,7 +495,7 @@ function updateSeatbeltFooter(pi: ExtensionAPI, context: ExtensionContext, enabl
 
 				const statuses = [...footerData.getExtensionStatuses()].sort(([a], [b]) => a.localeCompare(b))
 
-				if (statuses.length)
+				if (statuses.length) {
 					lines.push(
 						truncateToWidth(
 							statuses
@@ -510,6 +510,7 @@ function updateSeatbeltFooter(pi: ExtensionAPI, context: ExtensionContext, enabl
 							"",
 						),
 					)
+				}
 
 				return lines
 			},

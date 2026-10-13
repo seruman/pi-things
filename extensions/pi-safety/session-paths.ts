@@ -69,8 +69,10 @@ export function parseSessionPathsEnvironment(
 
 	const parsed = environmentSchema.safeParse(decoded)
 
-	if (!parsed.success)
+	if (!parsed.success) {
 		return invalid("PI_SAFETY_SESSION_PATHS", parsed.error.issues.map((issue) => issue.message).join("; "))
+	}
+
 	const grants: SessionPathGrant[] = []
 
 	for (const entry of parsed.data) {

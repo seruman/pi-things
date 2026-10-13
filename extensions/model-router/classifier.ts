@@ -147,13 +147,15 @@ export function parseClassification(
 	durationMs: number,
 	input?: RoutingInput,
 ): Classification {
-	if (result.stopReason !== "stop")
+	if (result.stopReason !== "stop") {
 		return {
 			kind: "fallback",
 			reason: "classifier-error",
 			durationMs,
 			error: errorDetails(result.errorMessage ?? `Classifier stopped with ${result.stopReason}`, input),
 		}
+	}
+
 	const answers = routingAnswers.safeParse(result.answers)
 
 	if (!answers.success) {
@@ -232,12 +234,15 @@ export const classifyTier: ClassifyTier = async (config, input, registry, signal
 		signal?.throwIfAborted()
 		const durationMs = Math.round(performance.now() - start)
 
-		if (deadline.aborted)
+		if (deadline.aborted) {
 			return { kind: "fallback", reason: "timeout", durationMs, error: { ...timeoutError(), status } }
+		}
+
 		const decision = parseClassification(result, durationMs, input)
 
-		if (decision.kind === "fallback")
+		if (decision.kind === "fallback") {
 			decision.error = { ...(transportError ?? decision.error ?? { message: "Classification failed" }), status }
+		}
 
 		return decision
 	} catch (error) {

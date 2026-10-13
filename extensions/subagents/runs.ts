@@ -21,7 +21,7 @@ const runNameSchema = z
 	.min(1)
 	.max(64)
 	.regex(/^\S(?:[\s\S]*\S)?$/, "Subagent names must not have surrounding whitespace")
-	// biome-ignore lint/suspicious/noControlCharactersInRegex: Reject terminal control characters.
+	// oxlint-disable-next-line no-control-regex -- Reject terminal control characters.
 	.regex(/^[^\u0000-\u001f\u007f]*$/, "Subagent names must not contain terminal control characters")
 
 export function normalizeRunName(value: string): string {

@@ -317,8 +317,9 @@ function observeWorkspaceScope(
 		try {
 			stat = fs.lstatSync(absolute)
 		} catch (cause) {
-			if (presence === "optional" && cause instanceof Error && "code" in cause && cause.code === "ENOENT")
+			if (presence === "optional" && cause instanceof Error && "code" in cause && cause.code === "ENOENT") {
 				return ok(undefined)
+			}
 
 			return err({ kind: "io", operation: "lstat", path: absolute, message: errorMessage(cause) })
 		}

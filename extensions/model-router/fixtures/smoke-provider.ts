@@ -17,8 +17,10 @@ export default function (pi: ExtensionAPI) {
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		})),
 		streamSimple(model, context, options) {
-			if (JSON.stringify(context).includes("model-router.decision"))
+			if (JSON.stringify(context).includes("model-router.decision")) {
 				throw new Error("Diagnostics entered model context")
+			}
+
 			const stream = createAssistantMessageEventStream()
 			const text = `router-smoke:${model.id}:${options?.reasoning}`
 

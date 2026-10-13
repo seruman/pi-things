@@ -65,12 +65,10 @@ function accessCompilationGroups(policy: Policy, rules: readonly FileAccessRule[
 
 	return [
 		{ rules: effectiveFileAccessRules(policy, { kind: "sandbox" }), scope: genericScope },
-		...executables.map(
-			(executable): AccessCompilationGroup => ({
-				rules: effectiveFileAccessRules(policy, { kind: "executable", executable }),
-				scope: { kind: "process", executable },
-			}),
-		),
+		...executables.map((executable): AccessCompilationGroup => ({
+			rules: effectiveFileAccessRules(policy, { kind: "executable", executable }),
+			scope: { kind: "process", executable },
+		})),
 	]
 }
 

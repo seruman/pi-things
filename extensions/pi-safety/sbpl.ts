@@ -518,7 +518,7 @@ function emitFileExtensionIssueRule(rule: FileExtensionIssueRule, parameters: Pa
 
 		return [
 			"  (require-all",
-			`    (extension-class \"${grant.extensionClass}\")`,
+			`    (extension-class "${grant.extensionClass}")`,
 			"    (require-any",
 			...matchers.map((matcher) => `      ${matcher}`),
 			"    )",
@@ -532,7 +532,7 @@ function emitFileExtensionIssueRule(rule: FileExtensionIssueRule, parameters: Pa
 function emitBrokerExtensionIssueRule(rule: BrokerExtensionIssueRule): string {
 	const [operation, extensionClass] = webKitBrokerExtension(rule.extension)
 
-	return `(allow ${operation} (extension-class \"${extensionClass}\"))`
+	return `(allow ${operation} (extension-class "${extensionClass}"))`
 }
 
 function emitPathMatcher(matcher: PathMatcherNode, parameters: ParameterEmitter): string {
@@ -573,13 +573,13 @@ class ParameterEmitter {
 	reference(value: string): string {
 		const existing = this.#namesByValue.get(value)
 
-		if (existing !== undefined) return `(param \"${existing}\")`
+		if (existing !== undefined) return `(param "${existing}")`
 
 		const name = `PI_SAFETY_${this.#parameters.length}`
 		this.#namesByValue.set(value, name)
 		this.#parameters.push(Object.freeze({ name, value }))
 
-		return `(param \"${name}\")`
+		return `(param "${name}")`
 	}
 
 	definitions(): readonly SbplParameter[] {

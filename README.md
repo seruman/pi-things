@@ -31,7 +31,7 @@ pi install git:github.com/seruman/pi-things
 
 pi install -l git:github.com/seruman/pi-things
 
-# or 
+# or
 
 pi install /path/to/local/clone
 

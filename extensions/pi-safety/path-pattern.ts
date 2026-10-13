@@ -165,7 +165,7 @@ function seatbeltRegexSource(regex: RegExp): CompiledPathRegex | undefined {
 }
 
 function containsControlCharacter(input: string): boolean {
-	// biome-ignore lint/suspicious/noControlCharactersInRegex: These are precisely the characters this predicate detects.
+	// oxlint-disable-next-line no-control-regex -- These are precisely the characters this predicate detects.
 	return /[\x00-\x1f\x7f]/u.test(input)
 }
 

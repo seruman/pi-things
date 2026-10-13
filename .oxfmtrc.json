@@ -1,0 +1,31 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "useTabs": true,
+  "tabWidth": 2,
+  "printWidth": 120,
+  "singleQuote": false,
+  "jsxSingleQuote": false,
+  "quoteProps": "as-needed",
+  "trailingComma": "all",
+  "semi": false,
+  "arrowParens": "always",
+  "bracketSameLine": false,
+  "bracketSpacing": true,
+  "sortPackageJson": false,
+  "embeddedLanguageFormatting": "off",
+  "ignorePatterns": [
+    "node_modules/**",
+    ".pi/**",
+    ".tmp/**",
+    ".tmp-task-tools-drive/**",
+    "skills/**",
+    "extensions/web-tools/skills/**",
+    "tools/oxlint/anti-slop/**"
+  ],
+  "overrides": [
+    {
+      "files": ["*.json", "*.jsonc"],
+      "options": { "useTabs": false, "tabWidth": 2 }
+    }
+  ]
+}

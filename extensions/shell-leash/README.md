@@ -6,24 +6,24 @@ Not a sandbox, not a security boundary, just enough to stop me swearing to the s
 
 ## What it guards
 
-| Capability | What it catches |
-|---|---|
-| `fs.rm` | Recursive or forced `rm` (`-r`, `-R`, `-f`, and combined/long forms) |
-| `git.commit.amend` | `git commit --amend` |
-| `git.checkout` | `git checkout` (branch, path, ours/theirs) |
-| `git.switch` | `git switch` |
-| `git.restore` | `git restore` (staged, source, path) |
-| `git.reset` | `git reset` (soft, mixed) |
-| `git.reset.hard` | `git reset --hard` |
-| `git.clean` | `git clean` |
-| `git.config.global` | `git config --global ...` |
-| `git.push` | `git push` (regular) |
-| `git.push.force` | `git push --force`, `git push --force-with-lease` |
-| `gh.pr.create` | `gh pr create` |
-| `gh.pr.comment` | `gh pr comment` |
-| `gh.pr.merge` | `gh pr merge` |
-| `gh.issue.create` | `gh issue create` |
-| `gh.issue.comment` | `gh issue comment` |
+| Capability          | What it catches                                                      |
+| ------------------- | -------------------------------------------------------------------- |
+| `fs.rm`             | Recursive or forced `rm` (`-r`, `-R`, `-f`, and combined/long forms) |
+| `git.commit.amend`  | `git commit --amend`                                                 |
+| `git.checkout`      | `git checkout` (branch, path, ours/theirs)                           |
+| `git.switch`        | `git switch`                                                         |
+| `git.restore`       | `git restore` (staged, source, path)                                 |
+| `git.reset`         | `git reset` (soft, mixed)                                            |
+| `git.reset.hard`    | `git reset --hard`                                                   |
+| `git.clean`         | `git clean`                                                          |
+| `git.config.global` | `git config --global ...`                                            |
+| `git.push`          | `git push` (regular)                                                 |
+| `git.push.force`    | `git push --force`, `git push --force-with-lease`                    |
+| `gh.pr.create`      | `gh pr create`                                                       |
+| `gh.pr.comment`     | `gh pr comment`                                                      |
+| `gh.pr.merge`       | `gh pr merge`                                                        |
+| `gh.issue.create`   | `gh issue create`                                                    |
+| `gh.issue.comment`  | `gh issue comment`                                                   |
 
 Tries to detect common shell wrappers; pipelines, command substitutions, `bash -c`, `sh -c`, `env ... bash -c`, `command bash -c`.
 

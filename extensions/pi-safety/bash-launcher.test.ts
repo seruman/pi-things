@@ -33,7 +33,7 @@ test("generated hostile parameter values remain inert outer-shell argv", () => {
 	withTestTempDirectory("bash-launcher-generated-", (root) => {
 		for (let index = 0; index < 24; index += 1) {
 			const injected = path.join(root, `injected-${index}`)
-			const value = `case-${index}-'\"\\\n$(touch ${injected});${String.fromCodePoint(0x3b1 + (index % 20))}`
+			const value = `case-${index}-'"\\\n$(touch ${injected});${String.fromCodePoint(0x3b1 + (index % 20))}`
 
 			const compiled: CompiledSbpl = {
 				source: "(version 1)\n(allow default)",

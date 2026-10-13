@@ -120,8 +120,9 @@ export function loadConfig(path: string): z.infer<typeof configSchema> {
 	try {
 		contents = readFileSync(path, "utf8")
 	} catch (error) {
-		if (!(error instanceof Error && "code" in error && error.code === "ENOENT"))
+		if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
 			throw new Error(`model-router: cannot read ${path}`, { cause: error })
+		}
 	}
 
 	try {

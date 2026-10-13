@@ -31,8 +31,9 @@ export function childUsage(entries: SessionEntry[]): Usage {
 		usage.cacheWrite += part.cacheWrite
 		usage.totalTokens += part.totalTokens
 
-		for (const key of ["input", "output", "cacheRead", "cacheWrite", "total"] as const)
+		for (const key of ["input", "output", "cacheRead", "cacheWrite", "total"] as const) {
 			usage.cost[key] += part.cost[key]
+		}
 
 		if (part.reasoning !== undefined) usage.reasoning = (usage.reasoning ?? 0) + part.reasoning
 
