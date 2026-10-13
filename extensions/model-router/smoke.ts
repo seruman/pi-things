@@ -95,7 +95,7 @@ for (const [index, { prompt, tier, newTask }] of prompts.entries()) {
 			resolve(directory, "fixtures/smoke-provider.ts"),
 			"-e",
 			resolve(directory, "index.ts"),
-			...(index === 0 ? ["--model", "model-router/auto-smoke"] : []),
+			...(index === 0 ? ["--model", "router-smoke/big"] : []),
 			prompt,
 		],
 		{

@@ -19,7 +19,7 @@ const tiers = z.object({ standard: target, strong: target }).strict()
 
 const router = z.object({ tiers }).strict()
 
-// Preset names are virtual-model IDs, not provider IDs. Routing logic only knows abstract tiers.
+// Preset names belong to router settings, not the provider catalog. Routing only knows abstract tiers.
 const presets = {
 	codex: {
 		tiers: {

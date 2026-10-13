@@ -18,7 +18,7 @@ const stateSchema = z.object({
 	failures: z.number().int().nonnegative(),
 })
 
-const persistedStateSchema = z.union([stateSchema, stateSchema.extend({ tier: z.literal("trivial") })])
+export const persistedStateSchema = z.union([stateSchema, stateSchema.extend({ tier: z.literal("trivial") })])
 
 export type RouterState = z.infer<typeof stateSchema>
 

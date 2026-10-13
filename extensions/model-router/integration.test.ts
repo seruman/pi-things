@@ -1,453 +1,240 @@
-import { afterEach, describe, expect, test } from "bun:test"
-import { randomUUID } from "node:crypto"
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { dirname, join } from "node:path"
-import { fileURLToPath } from "node:url"
+import { describe, expect, test } from "bun:test"
+import { SessionManager, VIRTUAL_MODEL_STATE_ENTRY } from "@earendil-works/pi-coding-agent"
 import {
-	type AssistantMessage,
-	InMemoryCredentialStore,
-	type Model,
-	type Provider,
-	type SimpleStreamOptions,
-	type TranscriptContext,
-	Type,
-	createAssistantMessageEventStream,
-} from "@earendil-works/pi-ai"
-import {
-	type AgentSession,
-	DefaultResourceLoader,
-	type ExtensionFactory,
-	ModelRuntime,
-	SessionManager,
-	SettingsManager,
-	VIRTUAL_MODEL_STATE_ENTRY,
-	createAgentSession,
-} from "@earendil-works/pi-coding-agent"
-import type { Classification, ClassifyTier, RoutingInput } from "./classifier"
-import type { RouterConfig, Tier } from "./config"
-import { createModelRouterExtension } from "./index"
+	ROUTER_MODEL,
+	ROUTER_NAME,
+	classified,
+	classifierSequence,
+	cleanups,
+	customEntries,
+	gate,
+	harness,
+	requiredModel,
+	routes,
+	waitForGate,
+} from "./fixtures/sdk-harness"
+import { MODE_ENTRY, STATE_ENTRY } from "./index"
 import { DECISION_ENTRY, ROUTER_PROVIDER } from "./router"
 
-const ROUTER_NAME = "test"
-
-const ROUTER_MODEL = "auto-test"
-
-type TestTiers = Record<Tier, Omit<RouterConfig["tiers"][Tier], "provider"> & { provider?: string }>
-
-// Only the classifier and physical transport are fakes. Routing, extension events,
-// tools, queues, context reconstruction, and persistence use the installed SDK.
-const cleanups: Array<() => void | Promise<void>> = []
-
-afterEach(async () => {
-	for (const cleanup of cleanups.splice(0).reverse()) await cleanup()
-})
-
-function gate() {
-	let open!: () => void
-
-	const promise = new Promise<void>((resolve) => {
-		open = resolve
-	})
-
-	return { promise, open }
-}
-
-async function waitForGate(promise: Promise<void>, signal?: AbortSignal) {
-	signal?.throwIfAborted()
-	let abort!: () => void
-
-	const aborted = new Promise<never>((_, reject) => {
-		abort = () => reject(signal?.reason ?? new Error("aborted"))
-		signal?.addEventListener("abort", abort, { once: true })
-	})
-
-	try {
-		await Promise.race([promise, aborted])
-	} finally {
-		signal?.removeEventListener("abort", abort)
-	}
-}
-
-function classified(tier: Tier, newTask = true, confidence = 0.95, strongProbability?: number): Classification {
-	return {
-		kind: "classified",
-		tier,
-		newTask,
-		durationMs: 1,
-		probabilities:
-			strongProbability === undefined
-				? { standard: 0.01, strong: 0.01, [tier]: 0.99 }
-				: { standard: 1 - strongProbability, strong: strongProbability },
-		confidence,
-		newTaskProbability: newTask ? 0.9 : 0.1,
-	}
-}
-
-function classifierSequence(...answers: Classification[]) {
-	const inputs: RoutingInput[] = []
-
-	const classify: ClassifyTier = async (_config, input, _registry, signal) => {
-		signal?.throwIfAborted()
-		inputs.push(structuredClone(input))
-		const answer = answers.shift()
-
-		if (!answer) throw new Error("Unexpected classification")
-
-		return answer
-	}
-
-	return { classify, inputs }
-}
-
-type Step = { tool?: boolean; wait?: Promise<void>; started?: () => void; error?: string; text?: string }
-
-type Dispatch = {
-	model: string
-	provider: string
-	thinking: SimpleStreamOptions["reasoning"]
-	context: TranscriptContext
-}
-
-async function harness(
-	options: {
-		classify?: ClassifyTier
-		classifier?: RouterConfig["classifier"]
-		strongProbabilityThreshold?: number
-		minConfidence?: number
-		steps?: Step[]
-		extraExtension?: ExtensionFactory
-		retry?: boolean
-		toolFailures?: boolean[]
-		tiers?: TestTiers
-		configFile?: boolean
-		loadFromDisk?: boolean
-		captureUI?: boolean
-		routers?: (providers: { primary: string; alternate: string }) => Record<string, { tiers: RouterConfig["tiers"] }>
-	} = {},
-) {
-	const root = mkdtempSync(join(tmpdir(), "model-router-sdk-"))
-	cleanups.push(() => rmSync(root, { recursive: true, force: true }))
-	const cwd = join(root, "workspace")
-	const agentDir = join(root, "agent")
-	mkdirSync(cwd)
-	mkdirSync(agentDir)
-	const providerId = `test-physical-${randomUUID()}`
-	const alternateProviderId = `test-alternate-${randomUUID()}`
-	const configPath = join(root, "model-router.json")
-
-	const tiers: TestTiers = options.tiers ?? {
-		standard: { model: "middle", thinking: "medium" },
-		strong: { model: "big", thinking: "high" },
-	}
-
-	if (options.configFile !== false) {
-		writeFileSync(
-			configPath,
-			JSON.stringify({
-				routers: {
-					[ROUTER_NAME]: {
-						tiers: Object.fromEntries(
-							Object.entries(tiers).map(([tier, target]) => [tier, { provider: providerId, ...target }]),
-						),
-					},
-					...options.routers?.({ primary: providerId, alternate: alternateProviderId }),
-				},
-				classifier: options.classifier,
-				strongProbabilityThreshold: options.strongProbabilityThreshold,
-				minConfidence: options.minConfidence,
-			}),
-		)
-	}
-
-	const runtime = await ModelRuntime.create({
-		credentials: new InMemoryCredentialStore(),
-		modelsPath: null,
-		allowModelNetwork: false,
-		refreshOnCreate: false,
-	})
-
-	const models: Model<"test-physical-api">[] = ["small", "middle", "big"].map((id) => ({
-		id,
-		provider: providerId,
-		name: id,
-		api: "test-physical-api",
-		baseUrl: "http://unused.invalid",
-		reasoning: true,
-		input: ["text"],
-		contextWindow: 128_000,
-		maxTokens: 4096,
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-	}))
-
-	const dispatches: Dispatch[] = []
-	const steps = [...(options.steps ?? [])]
-	const transportErrors: unknown[] = []
-
-	const stream: Provider["streamSimple"] = (model, context, streamOptions) => {
-		const output = createAssistantMessageEventStream()
-		const index = dispatches.length
-		dispatches.push({
-			model: model.id,
-			provider: model.provider,
-			thinking: streamOptions?.reasoning,
-			context: structuredClone(context),
-		})
-
-		const message: AssistantMessage = {
-			role: "assistant",
-			api: model.api,
-			provider: model.provider,
-			model: model.id,
-			content: [],
-			stopReason: "pending",
-			timestamp: Date.now(),
-			usage: {
-				input: 1,
-				output: 1,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 2,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-		}
-
-		void (async () => {
-			try {
-				const step = steps.shift()
-
-				if (!step) throw new Error(`Unexpected physical request ${index + 1}`)
-				step.started?.()
-
-				if (step.wait) await waitForGate(step.wait, streamOptions?.signal)
-				streamOptions?.signal?.throwIfAborted()
-
-				if (step.error) {
-					message.stopReason = "error"
-					message.errorMessage = step.error
-					output.push({ type: "error", reason: "error", error: message })
-
-					return
-				}
-
-				output.push({ type: "start", partial: message })
-
-				if (step.tool) {
-					const toolCall = { type: "toolCall" as const, id: `call-${index}`, name: "probe", arguments: {} }
-					message.content.push(toolCall)
-					output.push({ type: "toolcall_start", contentIndex: 0, partial: message })
-					output.push({ type: "toolcall_delta", contentIndex: 0, delta: "{}", partial: message })
-					output.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial: message })
-					message.stopReason = "toolUse"
-				} else {
-					message.content.push({ type: "text", text: "" })
-					output.push({ type: "text_start", contentIndex: 0, partial: message })
-					const text = step.text ?? "done"
-					message.content[0] = { type: "text", text }
-					output.push({ type: "text_delta", contentIndex: 0, delta: text, partial: message })
-					output.push({ type: "text_end", contentIndex: 0, content: text, partial: message })
-					message.stopReason = "stop"
-				}
-
-				output.push({ type: "done", reason: message.stopReason, message })
-			} catch (error) {
-				transportErrors.push(error)
-				message.stopReason = streamOptions?.signal?.aborted ? "aborted" : "error"
-				message.errorMessage = String(error)
-				output.push({ type: "error", reason: message.stopReason, error: message })
-			} finally {
-				output.end()
-			}
-		})()
-
-		return output
-	}
-
-	for (const id of [providerId, alternateProviderId]) {
-		runtime.registerNativeProvider({
-			id,
-			name: "In-process test transport",
-			getModels: () => models.map((model) => ({ ...model, provider: id })),
-			auth: { apiKey: { name: "Keyless test provider", resolve: async () => ({ auth: {} }) } },
-			stream: (model, context) => stream(model, context),
-			streamSimple: stream,
-		})
-	}
-
-	await runtime.refresh({ allowNetwork: false })
-
-	for (const id of [providerId, alternateProviderId]) expect(runtime.hasConfiguredAuth(id)).toBe(true)
-
-	let extensionPath: string | undefined
-
-	if (options.loadFromDisk) {
-		const extensionDir = join(root, "extension")
-		mkdirSync(join(extensionDir, "node_modules"), { recursive: true })
-		symlinkSync(dirname(fileURLToPath(import.meta.resolve("zod/package.json"))), join(extensionDir, "node_modules/zod"))
-
-		for (const file of ["index.ts", "router.ts", "classifier.ts", "config.ts", "progress.ts", "context.ts"]) {
-			copyFileSync(join(import.meta.dir, file), join(extensionDir, file))
-		}
-
-		extensionPath = join(extensionDir, "test-entry.ts")
-		writeFileSync(
-			extensionPath,
-			`import { createModelRouterExtension } from "./index.ts"\nexport default createModelRouterExtension({ configPath: ${JSON.stringify(configPath)} })\n`,
-		)
-	}
-
-	const boundaries: string[] = []
-	const extensionErrors: unknown[] = []
-	const widgets: (string[] | undefined)[] = []
-	const notifications: string[] = []
-	let toolExecutions = 0
-	const sessions: AgentSession[] = []
-	cleanups.push(async () => {
-		for (const session of sessions) {
-			await session.abort()
-			session.dispose()
-		}
-	})
-
-	async function open(manager = SessionManager.create(cwd, join(root, "sessions")), resume = false) {
-		const settingsManager = SettingsManager.inMemory({
-			defaultTools: [],
-			compaction: { enabled: false },
-			cacheWarming: "off",
-			retry: { enabled: options.retry ?? false, maxRetries: 1, baseDelayMs: 1 },
-		})
-
-		const loader = new DefaultResourceLoader({
-			cwd,
-			agentDir,
-			settingsManager,
-			noExtensions: true,
-			noSkills: true,
-			noPromptTemplates: true,
-			noThemes: true,
-			noContextFiles: true,
-			systemPrompt: "You are an isolated SDK test agent.",
-			additionalExtensionPaths: extensionPath ? [extensionPath] : [],
-			extensionFactories: [
-				...(extensionPath ? [] : [createModelRouterExtension({ configPath, classify: options.classify })]),
-				(pi) => {
-					pi.on("before_agent_start", (event) => {
-						boundaries.push(event.prompt)
-					})
-					pi.registerTool({
-						name: "probe",
-						label: "Probe",
-						description: "In-memory probe",
-						parameters: Type.Object({}),
-						execute: async () => {
-							toolExecutions++
-							const isError = options.toolFailures?.[toolExecutions - 1] ?? false
-
-							return {
-								content: [{ type: "text", text: isError ? "probe failed" : "probe succeeded" }],
-								details: {},
-								isError,
-							}
-						},
-					})
-				},
-				...(options.extraExtension ? [options.extraExtension] : []),
-			],
-		})
-
-		await loader.reload()
-		expect(loader.getExtensions().errors).toEqual([])
-
-		const { session, modelFallbackMessage } = await createAgentSession({
-			cwd,
-			agentDir,
-			modelRuntime: runtime,
-			resourceLoader: loader,
-			settingsManager,
-			sessionManager: manager,
-			model: resume ? undefined : models[0],
-			noTools: "builtin",
-		})
-
-		sessions.push(session)
-		expect(modelFallbackMessage).toBeUndefined()
-		await session.bindExtensions({
-			onError: (error) => {
-				extensionErrors.push(error)
-			},
-		})
-
-		if (options.captureUI) {
-			const runner = session.extensionRunner
-			runner.setUIContext(
-				{
-					...runner.getUIContext(),
-					setWidget(_key, content) {
-						if (content !== undefined && !Array.isArray(content)) throw new Error("Expected a text routing widget")
-						widgets.push(content)
-					},
-					notify: (message) => notifications.push(message),
-				},
-				"tui",
-			)
-		}
-
-		if (!resume && options.configFile !== false) {
-			await session.setModel(requiredModel(runtime, ROUTER_PROVIDER, ROUTER_MODEL))
-		}
-
-		return session
-	}
-
-	const session = await open()
-
-	return {
-		session,
-		runtime,
-		providerId,
-		alternateProviderId,
-		dispatches,
-		boundaries,
-		widgets,
-		notifications,
-		open,
-		get toolExecutions() {
-			return toolExecutions
-		},
-		assertHealthy() {
-			expect(extensionErrors).toEqual([])
-			expect(transportErrors).toEqual([])
-			expect(steps).toHaveLength(0)
-		},
-	}
-}
-
-function requiredModel(runtime: ModelRuntime, provider: string, id: string) {
-	const model = runtime.getModel(provider, id)
-
-	if (!model) throw new Error(`Missing test model ${provider}/${id}`)
-
-	return model
-}
-
-function customEntries(session: AgentSession, customType: string) {
-	return session.sessionManager
-		.getBranch()
-		.filter((entry) => entry.type === "custom")
-		.filter((entry) => entry.customType === customType)
-}
-
-function routes(dispatches: Dispatch[]) {
-	return dispatches.map(({ model, thinking }) => [model, thinking])
-}
-
 describe("model-router SDK integration", () => {
+	test("/router opens the settings panel without dispatching a model request", async () => {
+		const h = await harness({ configFile: false })
+		await h.choosePreset(undefined)
+		expect(h.settingsFrames[0]).toMatch(/Enabled\s+no/)
+		expect(h.settingsFrames[0]).toMatch(/Preset\s+\S+/)
+		expect(h.settingsFrames.some((frame) => frame.includes("bedrock") && frame.includes("codex"))).toBe(true)
+		expect(h.dispatches).toEqual([])
+		h.assertHealthy()
+	})
+
+	test("the preset submenu lists configured presets, preselects current, and cancelling preserves mode and selection", async () => {
+		const h = await harness({ enableRouter: false })
+		const initial = structuredClone(h.session.sessionManager.getBranch())
+		const physical = h.session.model
+		await h.choosePreset(undefined)
+		const submenu = h.settingsFrames.find((frame) => frame.includes("bedrock") && frame.includes("codex"))
+		expect(submenu).toMatch(/\btest\b/)
+		expect(h.session.sessionManager.getBranch()).toEqual(initial)
+		expect(h.session.model).toEqual(physical)
+		await h.choosePreset(ROUTER_NAME)
+		expect(customEntries(h.session, MODE_ENTRY).at(-1)?.data).toEqual({
+			version: 1,
+			enabled: true,
+			preset: ROUTER_NAME,
+		})
+		expect([...h.statuses.values()].join(" ")).toMatch(/router.*on.*test/i)
+		const enabled = structuredClone(h.session.sessionManager.getBranch())
+		const selected = h.session.model
+		const thinking = h.session.thinkingLevel
+		const frameCount = h.settingsFrames.length
+		await h.choosePreset(undefined)
+		expect(h.settingsFrames.slice(frameCount).some((frame) => /→ test\b/.test(frame))).toBe(true)
+		expect(h.session.sessionManager.getBranch()).toEqual(enabled)
+		expect(h.session.model).toEqual(selected)
+		expect(h.session.thinkingLevel).toBe(thinking)
+		expect(h.dispatches).toEqual([])
+		h.assertHealthy()
+	})
+
+	test("a disabled preset change preserves physical selection and is remembered across panel and session reopen", async () => {
+		const classifier = classifierSequence()
+
+		const h = await harness({
+			enableRouter: false,
+			classify: classifier.classify,
+			steps: [{}],
+			routers: ({ alternate }) => ({
+				other: {
+					tiers: {
+						standard: { provider: alternate, model: "middle", thinking: "medium" },
+						strong: { provider: alternate, model: "big", thinking: "high" },
+					},
+				},
+			}),
+		})
+
+		h.session.setThinkingLevel("low")
+		const physical = h.session.model
+		await h.configureRouter({ preset: "other" })
+		expect(h.session.model).toEqual(physical)
+		expect(h.session.thinkingLevel).toBe("low")
+		expect(customEntries(h.session, MODE_ENTRY).at(-1)?.data).toEqual({
+			version: 1,
+			enabled: false,
+			preset: "other",
+		})
+		expect([...h.statuses.values()].join(" ")).toContain("router: off")
+
+		const panel = await h.openRouter()
+		expect(panel.frame()).toMatch(/Enabled\s+no/)
+		expect(panel.frame()).toMatch(/Preset\s+other\b/)
+		panel.press("\x1b")
+		await panel.result
+		await h.session.prompt("Still a manual task")
+		expect(routes(h.dispatches)).toEqual([["small", "low"]])
+		expect(classifier.inputs).toEqual([])
+		expect(customEntries(h.session, STATE_ENTRY)).toEqual([])
+
+		const file = h.session.sessionFile
+
+		if (!file) throw new Error("Missing session file")
+		h.session.dispose()
+		const resumed = await h.open(SessionManager.open(file), true)
+		expect(resumed.model).toEqual(physical)
+		expect(resumed.thinkingLevel).toBe("low")
+		const reopened = await h.openRouter(resumed)
+		expect(reopened.frame()).toMatch(/Enabled\s+no/)
+		expect(reopened.frame()).toMatch(/Preset\s+other\b/)
+		reopened.press("\x1b")
+		await reopened.result
+
+		await h.configureRouter({ enabled: true }, resumed)
+		expect(resumed.model?.provider).toBe(h.alternateProviderId)
+		expect(resumed.model?.id).toBe("big")
+		expect(resumed.thinkingLevel).toBe("high")
+		expect(customEntries(resumed, MODE_ENTRY).at(-1)?.data).toEqual({
+			version: 1,
+			enabled: true,
+			preset: "other",
+		})
+		h.assertHealthy()
+	})
+
+	test("failed activation rolls back the Enabled row without closing settings or changing physical selection", async () => {
+		const h = await harness({
+			enableRouter: false,
+			tiers: {
+				standard: { model: "middle", thinking: "medium" },
+				strong: { model: "missing-model", thinking: "high" },
+			},
+		})
+
+		await h.configureRouter({ preset: ROUTER_NAME })
+		h.session.setThinkingLevel("low")
+		const physical = h.session.model
+		const branch = structuredClone(h.session.sessionManager.getBranch())
+		const panel = await h.openRouter()
+		panel.press("\r")
+		await Bun.sleep(0)
+		expect(panel.closed).toBe(false)
+		expect(panel.frame()).not.toContain("Applying change")
+		expect(panel.frame()).toMatch(/Enabled\s+no/)
+		expect(panel.frame()).toMatch(/Preset\s+test\b/)
+		expect(h.session.model).toEqual(physical)
+		expect(h.session.thinkingLevel).toBe("low")
+		expect(h.session.sessionManager.getBranch()).toEqual(branch)
+		expect(h.notifications).toEqual([expect.stringContaining("missing-model is not in Pi's catalog")])
+		expect([...h.statuses.values()].join(" ")).toContain("router: off")
+		panel.press("\x1b")
+		await panel.result
+		expect(h.dispatches).toEqual([])
+		h.assertHealthy()
+	})
+
+	test("manual model and thinking choices do not disable auto; routing takes over each next turn", async () => {
+		const classifier = classifierSequence(classified("standard"), classified("strong", false))
+		const started = gate()
+		const release = gate()
+
+		const h = await harness({
+			classify: classifier.classify,
+			steps: [{ tool: true, started: started.open, wait: release.promise }, {}, {}],
+		})
+
+		const mode = structuredClone(customEntries(h.session, MODE_ENTRY))
+		await h.session.setModel(requiredModel(h.runtime, h.alternateProviderId, "small"))
+		h.session.setThinkingLevel("low")
+		const run = h.session.prompt("Routed task despite manual selection")
+
+		try {
+			await started.promise
+			await h.session.setModel(requiredModel(h.runtime, h.alternateProviderId, "big"))
+			h.session.setThinkingLevel("low")
+		} finally {
+			release.open()
+			await run
+		}
+
+		expect(routes(h.dispatches)).toEqual([
+			["middle", "medium"],
+			["middle", "medium"],
+		])
+		expect(h.session.model?.provider).toBe(h.providerId)
+		expect(h.session.model?.id).toBe("middle")
+		expect(h.session.thinkingLevel).toBe("medium")
+		expect(customEntries(h.session, MODE_ENTRY)).toEqual(mode)
+		await h.session.setModel(requiredModel(h.runtime, h.alternateProviderId, "small"))
+		h.session.setThinkingLevel("low")
+		await h.session.prompt("A harder step")
+		expect(routes(h.dispatches).at(-1)).toEqual(["big", "high"])
+		expect(h.dispatches.every(({ provider }) => provider === h.providerId)).toBe(true)
+		expect(classifier.inputs).toHaveLength(2)
+		expect(customEntries(h.session, MODE_ENTRY)).toEqual(mode)
+		h.assertHealthy()
+	})
+
+	test("expanded input is captured before start but classified only at turn start with a live signal", async () => {
+		const beforeStart: number[] = []
+		let classifications = 0
+		let input: unknown
+		let classifySignal: AbortSignal | undefined
+
+		const h = await harness({
+			classify: async (_config, request, _registry, signal) => {
+				classifications++
+				input = request
+				classifySignal = signal
+
+				return classified("standard")
+			},
+			extraExtension: (pi) => {
+				pi.on("input", (event) =>
+					event.text === "shorthand"
+						? { action: "transform", text: "Expanded implementation task" }
+						: { action: "continue" },
+				)
+				pi.on("before_agent_start", () => {
+					beforeStart.push(classifications)
+				})
+			},
+			steps: [{}],
+		})
+
+		await h.session.prompt("shorthand")
+		expect(beforeStart).toEqual([0])
+		expect(classifications).toBe(1)
+		expect(input).toMatchObject({ prompt: "Expanded implementation task", hasImages: false })
+		expect(classifySignal).toBeInstanceOf(AbortSignal)
+		expect(classifySignal?.aborted).toBe(false)
+		expect(routes(h.dispatches)).toEqual([["middle", "medium"]])
+		h.assertHealthy()
+	})
+
 	test("shows local classification progress before physical dispatch and a brief selected-model result", async () => {
 		const started = gate()
 		const release = gate()
 
 		const h = await harness({
-			captureUI: true,
 			classify: async (_config, _input, _registry, signal) => {
 				started.open()
 				await waitForGate(release.promise, signal)
@@ -473,7 +260,6 @@ describe("model-router SDK integration", () => {
 		"shows explicit strong fallback after %s and clears the pending indicator",
 		async (reason) => {
 			const h = await harness({
-				captureUI: true,
 				classify: async () => ({ kind: "fallback", reason, durationMs: reason === "timeout" ? 10000 : 5 }),
 				steps: [{}],
 			})
@@ -495,7 +281,7 @@ describe("model-router SDK integration", () => {
 		{ label: "strong", strongProbability: 0.49, tier: "standard", model: "middle", thinking: "medium" },
 	] as const)("reports the probability-routed $tier target rather than the $label label", async (fixture) => {
 		const decision = classified(fixture.label, true, 0.99, fixture.strongProbability)
-		const h = await harness({ captureUI: true, classify: async () => decision, steps: [{}] })
+		const h = await harness({ classify: async () => decision, steps: [{}] })
 		await h.session.prompt("Fresh task")
 		expect(routes(h.dispatches)).toEqual([[fixture.model, fixture.thinking]])
 		expect(
@@ -518,7 +304,6 @@ describe("model-router SDK integration", () => {
 		const started = gate()
 
 		const h = await harness({
-			captureUI: true,
 			classify: async (_config, _input, _registry, signal) => {
 				started.open()
 				await waitForGate(new Promise<void>(() => {}), signal)
@@ -539,13 +324,12 @@ describe("model-router SDK integration", () => {
 		h.assertHealthy()
 	})
 
-	test("changing selection clears pending UI and discards even a late classifier result", async () => {
+	test("disabling in settings clears pending UI and discards even a late classifier result", async () => {
 		const started = gate()
 		const release = gate()
 		let classifySignal: AbortSignal | undefined
 
 		const h = await harness({
-			captureUI: true,
 			classify: async (_config, _input, _registry, signal) => {
 				classifySignal = signal
 				started.open()
@@ -558,7 +342,11 @@ describe("model-router SDK integration", () => {
 
 		const run = h.session.prompt("Fresh task")
 		await started.promise
-		await h.session.setModel(requiredModel(h.runtime, h.providerId, "big"))
+		const physical = h.session.model
+		const thinking = h.session.thinkingLevel
+		await h.disableRouter()
+		expect(h.session.model).toEqual(physical)
+		expect(h.session.thinkingLevel).toBe(thinking)
 		expect(classifySignal?.aborted).toBe(true)
 		expect(h.widgets.at(-1)).toBeUndefined()
 		release.open()
@@ -572,7 +360,6 @@ describe("model-router SDK integration", () => {
 
 	test("unexpected classifier failure still clears progress", async () => {
 		const h = await harness({
-			captureUI: true,
 			classify: async () => {
 				throw new Error("unexpected classifier failure")
 			},
@@ -585,38 +372,30 @@ describe("model-router SDK integration", () => {
 		h.assertHealthy()
 	})
 
-	test("registers auto-prefixed built-ins without a configuration file or physical requests", async () => {
+	test("defaults off without configuration, offers built-in presets, and registers no virtual models", async () => {
 		const classifier = classifierSequence()
-		const h = await harness({ configFile: false, classify: classifier.classify })
-		expect(
-			h.runtime
-				.getAllModels(ROUTER_PROVIDER)
-				.map((model) => model.id)
-				.sort(),
-		).toEqual(["auto-bedrock", "auto-codex"])
-		expect((await h.runtime.getAvailable(ROUTER_PROVIDER)).map((model) => model.id).sort()).toEqual([
-			"auto-bedrock",
-			"auto-codex",
-		])
-
-		for (const name of ["codex", "bedrock"]) {
-			const id = `auto-${name}`
-			expect(requiredModel(h.runtime, ROUTER_PROVIDER, id).name).toBe(`Auto: ${name}`)
-			await h.session.setModel(requiredModel(h.runtime, ROUTER_PROVIDER, id))
-			expect(h.session.model?.id).toBe(id)
-			expect(h.session.model?.provider).toBe(ROUTER_PROVIDER)
-			expect(h.session.thinkingLevel).toBe("off")
-		}
-
+		const h = await harness({ configFile: false, classify: classifier.classify, steps: [{}] })
+		expect(h.runtime.getAllModels(ROUTER_PROVIDER)).toEqual([])
+		expect(await h.runtime.getAvailable(ROUTER_PROVIDER)).toEqual([])
+		expect([...h.statuses.values()].join(" ")).toMatch(/router.*off/i)
+		const branch = structuredClone(h.session.sessionManager.getBranch())
+		await h.choosePreset(undefined)
+		expect(h.settingsFrames.some((frame) => frame.includes("bedrock") && frame.includes("codex"))).toBe(true)
+		expect(h.session.sessionManager.getBranch()).toEqual(branch)
+		await h.session.prompt("Manual by default")
+		expect(h.session.model?.provider).toBe(h.providerId)
+		expect(h.session.model?.id).toBe("small")
+		expect(h.dispatches[0].model).toBe("small")
 		expect(classifier.inputs).toEqual([])
-		expect(h.dispatches).toEqual([])
+		expect(customEntries(h.session, MODE_ENTRY).at(-1)?.data).toEqual({ version: 1, enabled: false })
+		expect(customEntries(h.session, STATE_ENTRY)).toEqual([])
 		expect(customEntries(h.session, VIRTUAL_MODEL_STATE_ENTRY)).toEqual([])
 		expect(customEntries(h.session, DECISION_ENTRY)).toEqual([])
 		h.assertHealthy()
 	})
 
 	test("routes custom tiers across providers and isolates state when switching named routers", async () => {
-		const otherRouter = "auto-other"
+		const otherRouter = "other"
 
 		const classifier = classifierSequence(
 			classified("standard"),
@@ -645,27 +424,23 @@ describe("model-router SDK integration", () => {
 			}),
 		})
 
-		expect(
-			h.runtime
-				.getAllModels(ROUTER_PROVIDER)
-				.map((model) => model.id)
-				.sort(),
-		).toEqual(["auto-bedrock", "auto-codex", otherRouter, ROUTER_MODEL])
+		expect(h.runtime.getAllModels(ROUTER_PROVIDER)).toEqual([])
 		await h.session.prompt("Test router task")
 
 		for (const [name, prompt] of [
 			[otherRouter, "Other router task"],
-			[ROUTER_MODEL, "Continue test at strong"],
+			[ROUTER_NAME, "Continue test at strong"],
 			[otherRouter, "Continue other at standard"],
-			[ROUTER_MODEL, "Continue test at standard"],
+			[ROUTER_NAME, "Continue test at standard"],
 		]) {
-			const beforeSwitch = structuredClone(customEntries(h.session, VIRTUAL_MODEL_STATE_ENTRY))
-			await h.session.setModel(requiredModel(h.runtime, ROUTER_PROVIDER, name))
-			expect(customEntries(h.session, VIRTUAL_MODEL_STATE_ENTRY)).toEqual(beforeSwitch)
+			const beforeSwitch = structuredClone(customEntries(h.session, STATE_ENTRY))
+			await h.choosePreset(name)
+			expect(customEntries(h.session, STATE_ENTRY)).toEqual(beforeSwitch)
 			await h.session.prompt(prompt)
-			expect(h.session.model?.provider).toBe(ROUTER_PROVIDER)
-			expect(h.session.model?.id).toBe(name)
-			expect(h.session.thinkingLevel).toBe("off")
+			const dispatched = h.dispatches.at(-1)
+			expect(h.session.model?.provider).toBe(dispatched?.provider)
+			expect(h.session.model?.id).toBe(dispatched?.model)
+			expect(h.session.thinkingLevel).toBe(dispatched?.thinking ?? "off")
 		}
 
 		expect(classifier.inputs).toMatchObject([
@@ -682,31 +457,80 @@ describe("model-router SDK integration", () => {
 			[h.alternateProviderId, "big", "low"],
 			[h.providerId, "big", "high"],
 		])
-		const states = customEntries(h.session, VIRTUAL_MODEL_STATE_ENTRY)
+		const states = customEntries(h.session, STATE_ENTRY)
 		expect(states).toHaveLength(5)
 
-		for (const [index, modelId, tier, task] of [
-			[0, ROUTER_MODEL, "standard", "Test router task"],
+		for (const [index, preset, tier, task] of [
+			[0, ROUTER_NAME, "standard", "Test router task"],
 			[1, otherRouter, "strong", "Other router task"],
-			[2, ROUTER_MODEL, "strong", "Test router task"],
+			[2, ROUTER_NAME, "strong", "Test router task"],
 			[3, otherRouter, "strong", "Other router task"],
-			[4, ROUTER_MODEL, "strong", "Test router task"],
+			[4, ROUTER_NAME, "strong", "Test router task"],
 		] as const) {
 			const { provider, model, thinking } = h.dispatches[index]
 			expect(states[index].data).toMatchObject({
-				provider: ROUTER_PROVIDER,
-				modelId,
+				version: 1,
+				preset,
 				state: { tier, task, failures: 0, selection: { provider, model, thinking } },
 			})
 		}
 
 		expect(customEntries(h.session, DECISION_ENTRY).map((entry) => entry.data)).toMatchObject([
 			{ router: ROUTER_MODEL },
-			{ router: otherRouter },
+			{ router: "auto-other" },
 			{ router: ROUTER_MODEL },
-			{ router: otherRouter },
+			{ router: "auto-other" },
 			{ router: ROUTER_MODEL },
 		])
+		h.assertHealthy()
+	})
+
+	test("branch navigation restores mode and excludes abandoned state for inactive presets", async () => {
+		const classifier = classifierSequence(classified("standard"), classified("strong"), classified("standard", false))
+
+		const h = await harness({
+			classify: classifier.classify,
+			steps: [{}, {}, {}],
+			routers: ({ primary }) => ({
+				other: {
+					tiers: {
+						standard: { provider: primary, model: "middle", thinking: "low" },
+						strong: { provider: primary, model: "big", thinking: "low" },
+					},
+				},
+			}),
+		})
+
+		await h.session.prompt("Original preset task")
+		const leaf = h.session.sessionManager.getLeafId()
+
+		if (!leaf) throw new Error("Missing original branch")
+		await h.choosePreset("other")
+		await h.session.prompt("Abandoned other-preset task")
+		await h.disableRouter()
+		expect((await h.session.navigateTree(leaf, { summarize: false })).cancelled).toBe(false)
+		expect(customEntries(h.session, MODE_ENTRY).at(-1)?.data).toEqual({
+			version: 1,
+			enabled: true,
+			preset: ROUTER_NAME,
+		})
+		expect(h.session.model?.id).toBe("middle")
+		expect(h.session.thinkingLevel).toBe("medium")
+		await h.choosePreset("other")
+		await h.session.prompt("Other preset on the original branch")
+		expect(classifier.inputs[2].currentTier).toBeUndefined()
+		expect(classifier.inputs[2].task).toBeUndefined()
+		expect(classifier.inputs[2].recentConversation).not.toContain("Abandoned")
+		expect(routes(h.dispatches)).toEqual([
+			["middle", "medium"],
+			["big", "low"],
+			["middle", "low"],
+		])
+		expect(customEntries(h.session, STATE_ENTRY).at(-1)?.data).toMatchObject({
+			version: 1,
+			preset: "other",
+			state: { tier: "standard", task: "Other preset on the original branch" },
+		})
 		h.assertHealthy()
 	})
 
@@ -773,9 +597,9 @@ describe("model-router SDK integration", () => {
 		expect(h.boundaries).toEqual(["Implement the original task", "Now review that implementation"])
 		expect(routes(h.dispatches).at(-1)).toEqual(["big", "high"])
 		expect(h.dispatches.every((dispatch) => dispatch.provider === h.providerId)).toBe(true)
-		expect(h.session.model?.provider).toBe(ROUTER_PROVIDER)
-		expect(h.session.model?.id).toBe(ROUTER_MODEL)
-		expect(h.session.thinkingLevel).toBe("off")
+		expect(h.session.model?.provider).toBe(h.providerId)
+		expect(h.session.model?.id).toBe("big")
+		expect(h.session.thinkingLevel).toBe("high")
 		h.assertHealthy()
 	})
 
@@ -857,7 +681,7 @@ describe("model-router SDK integration", () => {
 			classified("standard", false),
 		)
 
-		const h = await harness({ classify: classifier.classify, captureUI: true, steps: [{}, {}, {}, {}, {}, {}] })
+		const h = await harness({ classify: classifier.classify, steps: [{}, {}, {}, {}, {}, {}] })
 		await h.session.prompt("Task A: redesign the architecture")
 		const strongLeaf = h.session.sessionManager.getLeafId()
 		const file = h.session.sessionFile
@@ -874,7 +698,7 @@ describe("model-router SDK integration", () => {
 			strongProbabilityThreshold: 0.5,
 			classifier: { tier: "standard", newTask: false },
 		})
-		expect(customEntries(resumed, VIRTUAL_MODEL_STATE_ENTRY).at(-1)?.data).toMatchObject({
+		expect(customEntries(resumed, STATE_ENTRY).at(-1)?.data).toMatchObject({
 			state: { tier: "strong", task: "Task A: redesign the architecture" },
 		})
 		expect(h.widgets.some((lines) => lines?.[0]?.includes(`Same task; keeping strong · ${h.providerId}/big`))).toBe(
@@ -892,7 +716,7 @@ describe("model-router SDK integration", () => {
 			probabilityTier: "standard",
 			classifier: { newTask: true },
 		})
-		expect(customEntries(resumed, VIRTUAL_MODEL_STATE_ENTRY).at(-1)?.data).toMatchObject({
+		expect(customEntries(resumed, STATE_ENTRY).at(-1)?.data).toMatchObject({
 			state: { tier: "standard", task: "Task B: update a label" },
 		})
 		await resumed.prompt("Investigate a harder part of task B")
@@ -903,7 +727,7 @@ describe("model-router SDK integration", () => {
 			probabilityTier: "strong",
 			classifier: { newTask: false },
 		})
-		expect(customEntries(resumed, VIRTUAL_MODEL_STATE_ENTRY).at(-1)?.data).toMatchObject({
+		expect(customEntries(resumed, STATE_ENTRY).at(-1)?.data).toMatchObject({
 			state: { tier: "strong", task: "Task B: update a label" },
 		})
 
@@ -934,7 +758,7 @@ describe("model-router SDK integration", () => {
 		h.assertHealthy()
 	})
 
-	test("persists native routing state, excludes diagnostics from context, and restores the active branch on resume", async () => {
+	test("persists physical routing state after the user, excludes diagnostics from context, and restores the active branch on resume", async () => {
 		const classifier = classifierSequence(
 			classified("standard"),
 			classified("strong"),
@@ -948,11 +772,11 @@ describe("model-router SDK integration", () => {
 		const leafA = h.session.sessionManager.getLeafId()
 
 		if (!leafA) throw new Error("Missing task A leaf")
-		const stateA = structuredClone(customEntries(h.session, VIRTUAL_MODEL_STATE_ENTRY))
+		const stateA = structuredClone(customEntries(h.session, STATE_ENTRY))
 		expect(stateA).toHaveLength(1)
 		expect(stateA[0].data).toMatchObject({
-			provider: ROUTER_PROVIDER,
-			modelId: ROUTER_MODEL,
+			version: 1,
+			preset: ROUTER_NAME,
 			state: { version: 1, tier: "standard", task: "Task A: update a label", failures: 0 },
 		})
 
@@ -961,7 +785,10 @@ describe("model-router SDK integration", () => {
 			.find((entry) => entry.type === "message" && entry.message.role === "user")
 
 		if (!userA) throw new Error("Missing task A user entry")
-		expect(stateA[0].data).toMatchObject({ state: { toolCursor: userA.id } })
+		const branchA = h.session.sessionManager.getBranch()
+		expect(branchA.findIndex((entry) => entry.id === stateA[0].id)).toBeGreaterThan(
+			branchA.findIndex((entry) => entry.id === userA.id),
+		)
 		expect(customEntries(h.session, DECISION_ENTRY)).toHaveLength(1)
 		expect(customEntries(h.session, DECISION_ENTRY)[0].data).toMatchObject({
 			action: "classified",
@@ -976,10 +803,10 @@ describe("model-router SDK integration", () => {
 		const leafB = h.session.sessionManager.getLeafId()
 
 		if (!leafB) throw new Error("Missing task B leaf")
-		const stateB = structuredClone(customEntries(h.session, VIRTUAL_MODEL_STATE_ENTRY))
+		const stateB = structuredClone(customEntries(h.session, STATE_ENTRY))
 		expect(stateB.at(-1)?.data).toMatchObject({ state: { tier: "strong", task: "Task B: redesign the architecture" } })
 		expect((await h.session.navigateTree(leafA, { summarize: false })).cancelled).toBe(false)
-		expect(customEntries(h.session, VIRTUAL_MODEL_STATE_ENTRY)).toEqual(stateA)
+		expect(customEntries(h.session, STATE_ENTRY)).toEqual(stateA)
 		await h.session.prompt("Continue A")
 		expect(classifier.inputs[2]).toEqual({
 			prompt: "Continue A",
@@ -997,11 +824,12 @@ describe("model-router SDK integration", () => {
 		// Reuse the catalog runtime, but load a fresh extension factory and reopen
 		// actual JSONL. No router closure or in-memory SessionManager is reused.
 		const resumed = await h.open(SessionManager.open(file), true)
-		expect(resumed.sessionManager.getBranch()).toEqual(branchBeforeResume)
-		expect(resumed.model?.provider).toBe(ROUTER_PROVIDER)
-		expect(resumed.model?.id).toBe(ROUTER_MODEL)
-		expect(resumed.thinkingLevel).toBe("off")
-		expect(customEntries(resumed, VIRTUAL_MODEL_STATE_ENTRY).at(-1)?.data).toMatchObject({
+		expect(resumed.sessionManager.getBranch().slice(0, branchBeforeResume.length)).toEqual(branchBeforeResume)
+		expect(customEntries(resumed, MODE_ENTRY).at(-1)?.data).toEqual({ version: 1, enabled: true, preset: ROUTER_NAME })
+		expect(resumed.model?.provider).toBe(h.providerId)
+		expect(resumed.model?.id).toBe("middle")
+		expect(resumed.thinkingLevel).toBe("medium")
+		expect(customEntries(resumed, STATE_ENTRY).at(-1)?.data).toMatchObject({
 			state: { tier: "standard", task: "Task A: update a label" },
 		})
 		await resumed.prompt("Continue after resume")
@@ -1013,7 +841,7 @@ describe("model-router SDK integration", () => {
 			task: "Task A: update a label",
 		})
 		expect((await resumed.navigateTree(leafB, { summarize: false })).cancelled).toBe(false)
-		expect(customEntries(resumed, VIRTUAL_MODEL_STATE_ENTRY)).toEqual(stateB)
+		expect(customEntries(resumed, STATE_ENTRY)).toEqual(stateB)
 		await resumed.prompt("Continue B")
 		expect(classifier.inputs[4]).toEqual({
 			prompt: "Continue B",
@@ -1050,6 +878,8 @@ describe("model-router SDK integration", () => {
 
 			for (const privateData of [
 				DECISION_ENTRY,
+				MODE_ENTRY,
+				STATE_ENTRY,
 				VIRTUAL_MODEL_STATE_ENTRY,
 				"probabilities",
 				"toolCursor",
@@ -1078,9 +908,9 @@ describe("model-router SDK integration", () => {
 				thinking: "low",
 			}
 
-			h.session.sessionManager.appendCustomEntry(VIRTUAL_MODEL_STATE_ENTRY, {
-				provider: ROUTER_PROVIDER,
-				modelId: ROUTER_MODEL,
+			h.session.sessionManager.appendCustomEntry(STATE_ENTRY, {
+				version: 1,
+				preset: ROUTER_NAME,
 				state: {
 					version: 1,
 					tier: savedTier,
@@ -1108,7 +938,7 @@ describe("model-router SDK integration", () => {
 
 			expect(classifier.inputs).toHaveLength(1)
 			expect(h.dispatches[1]).toMatchObject(selection)
-			expect(customEntries(resumed, VIRTUAL_MODEL_STATE_ENTRY).at(-1)?.data).toMatchObject({
+			expect(customEntries(resumed, STATE_ENTRY).at(-1)?.data).toMatchObject({
 				state: { version: 1, tier, selection, task: "Persisted task", toolCursor, failures: 1 },
 			})
 			expect(customEntries(resumed, DECISION_ENTRY).at(-1)?.data).toMatchObject({
@@ -1124,6 +954,73 @@ describe("model-router SDK integration", () => {
 				probabilityTier: "standard",
 				tier,
 			})
+			h.assertHealthy()
+		},
+	)
+
+	test.each([true, false])(
+		"legacy virtual branch selection migrates only when selected (selected=%p)",
+		async (selected) => {
+			const classifier = classifierSequence(classified("standard", false))
+			const h = await harness({ enableRouter: false, classify: classifier.classify, steps: [{}, {}, {}] })
+			await h.session.prompt("Create the session file")
+			const manager = h.session.sessionManager
+			// Seed an old-format branch through the public session-storage API, with no
+			// modern mode entry. The other branch deliberately contains a modern off mode.
+			manager.resetLeaf()
+			const user = manager.appendMessage({ role: "user", content: "Legacy task", timestamp: Date.now() })
+			manager.appendModelChange(ROUTER_PROVIDER, ROUTER_MODEL)
+			manager.appendThinkingLevelChange("off")
+			manager.appendCustomEntry(VIRTUAL_MODEL_STATE_ENTRY, {
+				provider: ROUTER_PROVIDER,
+				modelId: ROUTER_MODEL,
+				state: {
+					version: 1,
+					tier: "strong",
+					task: "Legacy task",
+					failures: 0,
+					toolCursor: user,
+					selection: { provider: h.alternateProviderId, model: "big", thinking: "low" },
+				},
+			})
+
+			if (!selected) manager.appendModelChange(h.providerId, "small")
+			const file = h.session.sessionFile
+
+			if (!file) throw new Error("Missing legacy session file")
+			h.session.dispose()
+			// Host supplies a physical fallback because the old virtual model no longer
+			// exists in the catalog. Extension restoration still reads actual JSONL.
+			const resumed = await h.open(SessionManager.open(file), false)
+			expect(h.runtime.getAllModels(ROUTER_PROVIDER)).toEqual([])
+			expect(customEntries(resumed, MODE_ENTRY).at(-1)?.data).toEqual(
+				selected ? { version: 1, enabled: true, preset: ROUTER_NAME } : { version: 1, enabled: false },
+			)
+			await resumed.sendCustomMessage(
+				{ customType: "test.continuation", content: "Continue", display: false },
+				{ triggerTurn: true },
+			)
+			expect(classifier.inputs).toEqual([])
+			expect(h.dispatches[1]).toMatchObject(
+				selected
+					? { provider: h.alternateProviderId, model: "big", thinking: "low" }
+					: { provider: h.providerId, model: "small" },
+			)
+			await resumed.prompt("Continue the legacy task")
+
+			if (selected) {
+				expect(classifier.inputs[0]).toMatchObject({ currentTier: "strong", task: "Legacy task" })
+				expect(routes(h.dispatches).at(-1)).toEqual(["big", "high"])
+				expect(customEntries(resumed, STATE_ENTRY).at(-1)?.data).toMatchObject({
+					version: 1,
+					preset: ROUTER_NAME,
+					state: { tier: "strong", task: "Legacy task" },
+				})
+			} else {
+				expect(classifier.inputs).toEqual([])
+				expect(customEntries(resumed, STATE_ENTRY)).toEqual([])
+			}
+
 			h.assertHealthy()
 		},
 	)
@@ -1163,7 +1060,7 @@ describe("model-router SDK integration", () => {
 		h.session.dispose()
 		const resumed = await h.open(SessionManager.open(file), true)
 		expect(customEntries(resumed, DECISION_ENTRY)).toEqual(decisions)
-		expect(customEntries(resumed, VIRTUAL_MODEL_STATE_ENTRY).at(-1)?.data).toMatchObject({
+		expect(customEntries(resumed, STATE_ENTRY).at(-1)?.data).toMatchObject({
 			state: {
 				tier: "strong",
 				task: "Original task",
@@ -1173,7 +1070,7 @@ describe("model-router SDK integration", () => {
 		await resumed.prompt("A different simple task after resume")
 		expect(classifier.inputs[1]).toMatchObject({ currentTier: "strong", task: "Original task" })
 		expect(routes(h.dispatches).at(-1)).toEqual(["middle", "medium"])
-		expect(customEntries(resumed, VIRTUAL_MODEL_STATE_ENTRY).at(-1)?.data).toMatchObject({
+		expect(customEntries(resumed, STATE_ENTRY).at(-1)?.data).toMatchObject({
 			state: { tier: "standard", task: "A different simple task after resume" },
 		})
 		expect(customEntries(resumed, DECISION_ENTRY).at(-1)?.data).toMatchObject({
@@ -1211,7 +1108,7 @@ describe("model-router SDK integration", () => {
 		})
 
 		await h.session.prompt("Fix the failing task")
-		expect(customEntries(h.session, VIRTUAL_MODEL_STATE_ENTRY).at(-1)?.data).toMatchObject({
+		expect(customEntries(h.session, STATE_ENTRY).at(-1)?.data).toMatchObject({
 			state: { tier: "standard", failures: 2 },
 		})
 		const file = h.session.sessionFile
@@ -1227,51 +1124,52 @@ describe("model-router SDK integration", () => {
 			["middle", "medium"],
 			["big", "high"],
 		])
-		expect(customEntries(resumed, VIRTUAL_MODEL_STATE_ENTRY).at(-1)?.data).toMatchObject({
+		expect(customEntries(resumed, STATE_ENTRY).at(-1)?.data).toMatchObject({
 			state: { tier: "strong", failures: 0 },
 		})
 		expect(h.toolExecutions).toBe(3)
 		h.assertHealthy()
 	})
 
-	test("direct virtual calls use configured strong without classifying, persisting state, or consuming a pending prompt", async () => {
+	test("direct calls use the physical model without classifying or consuming a pending prompt", async () => {
 		const classifier = classifierSequence(classified("standard"), classified("strong", false))
-		const boundaryCalls: AssistantMessage[] = []
+		const beforeStart: number[] = []
 
 		const h = await harness({
 			classify: classifier.classify,
 			steps: [{}, {}, {}, {}, {}],
 			extraExtension: (pi) => {
-				// Registered after the router: its fresh-run marker is already set.
 				pi.on("before_agent_start", async (_event, ctx) => {
-					if (!ctx.model) throw new Error("Missing selected model")
-					boundaryCalls.push(
-						await ctx.modelRegistry
-							.streamSimple(ctx.model, {
+					beforeStart.push(classifier.inputs.length)
+
+					if (!ctx.model) throw new Error("Missing physical model")
+					await ctx.modelRegistry
+						.streamSimple(
+							ctx.model,
+							{
 								messages: [{ role: "user", content: "A direct nested call", timestamp: Date.now() }],
-							})
-							.result(),
-					)
+							},
+							{ reasoning: "low" },
+						)
+						.result()
 				})
 			},
 		})
 
 		await h.session.prompt("Initial task")
-		expect(classifier.inputs).toHaveLength(1)
+		expect(beforeStart).toEqual([0])
 		expect(routes(h.dispatches)).toEqual([
-			["big", "high"],
+			["big", "low"],
 			["middle", "medium"],
 		])
 		const branch = structuredClone(h.session.sessionManager.getBranch())
-		const virtual = requiredModel(h.runtime, ROUTER_PROVIDER, ROUTER_MODEL)
-		// Pi 1.1.0 names the public route-resolution API resolveModel.
-		const route = await h.runtime.resolveModel(virtual, [], { reason: "direct", thinkingLevel: "off" })
-		expect([route.model.provider, route.model.id, route.thinkingLevel]).toEqual([h.providerId, "big", "high"])
-		expect(route.state).toBeUndefined()
+		const physical = h.session.model
+
+		if (!physical) throw new Error("Missing physical model")
 
 		const direct = await h.runtime
 			.streamSimple(
-				virtual,
+				physical,
 				{
 					messages: [{ role: "user", content: "Direct idle call", timestamp: Date.now() }],
 				},
@@ -1279,32 +1177,26 @@ describe("model-router SDK integration", () => {
 			)
 			.result()
 
-		expect(direct.stopReason).toBe("stop")
-		expect(direct.model).toBe("big")
-		expect(routes(h.dispatches).at(-1)).toEqual(["big", "high"])
+		expect([direct.model, direct.stopReason]).toEqual(["middle", "stop"])
 		expect(classifier.inputs).toHaveLength(1)
 		expect(h.session.sessionManager.getBranch()).toEqual(branch)
 		await h.session.prompt("Fresh follow-up")
-		expect(classifier.inputs[1]).toEqual({
+		expect(beforeStart).toEqual([0, 1])
+		expect(classifier.inputs[1]).toMatchObject({
 			prompt: "Fresh follow-up",
-			recentConversation: "user:\nInitial task\n\nassistant:\ndone",
-			hasImages: false,
 			currentTier: "standard",
 			task: "Initial task",
+			recentConversation: "user:\nInitial task\n\nassistant:\ndone",
 		})
 		expect(routes(h.dispatches)).toEqual([
-			["big", "high"],
+			["big", "low"],
 			["middle", "medium"],
+			["middle", "low"],
+			["middle", "low"],
 			["big", "high"],
-			["big", "high"],
-			["big", "high"],
-		])
-		expect(boundaryCalls.map((message) => [message.model, message.stopReason])).toEqual([
-			["big", "stop"],
-			["big", "stop"],
 		])
 		expect(customEntries(h.session, DECISION_ENTRY)).toHaveLength(2)
-		expect(customEntries(h.session, VIRTUAL_MODEL_STATE_ENTRY)).toHaveLength(2)
+		expect(customEntries(h.session, STATE_ENTRY)).toHaveLength(2)
 		h.assertHealthy()
 	})
 
@@ -1347,38 +1239,48 @@ describe("model-router SDK integration", () => {
 				[strongModel, "high"],
 				[strongModel, "high"],
 			])
-			expect(customEntries(h.session, VIRTUAL_MODEL_STATE_ENTRY).at(-1)?.data).toMatchObject({
+			expect(customEntries(h.session, STATE_ENTRY).at(-1)?.data).toMatchObject({
 				state: { tier: "strong", selection: { provider: h.providerId, model: strongModel, thinking: "high" } },
 			})
 			h.assertHealthy()
 		},
 	)
 
-	test("explicit physical pins bypass routing and leave native router state untouched", async () => {
+	test("disabling grants manual control without changing physical selection, and settings reenable routing", async () => {
 		const classifier = classifierSequence(classified("standard"), classified("strong", false))
-		const h = await harness({ classify: classifier.classify, steps: [{}, {}, {}, {}] })
+		const h = await harness({ classify: classifier.classify, enableRouter: false, steps: [{}, {}, {}, {}] })
 		await h.session.setModel(requiredModel(h.runtime, h.providerId, "middle"))
 		h.session.setThinkingLevel("high")
 		await h.session.prompt("Pinned physical task")
 		expect(classifier.inputs).toEqual([])
 		expect(customEntries(h.session, DECISION_ENTRY)).toEqual([])
-		expect(customEntries(h.session, VIRTUAL_MODEL_STATE_ENTRY)).toEqual([])
+		expect(customEntries(h.session, STATE_ENTRY)).toEqual([])
 
-		await h.session.setModel(requiredModel(h.runtime, ROUTER_PROVIDER, ROUTER_MODEL))
+		await h.choosePreset(ROUTER_NAME)
 		await h.session.prompt("Routed task")
-		const state = structuredClone(customEntries(h.session, VIRTUAL_MODEL_STATE_ENTRY))
+		const state = structuredClone(customEntries(h.session, STATE_ENTRY))
 		const decisions = structuredClone(customEntries(h.session, DECISION_ENTRY))
+		await h.disableRouter()
+		expect(h.session.model?.id).toBe("middle")
+		expect(h.session.thinkingLevel).toBe("medium")
+		expect(customEntries(h.session, MODE_ENTRY).at(-1)?.data).toEqual({
+			version: 1,
+			enabled: false,
+			preset: ROUTER_NAME,
+		})
+		expect([...h.statuses.values()].join(" ")).toMatch(/router.*off/i)
 		await h.session.setModel(requiredModel(h.runtime, h.providerId, "big"))
 		h.session.setThinkingLevel("low")
 		await h.session.prompt("Pinned again")
 		expect(classifier.inputs).toHaveLength(1)
-		expect(customEntries(h.session, VIRTUAL_MODEL_STATE_ENTRY)).toEqual(state)
+		expect(customEntries(h.session, STATE_ENTRY)).toEqual(state)
 		expect(customEntries(h.session, DECISION_ENTRY)).toEqual(decisions)
 		expect(h.session.model?.provider).toBe(h.providerId)
 		expect(h.session.model?.id).toBe("big")
 		expect(h.session.thinkingLevel).toBe("low")
 
-		await h.session.setModel(requiredModel(h.runtime, ROUTER_PROVIDER, ROUTER_MODEL))
+		await h.choosePreset(ROUTER_NAME)
+		expect(h.settingsFrames.at(-1)).toMatch(/Preset\s+test\b/)
 		await h.session.prompt("Return to routing")
 		expect(classifier.inputs[1]).toEqual({
 			prompt: "Return to routing",
@@ -1425,7 +1327,7 @@ describe("model-router SDK integration", () => {
 			model: "big",
 			thinking: "high",
 		})
-		expect(customEntries(h.session, VIRTUAL_MODEL_STATE_ENTRY)).toHaveLength(1)
+		expect(customEntries(h.session, STATE_ENTRY)).toHaveLength(1)
 		await h.session.prompt("A new easy task")
 		expect(classifier.inputs).toHaveLength(2)
 		expect(routes(h.dispatches).at(-1)).toEqual(["middle", "medium"])
@@ -1520,7 +1422,7 @@ describe("model-router SDK integration", () => {
 			["big", "high"],
 			["middle", "medium"],
 		])
-		expect(customEntries(h.session, VIRTUAL_MODEL_STATE_ENTRY).map(({ data }) => data)).toMatchObject([
+		expect(customEntries(h.session, STATE_ENTRY).map(({ data }) => data)).toMatchObject([
 			{ state: { task: "Prove the graph algorithm is correct" } },
 			{ state: { task: "Prove the graph algorithm is correct" } },
 			{ state: { task: "New task: print the working directory" } },
@@ -1653,7 +1555,7 @@ describe("model-router SDK integration", () => {
 			tier: "strong",
 			classifier: { kind: "fallback", reason: "invalid-answer" },
 		})
-		expect(customEntries(h.session, VIRTUAL_MODEL_STATE_ENTRY).at(-1)?.data).toMatchObject({
+		expect(customEntries(h.session, STATE_ENTRY).at(-1)?.data).toMatchObject({
 			state: { tier: "strong", task: "An invalid classification must be safe" },
 		})
 

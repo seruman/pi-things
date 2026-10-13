@@ -1,8 +1,16 @@
 import { type AssistantMessage, createAssistantMessageEventStream } from "@earendil-works/pi-ai"
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
+import { MODE_ENTRY } from "../state"
 
 /** Test-only physical provider. Never makes a network request or executes tools. */
 export default function (pi: ExtensionAPI) {
+	// Print mode has no settings panel. Seed the fixture's preset before the router restores its branch.
+	pi.on("session_start", (_event, ctx) => {
+		if (!ctx.sessionManager.getBranch().some((entry) => entry.type === "custom" && entry.customType === MODE_ENTRY)) {
+			pi.appendEntry(MODE_ENTRY, { version: 1, enabled: true, preset: "smoke" })
+		}
+	})
+
 	pi.registerProvider("router-smoke", {
 		api: "router-smoke-api",
 		baseUrl: "http://unused.invalid",
