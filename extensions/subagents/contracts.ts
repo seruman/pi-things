@@ -40,7 +40,7 @@ export interface BridgeContext extends Pick<ExtensionContext, "isIdle"> {
 	sessionManager: Pick<ExtensionContext["sessionManager"], "getSessionId" | "getSessionFile">
 }
 
-export interface BridgeHost extends Lifecycle<BridgeContext>, Pick<ExtensionAPI, "setSessionName"> {
+export interface BridgeHost extends Lifecycle<BridgeContext>, Pick<ExtensionAPI, "setSessionName" | "events"> {
 	sendUserMessage(message: string, options?: { deliverAs: "steer" | "followUp" }): void
 }
 
@@ -57,7 +57,8 @@ export type SubagentTool<Params extends TSchema, Result extends JsonValue> = Omi
 	): Promise<AgentToolResult<Result>>
 }
 
-export interface ParentHost extends Lifecycle<ParentContext>, Pick<ExtensionAPI, "exec" | "getThinkingLevel"> {
+export interface ParentHost
+	extends Lifecycle<ParentContext>, Pick<ExtensionAPI, "exec" | "getThinkingLevel" | "events"> {
 	registerCommand(
 		name: string,
 		command: {

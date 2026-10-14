@@ -18,6 +18,7 @@ import {
 	SessionManager,
 } from "@earendil-works/pi-coding-agent"
 import { type SelectItem, SelectList } from "@earendil-works/pi-tui"
+import { getChildPolicyArgs } from "../shell-leash/child-policy"
 import { getPiInvocationParts } from "../split-fork"
 import { installBridge } from "./bridge"
 import type { ParentContext, ParentHost } from "./contracts"
@@ -264,6 +265,9 @@ async function settle(
 
 		if (status) return resultOf(run, status, answer, session, error)
 
+		// A legacy bridge loaded alongside this one may mark a denied run idle without clearing its error.
+		if (run.error) return resultOf(run, "error", answer, session, run.error)
+
 		if (!latest) return resultOf(run, "error", answer, session, `${run.handle} finished without an assistant response`)
 
 		return outcome(run, latest, answer, session)
@@ -318,6 +322,7 @@ async function spawn(
 	const name = params.name === undefined ? undefined : normalizeRunName(params.name)
 	const thinking = params.thinkingLevel ?? pi.getThinkingLevel()
 	const cwd = resolve(ctx.cwd, params.cwd ?? ".")
+	const launchArgs = [...toolFlags(params), ...getChildPolicyArgs(pi.events)]
 	const prepared = prepareRun()
 
 	const draft: Omit<RunMetadata, "blockId"> = {
@@ -329,7 +334,7 @@ async function spawn(
 		provider,
 		model,
 		thinking,
-		launchArgs: toolFlags(params),
+		launchArgs,
 		state: "starting",
 		hasStarted: false,
 		createdAt: new Date().toISOString(),

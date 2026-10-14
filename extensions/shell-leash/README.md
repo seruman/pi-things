@@ -36,18 +36,16 @@ Tries to detect common shell wrappers; pipelines, command substitutions, `bash -
 
 ## Approval model
 
-When a guarded command is detected, the extension prompts with:
+Guarded commands prompt for **Allow once**, **Allow `<capability>` for session**, or **Deny**.
 
-- **Allow once** -- run this command, prompt again next time
-- **Allow `<capability>` for session** -- stop prompting for this specific capability until session ends
-- **Deny** -- block execution
+Every denial stops the current run, including dismissed prompts and missing approval UI. Pi stays open. Already-running tools cannot be undone.
 
-Approvals are in-memory only. They reset on `/reload`, `/new`, `/resume`, and pi restart.
+Session approvals reset on `/reload`, `/new`, `/resume`, and restart. `/shell-leash` toggles them; CLI rules stay fixed.
 
-## `/shell-leash`
+## Policy
 
-Opens a settings UI to view and toggle session approvals for all capabilities.
+- `--shell-leash-allow git.checkout,git.switch` allows listed capabilities.
+- `--shell-leash-deny fs.rm` denies listed capabilities; deny wins over allow.
+- `--shell-leash-default ask|deny` controls other guarded capabilities; defaults to `ask`.
 
-## Non-interactive sessions
-
-The extension does nothing outside interactive sessions. No blocking, no warnings, yolo. Spawned agent sessions (e.g. `agents.spawn` from code-mode) run in print mode, so they are in YOLO mode too.
+Subagents inherit allows and denies, turn asks into denies, and do not inherit “Allow once”. A denied child stops and reports the reason to its parent.

@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, readdirSync, unlinkSync } from "node:fs"
 import { join } from "node:path"
+import { onShellLeashDenial } from "../shell-leash/denial"
 import type { BridgeContext, BridgeHost } from "./contracts"
 import { type RunMetadata, inboxDir, inboxMessageSchema, readMetadata, updateMetadata } from "./runs"
 
@@ -10,6 +11,11 @@ export function installBridge(pi: BridgeHost, runDir: string): void {
 	let sessionName: string | undefined
 	let sessionPending = true
 	let hasStarted = false
+	let denial: string | undefined
+
+	onShellLeashDenial(pi.events, (reason) => {
+		denial ??= reason
+	})
 
 	// Unlike tmux, Rex assigns the block id at launch, so metadata can arrive after session_start.
 	const initializeSession = (): boolean => {
@@ -27,7 +33,13 @@ export function installBridge(pi: BridgeHost, runDir: string): void {
 		}
 
 		if (hasStarted) patch.hasStarted = true
-		const updated = updateMetadata(runDir, patch, ["suspended", "error"])
+
+		if (denial && current.isIdle()) {
+			patch.state = "error"
+			patch.error = denial
+		}
+
+		const updated = updateMetadata(runDir, patch, patch.error ? ["suspended"] : ["suspended", "error"])
 
 		if (!updated) return false
 		sessionPending = false
@@ -100,6 +112,7 @@ export function installBridge(pi: BridgeHost, runDir: string): void {
 	pi.on("session_start", (_event, ctx) => {
 		current = ctx
 		sessionPending = true
+		denial = undefined
 
 		if (!timer) {
 			// Rex may start the child before the parent has written its metadata.
@@ -113,13 +126,17 @@ export function installBridge(pi: BridgeHost, runDir: string): void {
 	pi.on("agent_start", (_event, ctx) => {
 		current = ctx
 		hasStarted = true
+		denial = undefined
 		updateMetadata(runDir, { state: "busy", hasStarted: true }, ["error"])
 	})
 
 	pi.on("agent_settled", (_event, ctx) => {
 		current = ctx
 
-		if (ctx.isIdle()) updateMetadata(runDir, { state: "idle" })
+		if (ctx.isIdle()) {
+			// Publish only after cancellation settles, not while sibling tools may still be running.
+			updateMetadata(runDir, denial ? { state: "error", error: denial } : { state: "idle" })
+		}
 	})
 
 	pi.on("session_shutdown", (event) => {
