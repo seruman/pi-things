@@ -97,6 +97,8 @@ let launches: { cwd: string; command: string[] }[]
 
 let onProcess: (() => void) | undefined
 
+let onLaunch: ((command: string[]) => void) | undefined
+
 const envKeys = ["PI_CODING_AGENT_DIR", "PI_SUBAGENT_RUN_DIR", "REX_SESSION", "REX_BLOCK"]
 
 // Only the external Rex transport is faked. Unexpected operations fail, rather than silently succeeding.
@@ -125,6 +127,7 @@ const exec: Exec = async (command, args, signal) => {
 	if (args[4] === "session.new_block") {
 		const payload = launchRequestSchema.parse(JSON.parse(args[5] ?? "{}"))
 		launches.push(payload.options)
+		onLaunch?.(payload.options.command)
 		const blockId = `block:${++nextBlockId}`
 		blocks.set(blockId, { exit: null })
 
@@ -133,9 +136,11 @@ const exec: Exec = async (command, args, signal) => {
 
 	if (args[4] === "block.close") {
 		const payload = closeRequestSchema.parse(JSON.parse(args[5] ?? "{}"))
-		const error = blocks.get(payload.block_id)?.closeError
+		const block = blocks.get(payload.block_id)
 
-		if (error) throw new Error(error)
+		if (!block) throw new Error(`Block already closed: ${payload.block_id}`)
+
+		if (block.closeError) throw new Error(block.closeError)
 		blocks.delete(payload.block_id)
 
 		return { code: 0, stderr: "", stdout: JSON.stringify({ block_id: payload.block_id, revision: nextBlockId }) }
@@ -160,6 +165,7 @@ beforeEach(() => {
 	nextBlockId = 0
 	launches = []
 	onProcess = undefined
+	onLaunch = undefined
 	parent = events<ParentContext>()
 	bus = createEventBus()
 	ctx = {
@@ -626,11 +632,47 @@ test("cancelling foreground spawn still closes the block and preserves the trans
 	const run = listRuns()[0]
 
 	if (!run) throw new Error("Missing spawned run")
+	const c = await child(run)
+	await c.begin()
+	await c.reply("PARTIAL HISTORY", "aborted")
+	const transcript = readFileSync(run.sessionFile, "utf8")
 	controller.abort()
 	await tick(500)
 	expect(await spawning).toMatchObject({ status: "aborted" })
 	expect(blocks.has(run.blockId)).toBe(false)
-	expect(existsSync(run.sessionFile)).toBe(true)
+	expect(getRun(run.handle).stoppedAt).toBeString()
+	await parent.emit("session_shutdown", ctx)
+	await parent.emit("session_start", ctx)
+	expect(launches).toHaveLength(1)
+	expect(readFileSync(run.sessionFile, "utf8")).toBe(transcript)
+})
+
+test("failed close after foreground cancellation preserves history without marking the child stopped", async () => {
+	const controller = new AbortController()
+	const spawning = call("agent_spawn", { prompt: "task" }, controller.signal)
+	await tick()
+	const run = listRuns()[0]
+
+	if (!run) throw new Error("Missing spawned run")
+	const c = await child(run)
+	await c.begin()
+	await c.reply("CANCELLED HISTORY", "aborted")
+	blocks.set(run.blockId, { exit: null, closeError: "close failed" })
+
+	const rejected = spawning.catch((error) => {
+		if (error instanceof Error) return error
+		throw error
+	})
+
+	controller.abort()
+	await tick(500)
+	expect(await rejected).toMatchObject({ message: "close failed" })
+	expect(getRun(run.handle).stoppedAt).toBeUndefined()
+	expect(blocks.has(run.blockId)).toBe(true)
+	expect(readFileSync(run.sessionFile, "utf8")).toContain("CANCELLED HISTORY")
+	blocks.set(run.blockId, { exit: null })
+	await call("agent_stop", { handle: run.handle })
+	expect(getRun(run.handle).stoppedAt).toBeString()
 })
 
 test("bridge initializes late metadata, syncs names and follows session changes", async () => {
@@ -781,16 +823,239 @@ test.each(["quit", "reload"] as const)("parent releases its widget timer on %s",
 	expect(widgets).toHaveLength(writes)
 })
 
-test("stop and parent shutdown remove exited blocks too", async () => {
-	for (const action of ["stop", "shutdown"]) {
-		const run = await spawn()
-		blocks.set(run.blockId, { exit: 0 })
+test.each([
+	["stop", "exited"],
+	["stop", "missing"],
+	["shutdown", "exited"],
+	["shutdown", "missing"],
+])("%s retains history for %s blocks without resuming them", async (action, state) => {
+	const run = await spawn()
+	const c = await child(run)
+	await c.begin()
+	await c.reply("RETAINED")
+	const transcript = readFileSync(run.sessionFile, "utf8")
 
-		if (action === "stop") await call("agent_stop", { handle: run.handle })
-		else await parent.emit("session_shutdown", ctx)
-		expect(blocks.has(run.blockId)).toBe(false)
-		expect(existsSync(runDirectory(run.handle))).toBe(false)
+	if (state === "exited") blocks.set(run.blockId, { exit: 0 })
+	else blocks.delete(run.blockId)
+
+	if (action === "stop") await call("agent_stop", { handle: run.handle })
+	else await parent.emit("session_shutdown", ctx)
+	expect(blocks.has(run.blockId)).toBe(false)
+	expect(getRun(run.handle).stoppedAt).toBeString()
+	await parent.emit("session_shutdown", ctx)
+	await parent.emit("session_start", ctx)
+	expect(launches).toHaveLength(1)
+	expect(readFileSync(run.sessionFile, "utf8")).toBe(transcript)
+})
+
+test("stop retains discoverable history, is repeatable, and never resumes or polls stopped children", async () => {
+	const run = await spawn({ name: "reviewer" })
+	const c = await child(run)
+	await c.begin()
+	await c.reply("SAVED ANSWER")
+	const transcript = readFileSync(run.sessionFile, "utf8")
+	const result = await call("agent_stop", { handle: run.handle })
+	expect(result).toEqual({ handle: run.handle, sessionFile: run.sessionFile })
+	expect(blocks.has(run.blockId)).toBe(false)
+	const stopped = getRun(run.handle)
+	expect(stopped).toMatchObject({
+		parentSessionId: "parent",
+		childSessionId: c.session.getSessionId(),
+		suspended: false,
+	})
+	expect(stopped.stoppedAt).toBeString()
+
+	// A late bridge lifecycle update must not undo the parent-owned stop marker.
+	await c.emit("agent_settled")
+	await c.emit("session_shutdown", "quit")
+	onProcess = () => {
+		throw new Error("Stopped runs must not query Rex")
 	}
+
+	await tick(1000)
+	expect(await call("agent_stop", { handle: run.handle })).toEqual(result)
+	expect(getRun(run.handle).stoppedAt).toBe(stopped.stoppedAt)
+	expect((await call("agent_list")).runs).toEqual([])
+	expect((await call("agent_list", { includeStopped: true })).runs).toEqual([
+		expect.objectContaining({
+			handle: run.handle,
+			name: "reviewer",
+			state: "stopped",
+			stoppedAt: stopped.stoppedAt,
+			sessionFile: run.sessionFile,
+		}),
+	])
+	await expect(call("agent_send", { handle: run.handle, message: "no" })).rejects.toThrow("stopped")
+	await expect(call("agent_wait", { handle: run.handle })).rejects.toThrow("stopped")
+	await parent.emit("session_shutdown", ctx, "reload")
+	await parent.emit("session_start", ctx)
+	await parent.emit("session_shutdown", ctx, "quit")
+	await parent.emit("session_start", ctx)
+	expect(launches).toHaveLength(1)
+	expect(readFileSync(run.sessionFile, "utf8")).toBe(transcript)
+	expect(SessionManager.open(run.sessionFile).getSessionId()).toBe(c.session.getSessionId())
+})
+
+test.each(["inspection", "close"])("failed stop during %s preserves history and remains retryable", async (phase) => {
+	const run = await spawn()
+	const c = await child(run)
+	await c.begin()
+	await c.reply("KEEP ME")
+	const transcript = readFileSync(run.sessionFile, "utf8")
+	blocks.set(run.blockId, {
+		exit: null,
+		...(phase === "close" ? { closeError: "Rex unavailable" } : { error: "Rex unavailable" }),
+	})
+	await expect(call("agent_stop", { handle: run.handle })).rejects.toThrow("Rex unavailable")
+	expect(blocks.has(run.blockId)).toBe(true)
+	expect(getRun(run.handle).stoppedAt).toBeUndefined()
+	expect(readFileSync(run.sessionFile, "utf8")).toBe(transcript)
+	blocks.set(run.blockId, { exit: null })
+	await call("agent_stop", { handle: run.handle })
+	expect(blocks.has(run.blockId)).toBe(false)
+	expect(getRun(run.handle).stoppedAt).toBeString()
+})
+
+test("failed shutdown cleanup retains an exited child's history and retries later", async () => {
+	const run = await spawn()
+	const c = await child(run)
+	await c.begin()
+	await c.reply("EXITED HISTORY")
+	blocks.set(run.blockId, { exit: 0, closeError: "close failed" })
+	await expect(parent.emit("session_shutdown", ctx)).rejects.toThrow("subagent suspend failed")
+	expect(getRun(run.handle).stoppedAt).toBeUndefined()
+	expect(readFileSync(run.sessionFile, "utf8")).toContain("EXITED HISTORY")
+	blocks.set(run.blockId, { exit: 0 })
+	await parent.emit("session_shutdown", ctx)
+	expect(getRun(run.handle).stoppedAt).toBeString()
+	expect(blocks.has(run.blockId)).toBe(false)
+})
+
+test("stopping a suspended child cancels automatic resume without deleting its history", async () => {
+	const run = await spawn()
+	const c = await child(run)
+	await c.begin()
+	await c.reply("SUSPENDED HISTORY")
+	await parent.emit("session_shutdown", ctx)
+	expect(getRun(run.handle).suspended).toBe(true)
+	await call("agent_stop", { handle: run.handle })
+	await parent.emit("session_start", ctx)
+	expect(launches).toHaveLength(1)
+	expect(getRun(run.handle)).toMatchObject({ suspended: false, stoppedAt: expect.any(String) })
+	expect(readFileSync(run.sessionFile, "utf8")).toContain("SUSPENDED HISTORY")
+})
+
+test("a missing transcript on resume retains metadata and stops retrying", async () => {
+	const run = await spawn()
+	await parent.emit("session_shutdown", ctx)
+	rmSync(run.sessionFile)
+	await parent.emit("session_start", ctx)
+	expect(getRun(run.handle)).toMatchObject({
+		parentSessionId: "parent",
+		sessionFile: run.sessionFile,
+		stoppedAt: expect.any(String),
+		suspended: false,
+		error: expect.stringContaining("transcript"),
+	})
+	await parent.emit("session_shutdown", ctx)
+	await parent.emit("session_start", ctx)
+	expect(launches).toHaveLength(1)
+	expect(existsSync(run.sessionFile)).toBe(false)
+})
+
+test("failed spawn preserves any launch artifacts instead of deleting them", async () => {
+	let sessionFile = ""
+	onLaunch = (command) => {
+		sessionFile = flagValue(command, "--session") ?? ""
+		writeFileSync(sessionFile, "partial child history\n")
+		throw new Error("launch response lost")
+	}
+
+	await expect(spawn()).rejects.toThrow("launch response lost")
+	expect(readFileSync(sessionFile, "utf8")).toBe("partial child history\n")
+})
+
+test("stopped history listing stays parent-scoped and does not hide a healthy child", async () => {
+	const stopped = await spawn()
+	const foreign = await spawn()
+	const healthy = await spawn()
+	await call("agent_stop", { handle: stopped.handle })
+	await call("agent_stop", { handle: foreign.handle })
+	updateMetadata(runDirectory(foreign.handle), { parentSessionId: "other" })
+	expect((await call("agent_list")).runs).toEqual([expect.objectContaining({ handle: healthy.handle })])
+	const history = (await call("agent_list", { includeStopped: true })).runs
+	expect(history).toHaveLength(2)
+	expect(history).toEqual(
+		expect.arrayContaining([
+			expect.objectContaining({ handle: stopped.handle, state: "stopped" }),
+			expect.objectContaining({ handle: healthy.handle }),
+		]),
+	)
+})
+
+test("concurrent stops tolerate another caller closing the block first", async () => {
+	const run = await spawn()
+
+	const results = await Promise.all([
+		call("agent_stop", { handle: run.handle }),
+		call("agent_stop", { handle: run.handle }),
+	])
+
+	expect(results[0]).toEqual(results[1])
+	expect(blocks.has(run.blockId)).toBe(false)
+	expect(getRun(run.handle).stoppedAt).toBeString()
+	expect(existsSync(run.sessionFile)).toBe(true)
+})
+
+test("stop keeps the latest session path if the bridge changes it during process inspection", async () => {
+	const run = await spawn()
+	const c = await child(run)
+	await c.begin()
+	await c.reply("ORIGINAL")
+	await c.emit("session_shutdown", "resume")
+	c.session = SessionManager.create(root, root)
+	await c.begin()
+	await c.reply("LATEST")
+	onProcess = () => {
+		onProcess = undefined
+		void c.emit("session_start")
+	}
+
+	const result = await call("agent_stop", { handle: run.handle })
+	expect(result.sessionFile).toBe(z.string().parse(c.session.getSessionFile()))
+	expect(result.sessionFile).not.toBe(run.sessionFile)
+	expect(getRun(run.handle).childSessionId).toBe(c.session.getSessionId())
+	expect(readFileSync(run.sessionFile, "utf8")).toContain("ORIGINAL")
+	expect(readFileSync(z.string().parse(result.sessionFile), "utf8")).toContain("LATEST")
+})
+
+test("stopped children stay out of the widget even with stale suspended or error state", async () => {
+	const run = await spawn()
+	await call("agent_stop", { handle: run.handle })
+	updateMetadata(runDirectory(run.handle), { suspended: true, state: "error", error: "previous failure" })
+	const widgets: (string[] | undefined)[] = []
+	ctx.hasUI = true
+	ctx.ui = {
+		setWidget: (_key, lines) => {
+			widgets.push(lines)
+		},
+		theme: { fg: (_color, text) => text },
+		notify: unexpectedUI,
+		custom: unexpectedUI,
+	}
+	onProcess = () => {
+		throw new Error("Stopped runs must not query Rex")
+	}
+
+	await parent.emit("session_start", ctx)
+	await tick(2000)
+	expect(widgets.length).toBeGreaterThan(0)
+	expect(widgets.every((lines) => lines === undefined)).toBe(true)
+	expect(launches).toHaveLength(1)
+	expect((await call("agent_list", { includeStopped: true })).runs).toEqual([
+		expect.objectContaining({ handle: run.handle, state: "stopped", error: "previous failure" }),
+	])
+	await parent.emit("session_shutdown", ctx)
 })
 
 test("missing blocks mean exited, but connection failures stay unknown and don't hide healthy children", async () => {

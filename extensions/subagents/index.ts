@@ -38,10 +38,10 @@ import {
 	getRun,
 	inboxPending,
 	listRuns,
+	markStopped,
 	normalizeRunName,
 	prepareRun,
 	readMetadata,
-	removeRunDir,
 	runDirectory,
 	runDisplayName,
 	thinkingLevels,
@@ -110,6 +110,7 @@ const listSchema = Type.Object({
 			model: modelSchema,
 			thinking: StringEnum(thinkingLevels),
 			state: StringEnum(runStates),
+			stoppedAt: Type.Optional(Type.String()),
 			error: Type.Optional(Type.String()),
 		}),
 	),
@@ -252,6 +253,30 @@ function outcome(run: RunMetadata, message: AssistantMessage, answer: string, se
 	return resultOf(run, "success", answer, session)
 }
 
+function assertNotStopped(run: RunMetadata): void {
+	if (run.stoppedAt) throw new Error(`${run.handle} is stopped; read its retained history at ${run.sessionFile}`)
+}
+
+// Closing and retaining a run is shared by explicit stop and foreground cancellation.
+async function stopRun(exec: Exec, handle: string): Promise<RunMetadata> {
+	const run = getRun(handle)
+
+	if (run.stoppedAt) return run
+	const seen = await readProcess(exec, run.blockId)
+
+	if (seen.exists) {
+		try {
+			await closeBlock(exec, run.blockId)
+		} catch (error) {
+			// Another stop may have closed it while this call was awaiting Rex.
+			if ((await readProcess(exec, run.blockId)).exists) throw error
+		}
+	}
+
+	// Re-read after closing: the bridge may have updated its session path or final state.
+	return markStopped(handle)
+}
+
 async function settle(
 	exec: Exec,
 	initialRun: RunMetadata,
@@ -282,6 +307,7 @@ async function settle(
 
 	while (Date.now() < deadline) {
 		run = readMetadata(runDirectory(run.handle)) ?? run
+		assertNotStopped(run)
 
 		// Waiting observes the child; the caller decides whether cancellation also stops it.
 		if (signal?.aborted) return finish("aborted")
@@ -354,8 +380,11 @@ async function spawn(
 
 		return run
 	} catch (error) {
-		removeRunDir(prepared.handle)
-		throw error
+		// A failed launch response does not prove the child never wrote history.
+		throw new Error(
+			`Could not spawn subagent ${prepared.handle}; files retained at ${runDirectory(prepared.handle)}: ${error instanceof Error ? error.message : String(error)}`,
+			{ cause: error },
+		)
 	}
 }
 
@@ -441,7 +470,7 @@ export function installParent(pi: ParentHost): void {
 						...(await displayStatus(exec, run)),
 					})),
 				)
-			).filter(({ state }) => state !== "exited" && state !== "suspended")
+			).filter(({ state }) => state !== "exited" && state !== "suspended" && state !== "stopped")
 
 			if (widgetContext !== ctx) return
 
@@ -499,7 +528,11 @@ export function installParent(pi: ParentHost): void {
 				if (seen.exists) await closeBlock(exec, run.blockId)
 
 				if (!existsSync(run.sessionFile)) {
-					removeRunDir(run.handle)
+					updateMetadata(runDirectory(run.handle), {
+						state: "error",
+						error: `Cannot resume: transcript missing at ${run.sessionFile}`,
+					})
+					markStopped(run.handle)
 					continue
 				}
 
@@ -540,7 +573,7 @@ export function installParent(pi: ParentHost): void {
 				if (!seen.alive) {
 					if (seen.exists) await closeBlock(exec, run.blockId)
 
-					if (!run.suspended) removeRunDir(run.handle)
+					if (!run.suspended) markStopped(run.handle)
 					continue
 				}
 
@@ -568,7 +601,7 @@ function registerCommand(pi: ParentHost, exec: Exec): void {
 			for (const run of runs) {
 				const status = await displayStatus(exec, run)
 
-				if (status.state === "exited" || status.state === "suspended") continue
+				if (status.state === "exited" || status.state === "suspended" || status.state === "stopped") continue
 
 				const item: SelectItem = {
 					value: run.handle,
@@ -617,16 +650,20 @@ function registerTools(pi: ParentHost, exec: Exec): void {
 		name: "agent_list",
 		label: "List agents",
 		description:
-			"List subagents spawned by this session, including detached and exited children. Failed status queries return unknown with an error; other children are still listed.",
+			"List subagents spawned by this session, including detached and exited children. Set includeStopped to discover retained histories. Failed status queries return unknown with an error; other children are still listed.",
 		promptGuidelines: [
 			"Use agent_list to rediscover children and their handles, names, and current states if you no longer remember them.",
 		],
 		exposure: "codemode",
-		parameters: Type.Object({}),
+		parameters: Type.Object({
+			includeStopped: Type.Optional(
+				Type.Boolean({ description: "Include stopped children and their retained transcript paths." }),
+			),
+		}),
 		outputSchema: listSchema,
-		async execute(_id, _params, signal, _onUpdate, ctx) {
+		async execute(_id, params, signal, _onUpdate, ctx) {
 			const runs = await Promise.all(
-				listRuns(ctx.sessionManager.getSessionId()).map(async (run) => {
+				listRuns(ctx.sessionManager.getSessionId(), params).map(async (run) => {
 					const item: Static<typeof listSchema>["runs"][number] = {
 						handle: run.handle,
 						blockId: run.blockId,
@@ -638,6 +675,8 @@ function registerTools(pi: ParentHost, exec: Exec): void {
 					}
 
 					if (run.name !== undefined) item.name = run.name
+
+					if (run.stoppedAt !== undefined) item.stoppedAt = run.stoppedAt
 
 					return item
 				}),
@@ -663,7 +702,7 @@ function registerTools(pi: ParentHost, exec: Exec): void {
 			"Children persist after completion in either mode. Neither a successful spawn result nor agent_wait stops the child.",
 			"With background omitted or false, cancelling agent_spawn closes the child but preserves its transcript. Its 1800-second wait timeout leaves the child running; use agent_wait or agent_stop afterward.",
 			"Keep an idle child alive only when concrete follow-up work is expected. It retains its conversation history; use agent_send for that follow-up, then stop it afterward.",
-			"Children survive /reload. Parent shutdown suspends them, and resuming the parent relaunches them with their history; this is not permanent cleanup.",
+			"Children survive /reload. Parent shutdown suspends running children, and resuming the parent relaunches them with their history. Explicitly stopped children retain their files but never auto-resume.",
 		],
 		exposure: "codemode",
 		parameters: spawnParameters,
@@ -688,10 +727,7 @@ function registerTools(pi: ParentHost, exec: Exec): void {
 			try {
 				return settledResult(await settle(exec, run, signal))
 			} finally {
-				if (signal?.aborted) {
-					const current = readMetadata(runDirectory(run.handle)) ?? run
-					await closeBlock(exec, current.blockId)
-				}
+				if (signal?.aborted) await stopRun(exec, run.handle)
 			}
 		},
 	})
@@ -712,7 +748,9 @@ function registerTools(pi: ParentHost, exec: Exec): void {
 		outputSchema: handleSchema,
 		async execute(_id, params) {
 			const run = getRun(params.handle)
+			assertNotStopped(run)
 			const seen = await readProcess(exec, run.blockId)
+			assertNotStopped(getRun(run.handle))
 
 			if (!seen.alive) throw new Error(`${run.handle} is not running`)
 			enqueue(run.handle, params.message, params.followUp ?? false)
@@ -728,6 +766,7 @@ function registerTools(pi: ParentHost, exec: Exec): void {
 		promptGuidelines: [
 			"A completed wait does not stop the child. Read its result, then use agent_send for concrete follow-up work or agent_stop when it is no longer needed.",
 			"Cancelling or timing out agent_wait stops only the wait, not the child. Use agent_stop to terminate the child explicitly.",
+			"agent_wait is for unfinished or idle children, not stopped archives. After stopping, read the retained sessionFile; agent_list with includeStopped finds it.",
 		],
 		exposure: "codemode",
 		parameters: Type.Object({
@@ -743,22 +782,22 @@ function registerTools(pi: ParentHost, exec: Exec): void {
 	pi.registerTool({
 		name: "agent_stop",
 		label: "Stop agent",
-		description: "Terminate a child by closing its Rex block and deleting its run transcript and metadata.",
+		description:
+			"Terminate a child by closing its Rex block. Retain its transcript and metadata; stopped children never auto-resume.",
 		promptGuidelines: [
-			"Stopping permanently deletes the child's transcript and metadata. Read its result and preserve anything needed before stopping it.",
+			"Stopping is repeatable and preserves history on disk. Use the returned sessionFile or agent_list with includeStopped to find it.",
 			"Explicitly stop every child when it is no longer needed; do not leave completed children running idle.",
 		],
 		exposure: "codemode",
 		parameters: Type.Object({ handle: Type.String({ minLength: 1 }) }),
-		outputSchema: handleSchema,
+		outputSchema: Type.Object({ handle: Type.String(), sessionFile: Type.String() }),
 		async execute(_id, params) {
-			const run = getRun(params.handle)
-			const seen = await readProcess(exec, run.blockId)
+			const run = await stopRun(exec, params.handle)
 
-			if (seen.exists) await closeBlock(exec, run.blockId)
-			removeRunDir(run.handle)
-
-			return toolResult({ handle: run.handle }, `Stopped ${runDisplayName(run)}`)
+			return toolResult(
+				{ handle: run.handle, sessionFile: run.sessionFile },
+				`Stopped ${runDisplayName(run)}; history retained at ${run.sessionFile}`,
+			)
 		},
 	})
 }

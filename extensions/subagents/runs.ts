@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto"
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core"
 import { getAgentDir } from "@earendil-works/pi-coding-agent"
@@ -42,6 +42,8 @@ const runMetadataSchema = z.object({
 	thinking: z.enum(thinkingLevels),
 	launchArgs: z.array(z.string()),
 	suspended: z.boolean().optional(),
+	// Parent-owned terminal marker, independent of bridge lifecycle updates.
+	stoppedAt: z.string().optional(),
 	// Upstream bridge lifecycle; optional for metadata written before lifecycle tracking.
 	state: z.enum(["starting", "busy", "idle", "exited", "error"]).optional(),
 	hasStarted: z.boolean().optional(),
@@ -147,7 +149,7 @@ export function updateMetadata(
 	return next
 }
 
-export function listRuns(parentSessionId?: string): RunMetadata[] {
+export function listRuns(parentSessionId?: string, options: { includeStopped?: boolean } = {}): RunMetadata[] {
 	const root = getRunsDir()
 
 	if (!existsSync(root)) return []
@@ -160,7 +162,7 @@ export function listRuns(parentSessionId?: string): RunMetadata[] {
 		if (!existsSync(metadataPath(dir))) continue
 		const metadata = readMetadata(dir)
 
-		if (!metadata) continue
+		if (!metadata || (metadata.stoppedAt && !options.includeStopped)) continue
 
 		if (parentSessionId && metadata.parentSessionId !== parentSessionId) continue
 		runs.push(metadata)
@@ -169,8 +171,18 @@ export function listRuns(parentSessionId?: string): RunMetadata[] {
 	return runs.sort((a, b) => a.createdAt.localeCompare(b.createdAt))
 }
 
-export function removeRunDir(handle: string): void {
-	rmSync(runDirectory(handle), { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+// Call only after the Rex block is closed or known to be absent. Never delete history.
+export function markStopped(handle: string): RunMetadata {
+	const current = getRun(handle)
+
+	const stopped = updateMetadata(runDirectory(handle), {
+		stoppedAt: current.stoppedAt ?? new Date().toISOString(),
+		suspended: false,
+	})
+
+	if (!stopped) throw new Error(`Could not retain stopped subagent: ${handle}`)
+
+	return stopped
 }
 
 export function enqueue(handle: string, message: string, followUp: boolean): void {

@@ -63,16 +63,18 @@ type RexRequest =
 	| { method: "block.close" | "session.focus_block"; args: BlockArgs }
 	| { method: "session.move_block"; args: MoveBlockArgs }
 
-export const runStates = ["starting", "busy", "idle", "exited", "error", "suspended", "unknown"] as const
+export const runStates = ["starting", "busy", "idle", "exited", "error", "suspended", "stopped", "unknown"] as const
 
 export type RunState = (typeof runStates)[number]
 
 // The bridge owns lifecycle state. Rex only tells us whether its process still exists.
 export async function effectiveRunState(
 	exec: Exec,
-	run: Pick<RunMetadata, "blockId" | "suspended" | "state">,
+	run: Pick<RunMetadata, "blockId" | "suspended" | "stoppedAt" | "state">,
 	signal?: AbortSignal,
 ): Promise<RunState> {
+	if (run.stoppedAt) return "stopped"
+
 	if (run.state === "error") return "error"
 
 	if (run.suspended) return "suspended"
