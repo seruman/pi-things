@@ -26,9 +26,12 @@ export function installBridge(pi: BridgeHost, runDir: string): void {
 
 		if (!metadata) return false
 
+		const sessionFile = current.sessionManager.getSessionFile() ?? metadata.sessionFile
+
 		const patch: Partial<RunMetadata> = {
+			sessionFiles: [...new Set([...(metadata.sessionFiles ?? []), metadata.sessionFile, sessionFile])],
 			childSessionId: current.sessionManager.getSessionId(),
-			sessionFile: current.sessionManager.getSessionFile() ?? metadata.sessionFile,
+			sessionFile,
 			state: current.isIdle() ? "idle" : "busy",
 		}
 

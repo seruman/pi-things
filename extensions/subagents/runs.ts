@@ -36,6 +36,10 @@ const runMetadataSchema = z.object({
 	parentSessionId: z.string(),
 	childSessionId: z.string().optional(),
 	sessionFile: z.string(),
+	// All session paths seen by the bridge; usage must survive child session switches.
+	sessionFiles: z.array(z.string()).optional(),
+	// Legacy runs have no reliable record of which usage was already returned to Pi.
+	accountingVersion: z.literal(1).optional(),
 	cwd: z.string(),
 	provider: z.string(),
 	model: z.string(),

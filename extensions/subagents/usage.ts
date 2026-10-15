@@ -12,6 +12,10 @@ function partOf(entry: SessionEntry): Usage | undefined {
 }
 
 export function childUsage(entries: SessionEntry[]): Usage {
+	return sumUsage(entries.map(partOf))
+}
+
+export function sumUsage(parts: readonly (Usage | undefined)[]): Usage {
 	const usage: Usage = {
 		input: 0,
 		output: 0,
@@ -21,9 +25,7 @@ export function childUsage(entries: SessionEntry[]): Usage {
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	}
 
-	for (const entry of entries) {
-		const part = partOf(entry)
-
+	for (const part of parts) {
 		if (!part) continue
 		usage.input += part.input
 		usage.output += part.output

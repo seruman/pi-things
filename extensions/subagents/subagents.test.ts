@@ -3,12 +3,20 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSy
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { setImmediate } from "node:timers/promises"
-import type { AssistantMessage, JsonObject, JsonValue, Static, StopReason } from "@earendil-works/pi-ai"
+import type {
+	AssistantMessage,
+	JsonObject,
+	JsonValue,
+	Static,
+	StopReason,
+	ToolResultMessage,
+} from "@earendil-works/pi-ai"
 import { type AgentToolResult, type EventBus, SessionManager, createEventBus } from "@earendil-works/pi-coding-agent"
 import { Check } from "typebox/value"
 import { z } from "zod"
 import { registerChildPolicy } from "../shell-leash/child-policy"
 import { policyFlags, shellLeashHost } from "../shell-leash/test-host"
+import { SOURCE_ENTRY, sourceSchema } from "./accounting"
 import { installBridge } from "./bridge"
 import type { BridgeContext, LifecycleEvents, LifecycleHandler, ParentContext } from "./contracts"
 import { installParent } from "./index"
@@ -56,7 +64,7 @@ function events<Context>() {
 	}
 }
 
-type Tool = (params: JsonObject, signal?: AbortSignal) => Promise<AgentToolResult<JsonValue>>
+type Tool = (id: string, params: JsonObject, signal?: AbortSignal) => Promise<AgentToolResult<JsonValue>>
 
 type Block = { exit: number | null; error?: string; closeError?: string }
 
@@ -84,6 +92,10 @@ let savedEnv: Record<string, string | undefined>
 let ctx: ParentContext
 
 let parent: ReturnType<typeof events<ParentContext>>
+
+let parentSession: SessionManager
+
+let toolCounter: number
 
 let bus: EventBus
 
@@ -167,15 +179,25 @@ beforeEach(() => {
 	onProcess = undefined
 	onLaunch = undefined
 	parent = events<ParentContext>()
+	parentSession = SessionManager.create(root, root, { id: "parent" })
+	parentSession.appendMessage({ role: "user", content: "parent task", timestamp: Date.now() })
+	toolCounter = 0
 	bus = createEventBus()
 	ctx = {
 		cwd: root,
 		hasUI: false,
 		model: { provider: "configured", id: "parent" },
-		sessionManager: { getSessionId: () => "parent" },
+		sessionManager: parentSession,
 		ui: { theme: { fg: unexpectedUI }, setWidget: unexpectedUI, notify: unexpectedUI, custom: unexpectedUI },
 	}
+	installTestParent()
+})
+
+function installTestParent(): void {
 	installParent({
+		appendEntry: (type, data) => {
+			parentSession.appendCustomEntry(type, data)
+		},
 		events: bus,
 		on: parent.on,
 		exec: async (command, args, options) => ({ ...(await exec(command, args, options?.signal)), killed: false }),
@@ -188,10 +210,10 @@ beforeEach(() => {
 				`Invalid parameters for ${tool.name}`,
 			)
 
-			tools.set(tool.name, (params, signal) => tool.execute("test", parameters.parse(params), signal, undefined, ctx))
+			tools.set(tool.name, (id, params, signal) => tool.execute(id, parameters.parse(params), signal, undefined, ctx))
 		},
 	})
-})
+}
 
 afterEach(() => {
 	vi.clearAllTimers()
@@ -209,7 +231,22 @@ async function execute(name: string, params: JsonObject = {}, signal?: AbortSign
 
 	if (!tool) throw new Error(`Missing tool: ${name}`)
 
-	return tool(params, signal)
+	const id = `test-${++toolCounter}`
+	const result = await tool(id, params, signal)
+
+	const receipt: ToolResultMessage = {
+		role: "toolResult",
+		toolCallId: id,
+		toolName: name,
+		content: result.content,
+		isError: result.isError ?? false,
+		timestamp: Date.now(),
+	}
+
+	if (result.usage) receipt.usage = result.usage
+	parentSession.appendMessage(receipt)
+
+	return result
 }
 
 async function call(name: string, params: JsonObject = {}, signal?: AbortSignal) {
@@ -510,6 +547,103 @@ test.each(["stop", "error", "aborted"] as const)(
 	},
 )
 
+test("repeated waits charge completed work only once", async () => {
+	const run = await spawn()
+	const c = await child(run)
+	await c.begin()
+	await c.reply("DONE")
+	const first = await execute("agent_wait", { handle: run.handle })
+	const second = await execute("agent_wait", { handle: run.handle })
+	expect((first.usage?.totalTokens ?? 0) + (second.usage?.totalTokens ?? 0)).toBe(5)
+	expect(second.structuredContent).toMatchObject({ usage: { totalTokens: 5 }, usageScope: "session-cumulative" })
+})
+
+test("follow-up waits return cumulative data but charge only newly completed work", async () => {
+	const run = await spawn()
+	const c = await child(run)
+	await c.begin()
+	await c.reply("FIRST")
+	expect((await execute("agent_wait", { handle: run.handle })).usage?.totalTokens).toBe(5)
+	await call("agent_send", { handle: run.handle, message: "follow up" })
+	await tick(250)
+	await c.begin()
+	await c.reply("SECOND")
+	const result = await execute("agent_wait", { handle: run.handle })
+	expect(result.usage?.totalTokens).toBe(5)
+	expect(result.structuredContent).toMatchObject({ usage: { totalTokens: 10 } })
+})
+
+test("stop without waiting accounts for completed work and cache warming after the last wait", async () => {
+	const run = await spawn()
+	const c = await child(run)
+	await c.begin()
+	await c.reply("DONE")
+	const first = await execute("agent_wait", { handle: run.handle })
+
+	const warm = {
+		input: 0,
+		output: 0,
+		cacheRead: 10,
+		cacheWrite: 0,
+		totalTokens: 10,
+		cost: { input: 0, output: 0, cacheRead: 0.01, cacheWrite: 0, total: 0.01 },
+	}
+
+	c.session.appendUsage("cache_warm", "warm-provider", "warm-model", warm)
+	const stop = await execute("agent_stop", { handle: run.handle })
+	expect(first.usage?.totalTokens).toBe(5)
+	expect(stop.usage).toEqual(warm)
+	expect((await execute("agent_stop", { handle: run.handle })).usage).toBeUndefined()
+	const other = await spawn()
+	const second = await child(other)
+	await second.begin()
+	await second.reply("NO WAIT")
+	expect((await execute("agent_stop", { handle: other.handle })).usage?.totalTokens).toBe(5)
+})
+
+test("headless polling records background usage; shutdown reconciles tails and reload delivers them once", async () => {
+	await parent.emit("session_start", ctx)
+	const run = await spawn()
+	const c = await child(run)
+	await c.begin()
+	await c.reply("BACKGROUND")
+	await tick(5000)
+
+	const sources = () =>
+		parentSession
+			.getEntries()
+			.flatMap((entry) =>
+				entry.type === "custom" && entry.customType === SOURCE_ENTRY ? [sourceSchema.parse(entry.data)] : [],
+			)
+
+	expect(sources()).toHaveLength(1)
+	await c.reply("SHUTDOWN TAIL")
+	await parent.emit("session_shutdown", ctx)
+	expect(sources()).toHaveLength(2)
+	parentSession = SessionManager.open(z.string().parse(parentSession.getSessionFile()), root, root)
+	ctx.sessionManager = parentSession
+	parent = events<ParentContext>()
+	installTestParent()
+	await parent.emit("session_start", ctx)
+	expect((await execute("agent_list")).usage?.totalTokens).toBe(10)
+	expect((await execute("agent_list")).usage).toBeUndefined()
+	await parent.emit("session_shutdown", ctx)
+})
+
+test("parallel waits reserve each source only once before their tool results are persisted", async () => {
+	const run = await spawn()
+	const c = await child(run)
+	await c.begin()
+	await c.reply("DONE")
+
+	const results = await Promise.all([
+		execute("agent_wait", { handle: run.handle }),
+		execute("agent_wait", { handle: run.handle }),
+	])
+
+	expect(results.reduce((total, result) => total + (result.usage?.totalTokens ?? 0), 0)).toBe(5)
+})
+
 test("wait selects the active branch rather than a newer abandoned answer", async () => {
 	const run = await spawn()
 	const c = await child(run)
@@ -693,6 +827,7 @@ test("bridge initializes late metadata, syncs names and follows session changes"
 	await c.begin()
 	await c.reply("NEW SESSION")
 	expect(c.session.getSessionFile()).toBe(getRun(run.handle).sessionFile)
+	expect(getRun(run.handle).sessionFiles).toEqual([run.sessionFile, z.string().parse(c.session.getSessionFile())])
 	expect(await call("agent_wait", { handle: run.handle })).toMatchObject({ answer: "NEW SESSION", name: "renamed" })
 	await c.emit("session_shutdown", "quit")
 	expect(getRun(run.handle).state).toBe("exited")

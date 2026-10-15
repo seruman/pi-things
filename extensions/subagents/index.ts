@@ -8,7 +8,6 @@ import {
 	StringEnum,
 	type TextContent,
 	Type,
-	type Usage,
 } from "@earendil-works/pi-ai"
 import {
 	type AgentToolResult,
@@ -20,6 +19,7 @@ import {
 import { type SelectItem, SelectList } from "@earendil-works/pi-tui"
 import { getChildPolicyArgs } from "../shell-leash/child-policy"
 import { getPiInvocationParts } from "../split-fork"
+import { UsageAccounting } from "./accounting"
 import { installBridge } from "./bridge"
 import type { ParentContext, ParentHost } from "./contracts"
 import {
@@ -83,6 +83,7 @@ const runResultSchema = Type.Object({
 	model: modelSchema,
 	cwd: Type.String(),
 	usage: usageSchema,
+	usageScope: Type.Literal("session-cumulative"),
 	error: Type.Optional(Type.String()),
 })
 
@@ -120,11 +121,7 @@ type RunResult = Static<typeof runResultSchema>
 
 type BackgroundResult = Static<typeof backgroundSchema>
 
-function toolResult<T extends JsonValue>(
-	body: T,
-	text: string,
-	options?: { isError?: boolean; usage?: Usage },
-): AgentToolResult<T> {
+function toolResult<T extends JsonValue>(body: T, text: string, options?: { isError?: boolean }): AgentToolResult<T> {
 	const result: AgentToolResult<T> = {
 		content: [{ type: "text", text }],
 		details: body,
@@ -132,8 +129,6 @@ function toolResult<T extends JsonValue>(
 	}
 
 	if (options?.isError) result.isError = true
-
-	if (options?.usage) result.usage = options.usage
 
 	return result
 }
@@ -236,6 +231,7 @@ function resultOf(
 		model: { provider: run.provider, id: run.model },
 		cwd: run.cwd,
 		usage: childUsage(session.getEntries()),
+		usageScope: "session-cumulative",
 	}
 
 	if (run.name !== undefined) result.name = run.name
@@ -358,6 +354,7 @@ async function spawn(
 
 	const draft: Omit<RunMetadata, "blockId"> = {
 		version: 1,
+		accountingVersion: 1,
 		handle: prepared.handle,
 		parentSessionId: ctx.sessionManager.getSessionId(),
 		sessionFile: prepared.sessionFile,
@@ -391,7 +388,6 @@ async function spawn(
 function settledResult(settled: RunResult): AgentToolResult<RunResult> {
 	return toolResult(settled, settled.error ?? settled.answer, {
 		isError: settled.status !== "success",
-		usage: settled.usage,
 	})
 }
 
@@ -455,6 +451,9 @@ export function installParent(pi: ParentHost): void {
 	let widgetTimer: ReturnType<typeof setInterval> | undefined
 	let widgetContext: ParentContext | undefined
 	let refreshingWidget = false
+	const accounting = new UsageAccounting(pi)
+	let accountingTimer: ReturnType<typeof setInterval> | undefined
+	let lastAccountingError: string | undefined
 
 	// Ported from pi-subagent; Rex status calls are asynchronous, unlike tmux's.
 	const refreshWidget = async (): Promise<void> => {
@@ -514,6 +513,25 @@ export function installParent(pi: ParentHost): void {
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
+		accounting.reconcile(ctx, "start")
+
+		if (accountingTimer) clearInterval(accountingTimer)
+		accountingTimer = setInterval(() => {
+			try {
+				accounting.reconcile(ctx, "poll")
+				lastAccountingError = undefined
+			} catch (error) {
+				const message = `Subagent accounting failed: ${error instanceof Error ? error.message : String(error)}`
+
+				if (message === lastAccountingError) return
+				lastAccountingError = message
+
+				if (ctx.hasUI) ctx.ui.notify(message, "error")
+				else console.error(message)
+			}
+		}, 5000)
+		accountingTimer.unref()
+
 		for (const run of listRuns(ctx.sessionManager.getSessionId())) {
 			if (!run.suspended) continue
 
@@ -556,14 +574,29 @@ export function installParent(pi: ParentHost): void {
 		await refreshWidget()
 	})
 
+	pi.on("agent_settled", (_event, ctx) => {
+		accounting.releaseReservations(ctx)
+		accounting.reconcile(ctx, "settled")
+	})
+
 	pi.on("session_shutdown", async (event, ctx) => {
+		accounting.releaseReservations(ctx)
+
+		if (accountingTimer) clearInterval(accountingTimer)
+		accountingTimer = undefined
+
 		if (widgetTimer) clearInterval(widgetTimer)
 		widgetTimer = undefined
 		widgetContext = undefined
 
 		if (ctx.hasUI) ctx.ui.setWidget("subagents", undefined)
 
-		if (event.reason === "reload") return
+		if (event.reason === "reload") {
+			accounting.reconcile(ctx, "reload")
+
+			return
+		}
+
 		const failures: Error[] = []
 
 		for (const run of listRuns(ctx.sessionManager.getSessionId())) {
@@ -584,11 +617,13 @@ export function installParent(pi: ParentHost): void {
 			}
 		}
 
+		accounting.reconcile(ctx, "shutdown")
+
 		if (failures.length > 0) throw new AggregateError(failures, "subagent suspend failed")
 	})
 
 	registerCommand(pi, exec)
-	registerTools(pi, exec)
+	registerTools(pi, exec, accounting)
 }
 
 function registerCommand(pi: ParentHost, exec: Exec): void {
@@ -627,8 +662,30 @@ function registerCommand(pi: ParentHost, exec: Exec): void {
 	})
 }
 
-function registerTools(pi: ParentHost, exec: Exec): void {
-	pi.registerTool({
+function registerTools(pi: ParentHost, exec: Exec, accounting: UsageAccounting): void {
+	// Keep provenance outside model-selected codemode output. All subagent tools can
+	// deliver pending background/shutdown usage, but never return cumulative charges.
+	const registerTool: ParentHost["registerTool"] = (tool) =>
+		pi.registerTool({
+			...tool,
+			async execute(id, params, signal, update, ctx) {
+				let result
+
+				try {
+					result = await tool.execute(id, params, signal, update, ctx)
+				} finally {
+					accounting.reconcile(ctx, tool.name)
+				}
+
+				const usage = accounting.charge(ctx, id)
+
+				if (usage) result.usage = usage
+
+				return result
+			},
+		})
+
+	registerTool({
 		name: "agent_rename",
 		label: "Rename agent",
 		description: "Change a subagent's display name without changing its handle.",
@@ -646,7 +703,7 @@ function registerTools(pi: ParentHost, exec: Exec): void {
 		},
 	})
 
-	pi.registerTool({
+	registerTool({
 		name: "agent_list",
 		label: "List agents",
 		description:
@@ -693,7 +750,7 @@ function registerTools(pi: ParentHost, exec: Exec): void {
 		},
 	})
 
-	pi.registerTool({
+	registerTool({
 		name: "agent_spawn",
 		label: "Spawn agent",
 		description: "Launch a persistent external Pi child in a detached Rex block.",
@@ -732,7 +789,7 @@ function registerTools(pi: ParentHost, exec: Exec): void {
 		},
 	})
 
-	pi.registerTool({
+	registerTool({
 		name: "agent_send",
 		label: "Message agent",
 		description: "Prompt an idle child, steer active work, or queue a follow-up.",
@@ -759,7 +816,7 @@ function registerTools(pi: ParentHost, exec: Exec): void {
 		},
 	})
 
-	pi.registerTool({
+	registerTool({
 		name: "agent_wait",
 		label: "Wait for agent",
 		description: "Wait for a child's current work to finish and return its result. Defaults to a 1800-second timeout.",
@@ -767,6 +824,7 @@ function registerTools(pi: ParentHost, exec: Exec): void {
 			"A completed wait does not stop the child. Read its result, then use agent_send for concrete follow-up work or agent_stop when it is no longer needed.",
 			"Cancelling or timing out agent_wait stops only the wait, not the child. Use agent_stop to terminate the child explicitly.",
 			"agent_wait is for unfinished or idle children, not stopped archives. After stopping, read the retained sessionFile; agent_list with includeStopped finds it.",
+			"The structured usage is session-cumulative, not a new charge. Per-source usage and model attribution are persisted independently in the parent session.",
 		],
 		exposure: "codemode",
 		parameters: Type.Object({
@@ -779,7 +837,7 @@ function registerTools(pi: ParentHost, exec: Exec): void {
 		},
 	})
 
-	pi.registerTool({
+	registerTool({
 		name: "agent_stop",
 		label: "Stop agent",
 		description:

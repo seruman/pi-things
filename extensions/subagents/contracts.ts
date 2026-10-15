@@ -27,7 +27,7 @@ export interface Lifecycle<Context> {
 
 export interface ParentContext extends Pick<ExtensionContext, "cwd" | "hasUI"> {
 	model?: Pick<NonNullable<ExtensionContext["model"]>, "provider" | "id">
-	sessionManager: Pick<ExtensionContext["sessionManager"], "getSessionId">
+	sessionManager: Pick<ExtensionContext["sessionManager"], "getSessionId" | "getEntries">
 	ui: {
 		theme: Pick<ExtensionContext["ui"]["theme"], "fg">
 		notify: ExtensionContext["ui"]["notify"]
@@ -58,7 +58,7 @@ export type SubagentTool<Params extends TSchema, Result extends JsonValue> = Omi
 }
 
 export interface ParentHost
-	extends Lifecycle<ParentContext>, Pick<ExtensionAPI, "exec" | "getThinkingLevel" | "events"> {
+	extends Lifecycle<ParentContext>, Pick<ExtensionAPI, "exec" | "getThinkingLevel" | "events" | "appendEntry"> {
 	registerCommand(
 		name: string,
 		command: {
