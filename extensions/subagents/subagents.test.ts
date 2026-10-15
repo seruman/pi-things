@@ -340,6 +340,50 @@ test.each([
 	expect(command).not.toContain("--no-builtin-tools")
 })
 
+test.each([
+	["parent defaults", {}, "configured", "parent"],
+	["model override", { model: "child-model" }, "configured", "child-model"],
+	["provider override", { provider: "other" }, "other", "parent"],
+	["cross-provider model", { provider: "other", model: "vendor/child-model" }, "other", "vendor/child-model"],
+] as const)("spawn selects and reports %s", async (_name, params, provider, model) => {
+	const result = await call("agent_spawn", { prompt: "task", background: true, ...params })
+	const run = getRun(z.string().parse(result.handle))
+	const command = launches[0]?.command ?? []
+	expect(flagValue(command, "--provider")).toBe(provider)
+	expect(flagValue(command, "--model")).toBe(model)
+	expect(run).toMatchObject({ provider, model })
+	expect(result.model).toEqual({ provider, id: model })
+	expect(await call("agent_list")).toMatchObject({
+		runs: [{ handle: run.handle, model: { provider, id: model } }],
+	})
+	const c = await child(run)
+	await c.begin()
+	await c.reply("ANSWER")
+	expect(await call("agent_wait", { handle: run.handle })).toMatchObject({
+		status: "success",
+		model: { provider, id: model },
+	})
+})
+
+test("explicit provider and model work without a parent model", async () => {
+	delete ctx.model
+	const run = await spawn({ provider: "other", model: "child-model" })
+	expect(run).toMatchObject({ provider: "other", model: "child-model" })
+	expect(flagValue(launches[0].command, "--provider")).toBe("other")
+	expect(flagValue(launches[0].command, "--model")).toBe("child-model")
+})
+
+test.each([
+	[{}, "No provider specified"],
+	[{ model: "child-model" }, "No provider specified"],
+	[{ provider: "other" }, "No model specified"],
+] as const)("spawn rejects incomplete model selection without parent defaults: %j", async (params, error) => {
+	delete ctx.model
+	await expect(spawn(params)).rejects.toThrow(error)
+	expect(launches).toHaveLength(0)
+	expect(listRuns()).toHaveLength(0)
+})
+
 test("spawn snapshots the real shell-leash policy into Rex argv and persists it for resume", async () => {
 	const leash = shellLeashHost({ "shell-leash-allow": "git.switch", "shell-leash-deny": "git.push" }, bus)
 	leash.start()
@@ -637,7 +681,16 @@ test("inbox removes malformed messages, prompts idle children, and steers or que
 
 test("resume launches the preserved transcript with its restrictions and without replaying the prompt", async () => {
 	const prompt = "initial task must not be replayed"
-	const run = await spawn({ prompt, tools: ["read"], excludeTools: ["network"], noTools: "builtin" })
+
+	const run = await spawn({
+		prompt,
+		provider: "other",
+		model: "child-model",
+		tools: ["read"],
+		excludeTools: ["network"],
+		noTools: "builtin",
+	})
+
 	const c = await child(run)
 	await c.begin()
 	await c.reply("SAVED HISTORY")
@@ -646,6 +699,7 @@ test("resume launches the preserved transcript with its restrictions and without
 	await c.emit("session_shutdown", "quit")
 	expect(blocks.has(run.blockId)).toBe(false)
 	expect(getRun(run.handle).suspended).toBe(true)
+	ctx.model = { provider: "changed-parent-provider", id: "changed-parent-model" }
 	await parent.emit("session_start", ctx)
 	const resumed = getRun(run.handle)
 	const command = launches[1]?.command ?? []
@@ -653,6 +707,9 @@ test("resume launches the preserved transcript with its restrictions and without
 	expect(blocks.size).toBe(1)
 	expect(blocks.has(resumed.blockId)).toBe(true)
 	expect(resumed.suspended).toBe(false)
+	expect(resumed).toMatchObject({ provider: "other", model: "child-model" })
+	expect(flagValue(command, "--provider")).toBe("other")
+	expect(flagValue(command, "--model")).toBe("child-model")
 	expect(flagValue(command, "--session")).toBe(run.sessionFile)
 	expect(readFileSync(run.sessionFile, "utf8")).toBe(transcript)
 	expect(new Set(flagValue(command, "--tools")?.split(","))).toEqual(new Set(["read"]))

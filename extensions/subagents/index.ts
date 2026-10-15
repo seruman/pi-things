@@ -145,7 +145,12 @@ const spawnParameters = Type.Object({
 	prompt: Type.String({ minLength: 1 }),
 	name: Type.Optional(nameParameter),
 	cwd: Type.Optional(Type.String()),
-	model: Type.Optional(Type.String({ description: "Model id. Defaults to the parent's model." })),
+	provider: Type.Optional(Type.String({ description: "Provider id. Defaults to the parent's provider." })),
+	model: Type.Optional(
+		Type.String({
+			description: "Model id. Defaults to the parent's model. Set alongside provider for cross-provider use.",
+		}),
+	),
 	thinkingLevel: Type.Optional(StringEnum(thinkingLevels)),
 	tools: Type.Optional(Type.Union([Type.Literal("readonly"), Type.Array(Type.String())])),
 	excludeTools: Type.Optional(Type.Array(Type.String())),
@@ -313,7 +318,7 @@ async function spawn(
 	params: SpawnParameters,
 	signal?: AbortSignal,
 ): Promise<RunMetadata> {
-	const provider = ctx.model?.provider
+	const provider = params.provider ?? ctx.model?.provider
 	const model = params.model ?? ctx.model?.id
 
 	if (!provider) throw new Error("No provider specified and ctx.model is not set")
