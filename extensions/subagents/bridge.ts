@@ -3,6 +3,7 @@ import { join } from "node:path"
 import { onShellLeashDenial } from "../shell-leash/denial"
 import type { BridgeContext, BridgeHost } from "./contracts"
 import { type RunMetadata, inboxDir, inboxMessageSchema, readMetadata, updateMetadata } from "./runs"
+import { acknowledgeStop, clearStopAcknowledgement, stopAcknowledged, stopRequested } from "./stop"
 
 export function installBridge(pi: BridgeHost, runDir: string): void {
 	let current: BridgeContext | undefined
@@ -12,6 +13,7 @@ export function installBridge(pi: BridgeHost, runDir: string): void {
 	let sessionPending = true
 	let hasStarted = false
 	let denial: string | undefined
+	let abortRequested = false
 
 	onShellLeashDenial(pi.events, (reason) => {
 		denial ??= reason
@@ -62,9 +64,34 @@ export function installBridge(pi: BridgeHost, runDir: string): void {
 		sessionName = next
 	}
 
+	// Abort through Pi, not Rex. isIdle/agent_settled only become true after the
+	// interrupted response and its available usage have reached the transcript.
+	const processStop = (): boolean => {
+		const run = readMetadata(runDir)
+
+		if (!current || !run || !stopRequested(run)) {
+			abortRequested = false
+
+			return false
+		}
+
+		if (!current.isIdle()) clearStopAcknowledgement(run)
+
+		if (!abortRequested) {
+			abortRequested = true
+			current.abort()
+		}
+
+		if (current.isIdle() && !stopAcknowledged(run)) acknowledgeStop(run)
+
+		return true
+	}
+
 	// Upstream inbox processing with Zod validation.
 	const processInbox = (): void => {
 		if (processing || !current || !initializeSession()) return
+
+		if (processStop()) return
 		syncSessionName()
 		const directory = inboxDir(runDir)
 
@@ -75,6 +102,7 @@ export function installBridge(pi: BridgeHost, runDir: string): void {
 			for (const name of readdirSync(directory)
 				.filter((entry) => entry.endsWith(".json"))
 				.sort()) {
+				if (processStop()) return
 				const path = join(directory, name)
 				let payload: ReturnType<typeof inboxMessageSchema.parse>
 
@@ -131,6 +159,10 @@ export function installBridge(pi: BridgeHost, runDir: string): void {
 		hasStarted = true
 		denial = undefined
 		updateMetadata(runDir, { state: "busy", hasStarted: true }, ["error"])
+		// Initial CLI prompts and already queued work can start after an idle poll.
+		// A stop request remains latched until the parent closes or resumes the child.
+		abortRequested = false
+		processStop()
 	})
 
 	pi.on("agent_settled", (_event, ctx) => {
@@ -139,6 +171,7 @@ export function installBridge(pi: BridgeHost, runDir: string): void {
 		if (ctx.isIdle()) {
 			// Publish only after cancellation settles, not while sibling tools may still be running.
 			updateMetadata(runDir, denial ? { state: "error", error: denial } : { state: "idle" })
+			processStop()
 		}
 	})
 

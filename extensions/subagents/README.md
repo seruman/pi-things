@@ -52,10 +52,10 @@ agent_wait({
 
 ### `agent_stop`
 
-Stop the child, keeping its history. Returns `{ handle, sessionFile }`.
+Abort and save available usage before closing. Returns `{ handle, sessionFile }`, keeping history. After a 10-second timeout, retry or force-kill (unsaved usage may be lost).
 
 ```ts
-agent_stop({ handle: string })
+agent_stop({ handle: string, force?: boolean })
 ```
 
 ### `agent_list`

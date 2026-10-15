@@ -36,7 +36,7 @@ export interface ParentContext extends Pick<ExtensionContext, "cwd" | "hasUI"> {
 	}
 }
 
-export interface BridgeContext extends Pick<ExtensionContext, "isIdle"> {
+export interface BridgeContext extends Pick<ExtensionContext, "isIdle" | "abort"> {
 	sessionManager: Pick<ExtensionContext["sessionManager"], "getSessionId" | "getSessionFile">
 }
 

@@ -22,6 +22,7 @@ import { ATTRIBUTION_ENTRY, SOURCE_ENTRY, attributionSchema, sourceSchema } from
 import type { ParentHost } from "./contracts"
 import { installParent } from "./index"
 import { getRun, runDirectory, updateMetadata } from "./runs"
+import { acknowledgeStop, stopRequested } from "./stop"
 import { childUsage, sumUsage } from "./usage"
 
 // Real Pi + codemode + nested dispatch + persisted tool results. Only Rex and model
@@ -80,6 +81,10 @@ test.each([false, true])(
 
 				if (!handle) return { code: 1, stderr: `Error: block target "${args[3]}" not found`, stdout: "", killed: false }
 				updateMetadata(runDirectory(handle), { state: "idle", hasStarted: true })
+				const run = getRun(handle)
+
+				// This fake child has already persisted its complete response above.
+				if (stopRequested(run)) acknowledgeStop(run)
 
 				return { code: 0, stderr: "", stdout: JSON.stringify({ last_exit: null }), killed: false }
 			}

@@ -48,6 +48,7 @@ import {
 	updateMetadata,
 	writeMetadata,
 } from "./runs"
+import { clearStopSignals, requestStop, stopAcknowledged, stopRequested } from "./stop"
 import { childUsage } from "./usage"
 
 const EXCLUDED = ["codemode", "agent_spawn", "agent_send", "agent_wait", "agent_stop", "agent_list", "agent_rename"]
@@ -254,19 +255,45 @@ function assertNotStopped(run: RunMetadata): void {
 }
 
 // Closing and retaining a run is shared by explicit stop and foreground cancellation.
-async function stopRun(exec: Exec, handle: string): Promise<RunMetadata> {
+async function stopRun(
+	exec: Exec,
+	handle: string,
+	options: { force?: boolean; signal?: AbortSignal } = {},
+): Promise<RunMetadata> {
 	const run = getRun(handle)
 
 	if (run.stoppedAt) return run
-	const seen = await readProcess(exec, run.blockId)
+	const { signal } = options
 
-	if (seen.exists) {
-		try {
-			await closeBlock(exec, run.blockId)
-		} catch (error) {
-			// Another stop may have closed it while this call was awaiting Rex.
-			if ((await readProcess(exec, run.blockId)).exists) throw error
+	if (!options.force) {
+		let seen = await readProcess(exec, run.blockId, signal)
+
+		if (seen.alive) {
+			requestStop(run)
+			const deadline = Date.now() + 10_000
+
+			while (!stopAcknowledged(run)) {
+				signal?.throwIfAborted()
+
+				if (!seen.alive || getRun(handle).stoppedAt) break
+
+				if (Date.now() >= deadline) {
+					throw new Error(
+						`${handle} did not finish graceful stop within 10 seconds; retry or use agent_stop({ handle: "${handle}", force: true }) to kill it. Force may lose unsaved usage.`,
+					)
+				}
+
+				await new Promise((resolveDelay) => setTimeout(resolveDelay, 100))
+				seen = await readProcess(exec, run.blockId, signal)
+			}
 		}
+	}
+
+	try {
+		await closeBlock(exec, run.blockId, signal)
+	} catch (error) {
+		// Another stop may have closed it while this call was awaiting Rex.
+		if ((await readProcess(exec, run.blockId, signal)).exists) throw error
 	}
 
 	// Re-read after closing: the bridge may have updated its session path or final state.
@@ -539,6 +566,7 @@ export function installParent(pi: ParentHost): void {
 				const seen = await readProcess(exec, run.blockId)
 
 				if (seen.alive) {
+					clearStopSignals(run)
 					updateMetadata(runDirectory(run.handle), { suspended: false })
 					continue
 				}
@@ -554,6 +582,7 @@ export function installParent(pi: ParentHost): void {
 					continue
 				}
 
+				clearStopSignals(run)
 				const starting = updateMetadata(runDirectory(run.handle), { state: "starting" }, ["error"]) ?? run
 				const blockId = await newBlock(exec, run.cwd, run.handle, launchCommand(starting))
 				updateMetadata(runDirectory(run.handle), { blockId, suspended: false })
@@ -809,6 +838,8 @@ function registerTools(pi: ParentHost, exec: Exec, accounting: UsageAccounting):
 			const seen = await readProcess(exec, run.blockId)
 			assertNotStopped(getRun(run.handle))
 
+			if (stopRequested(run)) throw new Error(`${run.handle} is stopping; retry agent_stop or use force: true`)
+
 			if (!seen.alive) throw new Error(`${run.handle} is not running`)
 			enqueue(run.handle, params.message, params.followUp ?? false)
 
@@ -841,16 +872,20 @@ function registerTools(pi: ParentHost, exec: Exec, accounting: UsageAccounting):
 		name: "agent_stop",
 		label: "Stop agent",
 		description:
-			"Terminate a child by closing its Rex block. Retain its transcript and metadata; stopped children never auto-resume.",
+			"Gracefully abort a child, wait for its response and usage to be saved, then close its Rex block. Set force to skip the wait and kill a stuck child. History is retained.",
 		promptGuidelines: [
 			"Stopping is repeatable and preserves history on disk. Use the returned sessionFile or agent_list with includeStopped to find it.",
+			"Graceful stop times out after 10 seconds without killing the child. Retry or use force: true; force can lose unsaved response usage.",
 			"Explicitly stop every child when it is no longer needed; do not leave completed children running idle.",
 		],
 		exposure: "codemode",
-		parameters: Type.Object({ handle: Type.String({ minLength: 1 }) }),
+		parameters: Type.Object({
+			handle: Type.String({ minLength: 1 }),
+			force: Type.Optional(Type.Boolean({ description: "Kill immediately without waiting for usage to be saved." })),
+		}),
 		outputSchema: Type.Object({ handle: Type.String(), sessionFile: Type.String() }),
-		async execute(_id, params) {
-			const run = await stopRun(exec, params.handle)
+		async execute(_id, params, signal) {
+			const run = await stopRun(exec, params.handle, { force: params.force, signal })
 
 			return toolResult(
 				{ handle: run.handle, sessionFile: run.sessionFile },

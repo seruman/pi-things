@@ -31,6 +31,7 @@ import {
 	updateMetadata,
 	writeMetadata,
 } from "./runs"
+import { acknowledgeStop, requestStop, stopAcknowledged, stopRequested } from "./stop"
 
 type LifecycleListeners<Context> = {
 	[Key in keyof LifecycleEvents]: Set<LifecycleHandler<LifecycleEvents[Key], Context>>
@@ -232,7 +233,23 @@ async function execute(name: string, params: JsonObject = {}, signal?: AbortSign
 	if (!tool) throw new Error(`Missing tool: ${name}`)
 
 	const id = `test-${++toolCounter}`
-	const result = await tool(id, params, signal)
+	const pending = tool(id, params, signal)
+
+	if (name === "agent_stop") {
+		let finished = false
+		void pending.then(
+			() => {
+				finished = true
+			},
+			() => {
+				finished = true
+			},
+		)
+
+		while (!finished) await tick(100)
+	}
+
+	const result = await pending
 
 	const receipt: ToolResultMessage = {
 		role: "toolResult",
@@ -280,11 +297,22 @@ async function child(run: RunMetadata) {
 	const c = {
 		events: childBus,
 		idle: true,
+		abortRequests: 0,
 		session: SessionManager.open(run.sessionFile, undefined, root),
 		names,
 		sent,
 		emit: (event: keyof LifecycleEvents, reason?: LifecycleEvents["session_shutdown"]["reason"]) =>
-			hooks.emit(event, { isIdle: () => c.idle, sessionManager: c.session }, reason),
+			hooks.emit(
+				event,
+				{
+					isIdle: () => c.idle,
+					abort: () => {
+						c.abortRequests++
+					},
+					sessionManager: c.session,
+				},
+				reason,
+			),
 		begin: async () => {
 			c.idle = false
 			await c.emit("agent_start")
@@ -573,6 +601,116 @@ test("follow-up waits return cumulative data but charge only newly completed wor
 	expect(result.structuredContent).toMatchObject({ usage: { totalTokens: 10 } })
 })
 
+test.each([false, true])("stop saves interrupted usage before closing (follow-up: %s)", async (followUp) => {
+	const run = await spawn()
+	const c = await child(run)
+
+	if (followUp) {
+		await c.begin()
+		await c.reply("FIRST")
+		expect((await execute("agent_wait", { handle: run.handle })).usage?.totalTokens).toBe(5)
+	}
+
+	await c.begin()
+	const stopping = execute("agent_stop", { handle: run.handle })
+
+	for (let attempt = 0; attempt < 10 && c.abortRequests === 0; attempt++) await tick(100)
+	// A live response exists only in the child until abort finishes and Pi saves it.
+	expect(blocks.has(run.blockId)).toBe(true)
+	expect(getRun(run.handle).stoppedAt).toBeUndefined()
+	expect(c.abortRequests).toBe(1)
+	await c.reply("PARTIAL STREAM", "aborted")
+	await tick(250)
+	const result = await stopping
+	expect(result.usage?.totalTokens).toBe(5)
+	expect(readFileSync(run.sessionFile, "utf8")).toContain("PARTIAL STREAM")
+	expect(blocks.has(run.blockId)).toBe(false)
+	expect((await execute("agent_stop", { handle: run.handle })).usage).toBeUndefined()
+})
+
+test("stop timeout keeps the child alive, blocks new inbox delivery, and allows a graceful retry", async () => {
+	const run = await spawn()
+	const c = await child(run)
+	await c.begin()
+	await call("agent_send", { handle: run.handle, message: "queued", followUp: true })
+	await expect(call("agent_stop", { handle: run.handle })).rejects.toThrow("force: true")
+	expect(c.abortRequests).toBe(1)
+	expect(c.sent).toEqual([])
+	expect(blocks.has(run.blockId)).toBe(true)
+	expect(getRun(run.handle).stoppedAt).toBeUndefined()
+	await expect(call("agent_send", { handle: run.handle, message: "more" })).rejects.toThrow("stopping")
+	await c.reply("DELAYED ABORT", "aborted")
+	expect((await execute("agent_stop", { handle: run.handle })).usage?.totalTokens).toBe(5)
+	expect(c.sent).toEqual([])
+	expect(blocks.has(run.blockId)).toBe(false)
+})
+
+test("force stops an unresponsive child without requiring process inspection or acknowledgement", async () => {
+	const run = await spawn()
+	blocks.set(run.blockId, { exit: null, error: "inspection unavailable" })
+	const result = await call("agent_stop", { handle: run.handle, force: true })
+	expect(result).toEqual({ handle: run.handle, sessionFile: run.sessionFile })
+	expect(blocks.has(run.blockId)).toBe(false)
+	expect(getRun(run.handle).stoppedAt).toBeString()
+	expect(stopRequested(run)).toBe(false)
+	expect(await call("agent_stop", { handle: run.handle, force: true })).toEqual(result)
+})
+
+test("force after a stop timeout retains completed history without recharging it", async () => {
+	const run = await spawn()
+	const c = await child(run)
+	await c.begin()
+	await c.reply("COMPLETED")
+	expect((await execute("agent_wait", { handle: run.handle })).usage?.totalTokens).toBe(5)
+	await c.begin()
+	await expect(call("agent_stop", { handle: run.handle })).rejects.toThrow("10 seconds")
+	expect((await execute("agent_stop", { handle: run.handle, force: true })).usage).toBeUndefined()
+	expect(c.abortRequests).toBe(1)
+	expect(readFileSync(run.sessionFile, "utf8")).toContain("COMPLETED")
+	expect(blocks.has(run.blockId)).toBe(false)
+})
+
+test("cancelled stop leaves the requested child alive for a retry or force", async () => {
+	const run = await spawn()
+	const c = await child(run)
+	await c.begin()
+	const controller = new AbortController()
+	const stopping = call("agent_stop", { handle: run.handle }, controller.signal)
+	const rejected = expect(stopping).rejects.toThrow()
+
+	for (let attempt = 0; attempt < 10 && c.abortRequests === 0; attempt++) await tick(100)
+	controller.abort()
+	await rejected
+	expect(blocks.has(run.blockId)).toBe(true)
+	expect(getRun(run.handle).stoppedAt).toBeUndefined()
+	await call("agent_stop", { handle: run.handle, force: true })
+	expect(blocks.has(run.blockId)).toBe(false)
+})
+
+test("a stale acknowledgement from another Rex block cannot authorize closing a busy child", async () => {
+	const run = await spawn()
+	const c = await child(run)
+	await c.begin()
+	acknowledgeStop({ ...run, blockId: "block:previous-process" })
+	await expect(call("agent_stop", { handle: run.handle })).rejects.toThrow("10 seconds")
+	expect(blocks.has(run.blockId)).toBe(true)
+	await call("agent_stop", { handle: run.handle, force: true })
+})
+
+test("a stop request aborts late-starting work and revokes an earlier idle acknowledgement", async () => {
+	const run = await spawn()
+	const c = await child(run)
+	requestStop(run)
+	await tick(250)
+	expect(stopAcknowledged(run)).toBe(true)
+	await c.begin()
+	expect(stopAcknowledged(run)).toBe(false)
+	expect(c.abortRequests).toBe(2)
+	await c.reply("ABORTED LATE START", "aborted")
+	expect(stopAcknowledged(run)).toBe(true)
+	await call("agent_stop", { handle: run.handle })
+})
+
 test("stop without waiting accounts for completed work and cache warming after the last wait", async () => {
 	const run = await spawn()
 	const c = await child(run)
@@ -771,7 +909,8 @@ test("cancelling foreground spawn still closes the block and preserves the trans
 	await c.reply("PARTIAL HISTORY", "aborted")
 	const transcript = readFileSync(run.sessionFile, "utf8")
 	controller.abort()
-	await tick(500)
+
+	for (let attempt = 0; attempt < 15; attempt++) await tick(100)
 	expect(await spawning).toMatchObject({ status: "aborted" })
 	expect(blocks.has(run.blockId)).toBe(false)
 	expect(getRun(run.handle).stoppedAt).toBeString()
@@ -799,7 +938,8 @@ test("failed close after foreground cancellation preserves history without marki
 	})
 
 	controller.abort()
-	await tick(500)
+
+	for (let attempt = 0; attempt < 15; attempt++) await tick(100)
 	expect(await rejected).toMatchObject({ message: "close failed" })
 	expect(getRun(run.handle).stoppedAt).toBeUndefined()
 	expect(blocks.has(run.blockId)).toBe(true)
@@ -871,6 +1011,8 @@ test("resume launches the preserved transcript with its restrictions and without
 	const c = await child(run)
 	await c.begin()
 	await c.reply("SAVED HISTORY")
+	requestStop(run)
+	acknowledgeStop(run)
 	const transcript = readFileSync(run.sessionFile, "utf8")
 	await parent.emit("session_shutdown", ctx, "quit")
 	await c.emit("session_shutdown", "quit")
@@ -879,6 +1021,8 @@ test("resume launches the preserved transcript with its restrictions and without
 	ctx.model = { provider: "changed-parent-provider", id: "changed-parent-model" }
 	await parent.emit("session_start", ctx)
 	const resumed = getRun(run.handle)
+	expect(stopRequested(run)).toBe(false)
+	expect(stopAcknowledged(run)).toBe(false)
 	const command = launches[1]?.command ?? []
 	expect(launches).toHaveLength(2)
 	expect(blocks.size).toBe(1)
@@ -1114,6 +1258,8 @@ test("stopped history listing stays parent-scoped and does not hide a healthy ch
 	const stopped = await spawn()
 	const foreign = await spawn()
 	const healthy = await spawn()
+	await child(stopped)
+	await child(foreign)
 	await call("agent_stop", { handle: stopped.handle })
 	await call("agent_stop", { handle: foreign.handle })
 	updateMetadata(runDirectory(foreign.handle), { parentSessionId: "other" })
@@ -1130,6 +1276,7 @@ test("stopped history listing stays parent-scoped and does not hide a healthy ch
 
 test("concurrent stops tolerate another caller closing the block first", async () => {
 	const run = await spawn()
+	await child(run)
 
 	const results = await Promise.all([
 		call("agent_stop", { handle: run.handle }),
@@ -1166,6 +1313,7 @@ test("stop keeps the latest session path if the bridge changes it during process
 
 test("stopped children stay out of the widget even with stale suspended or error state", async () => {
 	const run = await spawn()
+	await child(run)
 	await call("agent_stop", { handle: run.handle })
 	updateMetadata(runDirectory(run.handle), { suspended: true, state: "error", error: "previous failure" })
 	const widgets: (string[] | undefined)[] = []
