@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto"
 import { readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
+import { isDeepStrictEqual } from "node:util"
 import type { Usage } from "@earendil-works/pi-ai"
 import { z } from "zod"
 import type { ParentContext, ParentHost } from "./contracts"
@@ -167,10 +168,13 @@ function readTranscript(path: string): Transcript {
 	return result
 }
 
-function checkpointIdentity(checkpoint: Checkpoint): string {
-	const { reason: _reason, ...identity } = checkpoint
+function sameCheckpoint(left: Checkpoint, right: Checkpoint): boolean {
+	const { reason: _leftReason, ...leftState } = left
+	const { reason: _rightReason, ...rightState } = right
 
-	return JSON.stringify(identity)
+	// Schema parsing reorders keys (notably name). Compare state, not JSON key order;
+	// otherwise every poll of a named child appends an unchanged checkpoint forever.
+	return isDeepStrictEqual(leftState, rightState)
 }
 
 /** Durable source facts plus delivery receipts; no child or parent transcript is rewritten. */
@@ -323,7 +327,7 @@ export class UsageAccounting {
 			if (run.stoppedAt !== undefined) checkpoint.stoppedAt = run.stoppedAt
 			const previous = ledger.checkpoints.get(run.handle)
 
-			if (!previous || checkpointIdentity(previous) !== checkpointIdentity(checkpoint)) {
+			if (!previous || !sameCheckpoint(previous, checkpoint)) {
 				this.pi.appendEntry(CHECKPOINT_ENTRY, checkpoint)
 			}
 		}

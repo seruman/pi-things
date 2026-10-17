@@ -377,14 +377,63 @@ test("reused native tool-call IDs get distinct attribution by result entry ID", 
 	expect(attributions().map((entry) => entry.sourceKeys)).toEqual(records().map((source) => [source.sourceKey]))
 })
 
-test("unchanged observations do not append duplicate facts or checkpoint noise", () => {
+test.each([
+	{ name: undefined, stoppedAt: undefined },
+	{ name: "reviewer", stoppedAt: undefined },
+	{ name: undefined, stoppedAt: "2026-10-16T21:30:36.428Z" },
+	{ name: "reviewer", stoppedAt: "2026-10-16T21:30:36.428Z" },
+])("unchanged observations do not append duplicate facts or checkpoint noise: %j", (metadata) => {
 	const c = child()
+	updateMetadata(runDirectory(c.handle), metadata)
 	reply(c.session)
 	accounting.reconcile(ctx, "wait")
 	const count = parent.getEntries().length
-	accounting.reconcile(ctx, "poll")
+
+	for (let poll = 0; poll < 100; poll++) accounting.reconcile(ctx, "poll")
 	accounting.reconcile(ctx, "shutdown")
 	expect(parent.getEntries()).toHaveLength(count)
+	expect(checkpoints()).toHaveLength(1)
+
+	reload()
+	accounting.reconcile(ctx, "start")
+	accounting.reconcile(ctx, "poll")
+	expect(parent.getEntries()).toHaveLength(count)
+	expect(checkpoints()).toHaveLength(1)
+})
+
+test("named child checkpoint changes are persisted once for renames, new usage, and stopping", () => {
+	const c = child()
+	updateMetadata(runDirectory(c.handle), { name: "reviewer" })
+	reply(c.session)
+	accounting.reconcile(ctx, "wait")
+	expect(checkpoints()).toHaveLength(1)
+
+	updateMetadata(runDirectory(c.handle), { name: "renamed reviewer" })
+	accounting.reconcile(ctx, "rename")
+	accounting.reconcile(ctx, "poll")
+	expect(checkpoints()).toHaveLength(2)
+	expect(checkpoints().at(-1)?.name).toBe("renamed reviewer")
+
+	reply(c.session, 7)
+	accounting.reconcile(ctx, "poll")
+	accounting.reconcile(ctx, "poll")
+	expect(checkpoints()).toHaveLength(3)
+	expect(checkpoints().at(-1)?.sourceCount).toBe(2)
+	expect(records()).toHaveLength(2)
+
+	const stoppedAt = "2026-10-16T21:30:36.428Z"
+	updateMetadata(runDirectory(c.handle), { stoppedAt })
+	accounting.reconcile(ctx, "stop")
+	accounting.reconcile(ctx, "poll")
+	expect(checkpoints()).toHaveLength(4)
+	expect(checkpoints().at(-1)?.stoppedAt).toBe(stoppedAt)
+
+	const count = parent.getEntries().length
+	reload()
+	accounting.reconcile(ctx, "start")
+	accounting.reconcile(ctx, "poll")
+	expect(parent.getEntries()).toHaveLength(count)
+	expect(accounting.charge(ctx, "deliver")).toEqual(sumUsage([usage(5), usage(7)]))
 })
 
 test("all child branches count, cache warming is attributed, and tool/summary costs remain explicitly unattributed", () => {
