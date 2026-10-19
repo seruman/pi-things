@@ -59,6 +59,15 @@ const SNAPSHOT_EXCLUDED_COMPONENTS = [
 	"coverage",
 	"__pycache__",
 	".pytest_cache",
+	"vendor",
+	".venv",
+	"venv",
+	".tox",
+	".terraform",
+	".gradle",
+	".direnv",
+	".mypy_cache",
+	".ruff_cache",
 ] as const
 
 export interface DefaultPolicyPaths {

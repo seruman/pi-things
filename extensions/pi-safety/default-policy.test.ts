@@ -374,6 +374,15 @@ test("every default access and snapshot declaration has an observable policy dec
 			"coverage",
 			"__pycache__",
 			".pytest_cache",
+			"vendor",
+			".venv",
+			"venv",
+			".tox",
+			".terraform",
+			".gradle",
+			".direnv",
+			".mypy_cache",
+			".ruff_cache",
 		] as const
 
 		for (const component of excludedComponents) {

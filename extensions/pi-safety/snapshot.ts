@@ -123,11 +123,26 @@ export function classifySnapshotStorage(policy: Policy, path: CanonicalPath): Sn
 	return decision.access === "none" ? { kind: "protected" } : { kind: "ordinary" }
 }
 
+export interface SnapshotStoreLimits {
+	readonly maxSnapshots?: number
+	readonly maxFiles?: number
+	readonly maxBytes?: number
+}
+
+export const DEFAULT_MAX_SNAPSHOTS = 20
+
+// Above these sizes a snapshot is skipped with a warning rather than copying the tree.
+export const DEFAULT_MAX_SNAPSHOT_FILES = 20_000
+
+export const DEFAULT_MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024 * 1024
+
 export interface SnapshotStore {
 	readonly workspaceRoot: CanonicalPath
 	readonly projectDirectory: CanonicalPath
 	readonly policy: Policy
 	readonly maxSnapshots: number
+	readonly maxFiles: number
+	readonly maxBytes: number
 	readonly [snapshotStoreBrand]: true
 }
 
@@ -154,6 +169,7 @@ export type SnapshotError =
 	| { readonly kind: "clone-unsupported"; readonly message: string }
 	| { readonly kind: "project-locked"; readonly path: string }
 	| { readonly kind: "retention-conflict"; readonly maxSnapshots: number }
+	| { readonly kind: "workspace-too-large"; readonly limit: "files" | "bytes"; readonly maximum: number }
 	| { readonly kind: "io"; readonly operation: string; readonly path: string; readonly message: string }
 
 function errorMessage(cause: unknown): string {
@@ -208,16 +224,23 @@ function entryType(stat: fs.Stats): string {
 	return "unknown"
 }
 
-export function createSnapshotStore(input: {
-	readonly workspaceRoot: CanonicalPath
-	readonly stateRoot: CanonicalPath
-	readonly policy: Policy
-	readonly maxSnapshots?: number
-}): Result<SnapshotStore, SnapshotError> {
-	const maxSnapshots = input.maxSnapshots ?? 20
+export function createSnapshotStore(
+	input: {
+		readonly workspaceRoot: CanonicalPath
+		readonly stateRoot: CanonicalPath
+		readonly policy: Policy
+	} & SnapshotStoreLimits,
+): Result<SnapshotStore, SnapshotError> {
+	const limits = {
+		maxSnapshots: input.maxSnapshots ?? DEFAULT_MAX_SNAPSHOTS,
+		maxFiles: input.maxFiles ?? DEFAULT_MAX_SNAPSHOT_FILES,
+		maxBytes: input.maxBytes ?? DEFAULT_MAX_SNAPSHOT_BYTES,
+	}
 
-	if (!Number.isSafeInteger(maxSnapshots) || maxSnapshots < 1) {
-		return err({ kind: "invalid-store", message: "maxSnapshots must be a positive safe integer" })
+	for (const [name, value] of Object.entries(limits)) {
+		if (!Number.isSafeInteger(value) || value < 1) {
+			return err({ kind: "invalid-store", message: `${name} must be a positive safe integer` })
+		}
 	}
 
 	const projectId = createHash("sha256").update(input.workspaceRoot).digest("hex").slice(0, 24)
@@ -239,14 +262,53 @@ export function createSnapshotStore(input: {
 	}
 
 	return ok(
-		// SAFETY: the limit is positive, projectDirectory is canonical, and the store/workspace containment checks passed.
+		// SAFETY: the limits are positive, projectDirectory is canonical, and the store/workspace containment checks passed.
 		Object.freeze({
 			workspaceRoot: input.workspaceRoot,
 			projectDirectory: projectDirectory.value,
 			policy: input.policy,
-			maxSnapshots,
+			...limits,
 		}) as SnapshotStore,
 	)
+}
+
+// Snapshot work is written as generators that yield after each filesystem entry. Sync callers
+// run them straight through; checkpoints pause at the yields so the TUI keeps handling input,
+// rendering, and resizes while a large workspace is walked and copied.
+type SnapshotWork<T> = Generator<undefined, T, undefined>
+
+const YIELD_INTERVAL_MS = 10
+
+function runSnapshotWork<T>(work: SnapshotWork<T>): T {
+	while (true) {
+		const step = work.next()
+
+		if (step.done) return step.value
+	}
+}
+
+async function runSnapshotWorkYielding<T>(work: SnapshotWork<T>): Promise<T> {
+	// If the process exits while paused, unwind the generator so its finally blocks release the
+	// project lock and remove staging; a stale lock would make every later snapshot fail.
+	// SAFETY: the value passed to return() is discarded because nothing awaits the unwound work.
+	const unwind = () => work.return(undefined as T)
+	process.once("exit", unwind)
+
+	try {
+		let sliceStart = performance.now()
+
+		while (true) {
+			const step = work.next()
+
+			if (step.done) return step.value
+
+			if (performance.now() - sliceStart < YIELD_INTERVAL_MS) continue
+			await new Promise<void>((resolve) => setImmediate(resolve))
+			sliceStart = performance.now()
+		}
+	} finally {
+		process.off("exit", unwind)
+	}
 }
 
 type WorkspaceObservationInput = {
@@ -258,24 +320,29 @@ type WorkspaceObservationScope =
 	| { readonly kind: "all" }
 	| { readonly kind: "selected"; readonly paths: readonly RelativeSnapshotPath[] }
 
+type WorkspaceObservationLimits = { readonly maxFiles: number; readonly maxBytes: number }
+
 export function observeWorkspace(input: WorkspaceObservationInput): Result<WorkspaceObservation, SnapshotError> {
-	return observeWorkspaceScope(input, { kind: "all" })
+	return runSnapshotWork(observeWorkspaceScope(input, { kind: "all" }))
 }
 
 export function observeWorkspacePaths(
 	input: WorkspaceObservationInput & { readonly paths: readonly RelativeSnapshotPath[] },
 ): Result<WorkspaceObservation, SnapshotError> {
-	return observeWorkspaceScope(input, { kind: "selected", paths: input.paths })
+	return runSnapshotWork(observeWorkspaceScope(input, { kind: "selected", paths: input.paths }))
 }
 
-function observeWorkspaceScope(
+function* observeWorkspaceScope(
 	input: WorkspaceObservationInput,
 	scope: WorkspaceObservationScope,
-): Result<WorkspaceObservation, SnapshotError> {
+	limits?: WorkspaceObservationLimits,
+): SnapshotWork<Result<WorkspaceObservation, SnapshotError>> {
 	const entries: SnapshotPlanEntry[] = []
 	const nonComparable: NonComparableWorkspaceEntry[] = []
+	let files = 0
+	let bytes = 0
 
-	const visitDirectory = (relativeDirectory: string): Result<undefined, SnapshotError> => {
+	function* visitDirectory(relativeDirectory: string): SnapshotWork<Result<undefined, SnapshotError>> {
 		const absoluteDirectory = relativeDirectory
 			? path.join(input.workspaceRoot, relativeDirectory)
 			: input.workspaceRoot
@@ -293,7 +360,7 @@ function observeWorkspaceScope(
 			const parsedRelative = parseRelativeSnapshotPath(relative)
 
 			if (!parsedRelative.ok) return parsedRelative
-			const visited = visitEntry(parsedRelative.value, "required")
+			const visited = yield* visitEntry(parsedRelative.value, "required")
 
 			if (!visited.ok) return visited
 		}
@@ -301,10 +368,12 @@ function observeWorkspaceScope(
 		return ok(undefined)
 	}
 
-	const visitEntry = (
+	function* visitEntry(
 		relative: RelativeSnapshotPath,
 		presence: "optional" | "required",
-	): Result<undefined, SnapshotError> => {
+	): SnapshotWork<Result<undefined, SnapshotError>> {
+		yield
+
 		if (isExcludedSnapshotPath(input.policy, input.workspaceRoot, relative)) {
 			entries.push({ kind: "excluded", path: relative, reason: "policy" })
 
@@ -327,10 +396,22 @@ function observeWorkspaceScope(
 		if (stat.isDirectory()) {
 			entries.push({ kind: "directory", path: relative, mode: stat.mode & 0o7777, mtimeMs: stat.mtimeMs })
 
-			return visitDirectory(relative)
+			return yield* visitDirectory(relative)
 		}
 
 		if (stat.isFile()) {
+			files++
+			bytes += stat.size
+
+			// Stop walking as soon as a limit is crossed so oversized trees fail fast.
+			if (limits && files > limits.maxFiles) {
+				return err({ kind: "workspace-too-large", limit: "files", maximum: limits.maxFiles })
+			}
+
+			if (limits && bytes > limits.maxBytes) {
+				return err({ kind: "workspace-too-large", limit: "bytes", maximum: limits.maxBytes })
+			}
+
 			const canonical = parseCanonicalPath(absolute)
 
 			if (!canonical.ok) {
@@ -369,7 +450,7 @@ function observeWorkspaceScope(
 	}
 
 	if (scope.kind === "all") {
-		const visited = visitDirectory("")
+		const visited = yield* visitDirectory("")
 
 		if (!visited.ok) return visited
 	} else {
@@ -380,7 +461,7 @@ function observeWorkspaceScope(
 			.sort()
 
 		for (const relative of roots) {
-			const visited = visitEntry(relative, "optional")
+			const visited = yield* visitEntry(relative, "optional")
 
 			if (!visited.ok) return visited
 		}
@@ -398,7 +479,14 @@ export function planSnapshot(input: {
 	readonly workspaceRoot: CanonicalPath
 	readonly policy: Policy
 }): Result<SnapshotPlan, SnapshotError> {
-	const observed = observeWorkspace(input)
+	return runSnapshotWork(planSnapshotWork(input))
+}
+
+function* planSnapshotWork(
+	input: WorkspaceObservationInput,
+	limits?: WorkspaceObservationLimits,
+): SnapshotWork<Result<SnapshotPlan, SnapshotError>> {
+	const observed = yield* observeWorkspaceScope(input, { kind: "all" }, limits)
 
 	if (!observed.ok) return observed
 	const unsupported = observed.value.nonComparable[0]
@@ -484,8 +572,16 @@ export function stageSnapshot(
 	projectDirectory: CanonicalPath,
 	origin: SnapshotCreationOrigin = { kind: "standalone" },
 ): Result<StagedSnapshot, SnapshotError> {
+	return runSnapshotWork(stageSnapshotWork(plan, projectDirectory, origin))
+}
+
+function* stageSnapshotWork(
+	plan: SnapshotPlan,
+	projectDirectory: CanonicalPath,
+	origin: SnapshotCreationOrigin,
+): SnapshotWork<Result<StagedSnapshot, SnapshotError>> {
 	try {
-		return stageSnapshotTransaction(plan, projectDirectory, origin)
+		return yield* stageSnapshotTransaction(plan, projectDirectory, origin)
 	} catch (cause) {
 		return err({
 			kind: "io",
@@ -496,11 +592,11 @@ export function stageSnapshot(
 	}
 }
 
-function stageSnapshotTransaction(
+function* stageSnapshotTransaction(
 	plan: SnapshotPlan,
 	projectDirectory: CanonicalPath,
 	origin: SnapshotCreationOrigin,
-): Result<StagedSnapshot, SnapshotError> {
+): SnapshotWork<Result<StagedSnapshot, SnapshotError>> {
 	const { id, createdAt } = generateSnapshotIdentity()
 	const stagingRaw = path.join(projectDirectory, `.staging-${id}`)
 	const finalRaw = path.join(projectDirectory, id)
@@ -523,6 +619,7 @@ function stageSnapshotTransaction(
 
 		for (const entry of plan.entries) {
 			if (entry.kind === "excluded") continue
+			yield
 			const source = path.join(plan.workspaceRoot, entry.path)
 
 			if (entry.kind === "directory") {
@@ -657,8 +754,29 @@ export function createSnapshot(
 	store: SnapshotStore,
 	options: { readonly preserve?: SnapshotId; readonly origin?: SnapshotCreationOrigin } = {},
 ): Result<PublishedSnapshotRef, SnapshotError> {
+	return runSnapshotWork(createSnapshotWork(store, options))
+}
+
+/**
+ * Creates a snapshot without holding the event loop for the whole walk and copy, and refuses
+ * workspaces above the store's file or byte limits. Used for automatic checkpoints.
+ */
+export function createCheckpointSnapshot(
+	store: SnapshotStore,
+	options: { readonly origin?: SnapshotCreationOrigin } = {},
+): Promise<Result<PublishedSnapshotRef, SnapshotError>> {
+	return runSnapshotWorkYielding(
+		createSnapshotWork(store, options, { maxFiles: store.maxFiles, maxBytes: store.maxBytes }),
+	)
+}
+
+function* createSnapshotWork(
+	store: SnapshotStore,
+	options: { readonly preserve?: SnapshotId; readonly origin?: SnapshotCreationOrigin },
+	limits?: WorkspaceObservationLimits,
+): SnapshotWork<Result<PublishedSnapshotRef, SnapshotError>> {
 	try {
-		return createSnapshotTransaction(store, options)
+		return yield* createSnapshotTransaction(store, options, limits)
 	} catch (cause) {
 		return err({
 			kind: "io",
@@ -669,11 +787,12 @@ export function createSnapshot(
 	}
 }
 
-function createSnapshotTransaction(
+function* createSnapshotTransaction(
 	store: SnapshotStore,
 	options: { readonly preserve?: SnapshotId; readonly origin?: SnapshotCreationOrigin },
-): Result<PublishedSnapshotRef, SnapshotError> {
-	const plan = planSnapshot({ workspaceRoot: store.workspaceRoot, policy: store.policy })
+	limits: WorkspaceObservationLimits | undefined,
+): SnapshotWork<Result<PublishedSnapshotRef, SnapshotError>> {
+	const plan = yield* planSnapshotWork({ workspaceRoot: store.workspaceRoot, policy: store.policy }, limits)
 
 	if (!plan.ok) return plan
 	const directory = ensureDirectory(store.projectDirectory)
@@ -695,7 +814,8 @@ function createSnapshotTransaction(
 		const cloneSupport = probeCloneSupport(store.projectDirectory)
 
 		if (!cloneSupport.ok) return cloneSupport
-		const staged = stageSnapshot(plan.value, store.projectDirectory, options.origin ?? { kind: "standalone" })
+		const origin = options.origin ?? { kind: "standalone" }
+		const staged = yield* stageSnapshotWork(plan.value, store.projectDirectory, origin)
 
 		if (!staged.ok) return staged
 		const published = publishSnapshot(staged.value)

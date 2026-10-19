@@ -5,11 +5,15 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { noAccess, pattern, readOnly, shared } from "./policy"
 import { unwrap } from "./result"
-import { createSnapshot, createSnapshotStore, planSnapshot, stageSnapshot } from "./snapshot"
+import { createCheckpointSnapshot, createSnapshot, createSnapshotStore, planSnapshot, stageSnapshot } from "./snapshot"
 import { canonicalPath, pathPattern, testPolicy } from "./test-domain-values"
-import { withTestTempDirectory } from "./test-temp-directory"
+import { withTestTempDirectory, withTestTempDirectoryAsync } from "./test-temp-directory"
 
-function snapshotFixture(root: string, maxSnapshots = 20) {
+function snapshotFixture(
+	root: string,
+	maxSnapshots = 20,
+	limits: { readonly maxFiles?: number; readonly maxBytes?: number } = {},
+) {
 	const workspace = path.join(root, "workspace")
 	const state = path.join(root, "state")
 	fs.mkdirSync(workspace)
@@ -31,6 +35,7 @@ function snapshotFixture(root: string, maxSnapshots = 20) {
 			stateRoot: canonicalPath(state),
 			policy,
 			maxSnapshots,
+			...limits,
 		}),
 	)
 
@@ -262,5 +267,98 @@ test("retains only the configured number of successfully published snapshots", (
 			.filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
 
 		assert.equal(published.length, 2)
+	})
+})
+
+test("snapshot stores reject non-positive size limits", () => {
+	withTestTempDirectory("snapshot-store-limits-", (root) => {
+		const workspace = path.join(root, "workspace")
+		const state = path.join(root, "state")
+		fs.mkdirSync(workspace)
+		fs.mkdirSync(state)
+
+		for (const limits of [{ maxFiles: 0 }, { maxBytes: -1 }, { maxFiles: 1.5 }]) {
+			const created = createSnapshotStore({
+				workspaceRoot: canonicalPath(workspace),
+				stateRoot: canonicalPath(state),
+				policy: testPolicy(workspace, state),
+				...limits,
+			})
+
+			assert.equal(created.ok, false, JSON.stringify(limits))
+		}
+	})
+})
+
+test("checkpoint snapshots refuse workspaces above the file limit without leaving state behind", async () => {
+	await withTestTempDirectoryAsync("snapshot-checkpoint-files-", async (root) => {
+		const fixture = snapshotFixture(root, 20, { maxFiles: 2 })
+
+		for (const name of ["a", "b", "c"]) fs.writeFileSync(path.join(fixture.workspace, name), name)
+		const created = await createCheckpointSnapshot(fixture.store)
+
+		assert.deepEqual(created, { ok: false, error: { kind: "workspace-too-large", limit: "files", maximum: 2 } })
+		assert.equal(fs.existsSync(fixture.store.projectDirectory), false)
+
+		// Explicit snapshots are not size limited.
+		unwrap(createSnapshot(fixture.store))
+	})
+})
+
+test("checkpoint snapshots refuse workspaces above the byte limit", async () => {
+	await withTestTempDirectoryAsync("snapshot-checkpoint-bytes-", async (root) => {
+		const fixture = snapshotFixture(root, 20, { maxBytes: 10 })
+		fs.writeFileSync(path.join(fixture.workspace, "large"), "x".repeat(11))
+
+		const created = await createCheckpointSnapshot(fixture.store)
+
+		assert.deepEqual(created, { ok: false, error: { kind: "workspace-too-large", limit: "bytes", maximum: 10 } })
+	})
+})
+
+test("checkpoint snapshots ignore files in excluded directories when applying limits", async () => {
+	await withTestTempDirectoryAsync("snapshot-checkpoint-excluded-", async (root) => {
+		const fixture = snapshotFixture(root, 20, { maxFiles: 1 })
+		fs.writeFileSync(path.join(fixture.workspace, "kept"), "kept")
+		fs.mkdirSync(path.join(fixture.workspace, "node_modules"))
+
+		for (const name of ["a", "b", "c"]) fs.writeFileSync(path.join(fixture.workspace, "node_modules", name), name)
+		const created = unwrap(await createCheckpointSnapshot(fixture.store))
+
+		assert.equal(fs.readFileSync(path.join(created.directory, "tree", "kept"), "utf8"), "kept")
+	})
+})
+
+test("checkpoint snapshots let the event loop run while walking and copying", async () => {
+	await withTestTempDirectoryAsync("snapshot-checkpoint-yield-", async (root) => {
+		const fixture = snapshotFixture(root)
+
+		for (let directory = 0; directory < 40; directory++) {
+			const parent = path.join(fixture.workspace, `d${directory}`)
+			fs.mkdirSync(parent)
+
+			for (let file = 0; file < 50; file++) fs.writeFileSync(path.join(parent, `f${file}`), `${directory}:${file}`)
+		}
+
+		let turns = 0
+		let running = true
+
+		const spin = () => {
+			if (!running) return
+			turns++
+			setImmediate(spin)
+		}
+
+		setImmediate(spin)
+		const created = await createCheckpointSnapshot(fixture.store)
+		running = false
+
+		const published = unwrap(created)
+		assert.equal(fs.readFileSync(path.join(published.directory, "tree", "d39", "f49"), "utf8"), "39:49")
+		assert.ok(turns > 1, `expected the event loop to run during the snapshot, got ${turns} turns`)
+		assert.deepEqual(
+			fs.readdirSync(fixture.store.projectDirectory).filter((name) => name.startsWith(".")),
+			[],
+		)
 	})
 })

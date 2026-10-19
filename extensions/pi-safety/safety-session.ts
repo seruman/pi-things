@@ -29,7 +29,12 @@ import {
 	parseSessionPathGrant,
 	parseSessionPathsEnvironment,
 } from "./session-paths"
-import { type SnapshotCreationOrigin, type SnapshotError, type SnapshotStore, createSnapshot } from "./snapshot"
+import {
+	type SnapshotCreationOrigin,
+	type SnapshotError,
+	type SnapshotStore,
+	createCheckpointSnapshot,
+} from "./snapshot"
 import { type ToolAuthorizationError, authorizeBuiltinToolCall } from "./tool-authorization"
 
 export interface RawSafetySessionConfiguration extends RawPolicyConfiguration {
@@ -104,7 +109,7 @@ class ManagedSafetySession implements SafetySession {
 			return err({ kind: "checkpoint-creation-in-progress" })
 		}
 
-		this.#checkpointRun = new CheckpointRun(async () => createSnapshot(this.snapshotStore, { origin }))
+		this.#checkpointRun = new CheckpointRun(() => createCheckpointSnapshot(this.snapshotStore, { origin }))
 
 		return ok(undefined)
 	}
@@ -323,6 +328,8 @@ function formatSnapshotError(error: SnapshotError): string {
 			return `${error.kind} at ${error.path}`
 		case "retention-conflict":
 			return `${error.kind}: cannot retain required snapshots within limit ${error.maxSnapshots}`
+		case "workspace-too-large":
+			return `${error.kind}: more than ${error.maximum} ${error.limit} to snapshot`
 		case "io":
 			return `${error.kind} during ${error.operation} at ${error.path}: ${error.message}`
 	}
