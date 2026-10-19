@@ -24,11 +24,13 @@ When Seatbelt is disabled, Bash and built-in file tools run with the user's ordi
 
 ## Checkpoints
 
-Before the first Bash, `write`, or `edit` call in an agent run, Pi Safety attempts a fast APFS snapshot when checkpoints are enabled. It records successful checkpoints as session metadata without sending them to the model, keeps up to 20 snapshots per project, and excludes generated directories such as `.git`, `.pi`, `.wb`, `node_modules`, `dist`, and `target`.
+Before the first Bash, `write`, or `edit` call in an agent run, Pi Safety attempts a fast APFS snapshot when checkpoints are enabled. It records successful checkpoints as session metadata without sending them to the model, keeps up to 10 snapshots per project, and excludes generated directories such as `.git`, `.pi`, `.wb`, `node_modules`, `dist`, and `target`.
 
 Checkpoints are best effort: if creation fails, tools continue without rollback protection. The failure is reported once per agent run in tool output (and as a UI warning when available), with no further attempts until the next run. Enabled Seatbelt authorization remains fail-closed.
 
 The `pi-snapshot` command can create, list, inspect, verify, compare, export, garbage-collect, and restore snapshots. Restore starts as a dry run; use `--apply` to mutate the project.
+
+`pi-snapshot prune` cleans up the whole snapshot store, not just the current project. It removes snapshots older than 7 days (change with `--older-than <days>`), keeps at most 10 per project, and removes leftovers from interrupted snapshots and empty project folders. It also starts as a dry run; use `--apply` to remove. Projects with a `.lock` are skipped and listed, so a lock left by a killed process can be removed by hand.
 
 Projects can tighten protected paths in `.pi/pi-safety.json`:
 

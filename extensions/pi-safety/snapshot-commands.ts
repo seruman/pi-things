@@ -25,6 +25,7 @@ import {
 	loadSnapshot,
 	verifySnapshot,
 } from "./snapshot-history"
+import { describeSnapshotPrune, pruneSnapshotStores } from "./snapshot-prune"
 
 export type SnapshotCommandAuthority = { readonly kind: "sandboxed" } | { readonly kind: "direct-user" }
 
@@ -36,6 +37,8 @@ export type SnapshotCommandRunError =
 	| { readonly kind: "binary-content"; readonly path: string }
 	| { readonly kind: "export-destination"; readonly path: string; readonly message: string }
 	| { readonly kind: "io"; readonly operation: string; readonly path: string; readonly message: string }
+
+const DAY_MS = 24 * 60 * 60 * 1000
 
 export function runSnapshotCommand(
 	store: SnapshotStore,
@@ -149,6 +152,19 @@ export function runSnapshotCommand(
 			const collected = garbageCollectSnapshots(store)
 
 			return collected.ok ? ok("gc complete") : err({ kind: "snapshot", cause: collected.error })
+		}
+
+		case "prune": {
+			// Project folders are siblings of this store's folder under the snapshot root.
+			const pruned = pruneSnapshotStores({
+				snapshotsRoot: path.dirname(store.projectDirectory),
+				maxSnapshots: store.maxSnapshots,
+				maxAgeMs: command.maxAgeDays * DAY_MS,
+				now: Date.now(),
+				execution: command.execution,
+			})
+
+			return pruned.ok ? ok(describeSnapshotPrune(pruned.value, command.execution)) : err(pruned.error)
 		}
 	}
 }

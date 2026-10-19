@@ -26,8 +26,15 @@ export function main(args: readonly string[]): number {
 	const stateHome = process.env.XDG_STATE_HOME ?? path.join(home, ".local", "state")
 	const sandboxed = process.env.PI_SAFETY_CHECKPOINT_READY === "1"
 
-	if (sandboxed && (invocation.value.command.kind === "create" || invocation.value.command.kind === "gc")) {
-		console.error(`pi-snapshot: ${invocation.value.command.kind} is unavailable inside Pi Bash`)
+	const command = invocation.value.command
+
+	const mutatesStore =
+		command.kind === "create" || command.kind === "gc" || (command.kind === "prune" && command.execution === "apply")
+
+	if (sandboxed && mutatesStore) {
+		console.error(
+			`pi-snapshot: ${command.kind}${command.kind === "prune" ? " --apply" : ""} is unavailable inside Pi Bash`,
+		)
 
 		return 1
 	}

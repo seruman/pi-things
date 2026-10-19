@@ -31,6 +31,10 @@ test("parses legal snapshot CLI command shapes", () => {
 			[["export", id, destination], "export"],
 			[["verify", id], "verify"],
 			[["gc"], "gc"],
+			[["prune"], "prune"],
+			[["prune", "--apply"], "prune"],
+			[["prune", "--older-than", "3", "--dry-run"], "prune"],
+			[["prune", "--apply", "--older-than", "30"], "prune"],
 		] as const
 
 		for (const [args, kind] of cases) {
@@ -88,10 +92,27 @@ test("rejects malformed IDs, paths, separators, and argument counts", () => {
 		["export", id, "relative"],
 		["verify"],
 		["unknown"],
+		["prune", "--older-than"],
+		["prune", "--older-than", "0"],
+		["prune", "--older-than", "1.5"],
+		["prune", "--older-than", "1", "--older-than", "2"],
+		["prune", "--apply", "--dry-run"],
+		["prune", "--force"],
 	]) {
 		assert.equal(parseSnapshotCommand(args).ok, false, args.join(" "))
 	}
 
 	assert.equal(parseSnapshotInvocation(["--project"]).ok, false)
 	assert.equal(parseSnapshotInvocation(["--project", "/definitely/not/a/project", "list"]).ok, false)
+})
+
+test("prune defaults to a seven day dry run", () => {
+	assert.deepEqual(parseSnapshotCommand(["prune"]), {
+		ok: true,
+		value: { kind: "prune", maxAgeDays: 7, execution: "dry-run" },
+	})
+	assert.deepEqual(parseSnapshotCommand(["prune", "--older-than", "3", "--apply"]), {
+		ok: true,
+		value: { kind: "prune", maxAgeDays: 3, execution: "apply" },
+	})
 })

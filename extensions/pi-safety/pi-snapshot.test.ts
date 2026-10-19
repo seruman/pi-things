@@ -63,5 +63,18 @@ test("standalone pi-snapshot creates, lists, shows, and restores in isolated XDG
 		const restored = runCli(administration, env, [...project, "restore", id, "--apply", "--", "file.txt"])
 		assert.equal(restored.status, 0, restored.stderr)
 		assert.equal(fs.readFileSync(file, "utf8"), "before")
+
+		const pruneDryRun = runCli(administration, env, ["prune"])
+		assert.equal(pruneDryRun.status, 0, pruneDryRun.stderr)
+		assert.match(pruneDryRun.stdout, /would remove 0 snapshots/)
+		const pruned = runCli(administration, env, ["prune", "--apply"])
+		assert.equal(pruned.status, 0, pruned.stderr)
+		assert.match(pruned.stdout, /removed 0 snapshots/)
+
+		const sandboxedPrune = runCli(administration, { ...env, PI_SAFETY_CHECKPOINT_READY: "1" }, ["prune", "--apply"])
+		assert.equal(sandboxedPrune.status, 1)
+		assert.match(sandboxedPrune.stderr, /prune --apply is unavailable inside Pi Bash/)
+		const sandboxedDryRun = runCli(administration, { ...env, PI_SAFETY_CHECKPOINT_READY: "1" }, [...project, "prune"])
+		assert.equal(sandboxedDryRun.status, 0, sandboxedDryRun.stderr)
 	})
 })

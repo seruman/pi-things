@@ -2,7 +2,15 @@ import * as fs from "node:fs"
 import { type CanonicalPath, parseCanonicalPath } from "./canonical-path"
 import { type RestoreScope, selectedRestoreScope } from "./restore"
 import { type Result, err, ok } from "./result"
-import { type RelativeSnapshotPath, type SnapshotId, parseRelativeSnapshotPath, parseSnapshotId } from "./snapshot"
+import {
+	DEFAULT_MAX_SNAPSHOTS,
+	type RelativeSnapshotPath,
+	type SnapshotId,
+	parseRelativeSnapshotPath,
+	parseSnapshotId,
+} from "./snapshot"
+
+export const DEFAULT_PRUNE_MAX_AGE_DAYS = 7
 
 export const SNAPSHOT_USAGE = `Usage:
   pi-snapshot [--project <absolute-project-root>] list
@@ -14,8 +22,13 @@ export const SNAPSHOT_USAGE = `Usage:
   pi-snapshot [--project <absolute-project-root>] export <snapshot> <absolute-destination>
   pi-snapshot [--project <absolute-project-root>] verify <snapshot>
   pi-snapshot [--project <absolute-project-root>] gc
+  pi-snapshot prune [--older-than <days>] [--dry-run|--apply]
 
-Restore defaults to dry-run. Pass --apply to mutate the project.`
+Restore defaults to dry-run. Pass --apply to mutate the project.
+
+Prune applies to every project in the snapshot store. It removes snapshots older than
+--older-than days (default ${DEFAULT_PRUNE_MAX_AGE_DAYS}), keeps at most ${DEFAULT_MAX_SNAPSHOTS} per project, and removes leftovers
+from interrupted snapshots and empty project folders. It defaults to dry-run.`
 
 export type SnapshotCommand =
 	| { readonly kind: "help" }
@@ -37,6 +50,7 @@ export type SnapshotCommand =
 	| { readonly kind: "export"; readonly id: SnapshotId; readonly destination: CanonicalPath }
 	| { readonly kind: "verify"; readonly id: SnapshotId }
 	| { readonly kind: "gc" }
+	| { readonly kind: "prune"; readonly maxAgeDays: number; readonly execution: "apply" | "dry-run" }
 
 export type SnapshotProject =
 	| { readonly kind: "current-directory" }
@@ -86,6 +100,8 @@ export function parseSnapshotCommand(args: readonly string[]): Result<SnapshotCo
 	if (args.length === 1 && args[0] === "gc") return ok({ kind: "gc" })
 
 	if (args[0] === "diff") return parseDiffCommand(args)
+
+	if (args[0] === "prune") return parsePruneCommand(args)
 
 	if (args[0] === "verify" && args.length === 2) {
 		const id = commandId(args[1], args)
@@ -182,6 +198,39 @@ function parseDiffCommand(args: readonly string[]): Result<SnapshotCommand, Snap
 	return scope.ok
 		? ok({ kind: "diff", id: id.value, comparison, scope: scope.value })
 		: invalid(args, `invalid diff selection: ${scope.error.kind}`)
+}
+
+function parsePruneCommand(args: readonly string[]): Result<SnapshotCommand, SnapshotCommandError> {
+	let maxAgeDays = DEFAULT_PRUNE_MAX_AGE_DAYS
+	let execution: "apply" | "dry-run" | undefined
+	let ageSeen = false
+
+	for (let index = 1; index < args.length; index++) {
+		const arg = args[index]
+
+		if (arg === "--dry-run" || arg === "--apply") {
+			if (execution !== undefined) return invalid(args, "prune accepts one of --dry-run or --apply")
+			execution = arg === "--apply" ? "apply" : "dry-run"
+			continue
+		}
+
+		if (arg === "--older-than" && !ageSeen) {
+			const days = args[index + 1]
+
+			if (days === undefined || !/^[1-9]\d*$/.test(days) || !Number.isSafeInteger(Number(days))) {
+				return invalid(args, "--older-than requires a positive whole number of days")
+			}
+
+			maxAgeDays = Number(days)
+			ageSeen = true
+			index++
+			continue
+		}
+
+		return invalid(args, "unknown command or invalid argument combination")
+	}
+
+	return ok({ kind: "prune", maxAgeDays, execution: execution ?? "dry-run" })
 }
 
 function selectedRestoreCommand(

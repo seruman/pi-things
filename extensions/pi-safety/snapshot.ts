@@ -129,7 +129,7 @@ export interface SnapshotStoreLimits {
 	readonly maxBytes?: number
 }
 
-export const DEFAULT_MAX_SNAPSHOTS = 20
+export const DEFAULT_MAX_SNAPSHOTS = 10
 
 // Above these sizes a snapshot is skipped with a warning rather than copying the tree.
 export const DEFAULT_MAX_SNAPSHOT_FILES = 20_000
