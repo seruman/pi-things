@@ -22,6 +22,7 @@ import { getPiInvocationParts } from "../split-fork"
 import { UsageAccounting } from "./accounting"
 import { installBridge } from "./bridge"
 import type { ParentContext, ParentHost } from "./contracts"
+import { parentExtensionFlags } from "./parent-flags"
 import { ProgramStatusReporter } from "./program-status"
 import {
 	type Exec,
@@ -377,7 +378,13 @@ async function spawn(
 	const name = params.name === undefined ? undefined : normalizeRunName(params.name)
 	const thinking = params.thinkingLevel ?? pi.getThinkingLevel()
 	const cwd = resolve(ctx.cwd, params.cwd ?? ".")
-	const launchArgs = [...toolFlags(params), ...getChildPolicyArgs(pi.events)]
+
+	const launchArgs = [
+		...parentExtensionFlags(process.argv.slice(2), process.cwd()),
+		...toolFlags(params),
+		...getChildPolicyArgs(pi.events),
+	]
+
 	const prepared = prepareRun()
 
 	const draft: Omit<RunMetadata, "blockId"> = {

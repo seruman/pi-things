@@ -98,6 +98,8 @@ let root: string
 
 let savedEnv: Record<string, string | undefined>
 
+let savedArgv: string[]
+
 let ctx: ParentContext
 
 let parent: ReturnType<typeof events<ParentContext>>
@@ -179,6 +181,7 @@ function unexpectedUI(): never {
 }
 
 beforeEach(() => {
+	savedArgv = process.argv
 	savedEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]))
 	root = mkdtempSync(join(tmpdir(), "subagents-test-"))
 	process.env.PI_CODING_AGENT_DIR = root
@@ -241,6 +244,7 @@ function installTestParent(): void {
 }
 
 afterEach(() => {
+	process.argv = savedArgv
 	reporter.dispose()
 	vi.clearAllTimers()
 	vi.useRealTimers()
@@ -1020,6 +1024,40 @@ test("inbox removes malformed messages, prompts idle children, and steers or que
 		{ message: "later", deliverAs: "followUp" },
 	])
 	expect(getRun(run.handle).error).toBeUndefined()
+})
+
+test("spawn inherits parent extension isolation and persists it when resumed from a different invocation", async () => {
+	process.argv = [
+		process.execPath,
+		"pi",
+		"-ne",
+		"-e",
+		".",
+		"-e",
+		"builtin:codemode",
+		"--session",
+		"parent-session",
+		"parent prompt",
+	]
+	const run = await spawn({ cwd: root })
+	const launched = launches[0]?.command ?? []
+	expect(launched).toContain("--no-extensions")
+	expect(run.launchArgs).toEqual(
+		expect.arrayContaining(["--no-extensions", "--extension", process.cwd(), "builtin:codemode"]),
+	)
+	expect(launched).not.toContain("parent-session")
+	expect(launched).not.toContain("parent prompt")
+	const c = await child(run)
+	await c.begin()
+	await c.reply("saved")
+	await parent.emit("session_shutdown", ctx)
+	process.argv = [process.execPath, "pi"]
+	await parent.emit("session_start", ctx)
+	const resumed = launches[1]?.command ?? []
+	expect(resumed).toContain("--no-extensions")
+	expect(resumed).toContain(process.cwd())
+	expect(resumed).toContain("builtin:codemode")
+	expect(getRun(run.handle).launchArgs).toEqual(run.launchArgs)
 })
 
 test("resume launches the preserved transcript with its restrictions and without replaying the prompt", async () => {
