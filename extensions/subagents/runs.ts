@@ -51,6 +51,8 @@ const runMetadataSchema = z.object({
 	// Upstream bridge lifecycle; optional for metadata written before lifecycle tracking.
 	state: z.enum(["starting", "busy", "idle", "exited", "error"]).optional(),
 	hasStarted: z.boolean().optional(),
+	// Last settled turn; published by the bridge, never inferred from process liveness.
+	outcome: z.enum(["success", "error", "aborted"]).optional(),
 	error: z.string().optional(),
 	createdAt: z.string(),
 })

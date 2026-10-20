@@ -20,6 +20,7 @@ import { SOURCE_ENTRY, sourceSchema } from "./accounting"
 import { installBridge } from "./bridge"
 import type { BridgeContext, LifecycleEvents, LifecycleHandler, ParentContext } from "./contracts"
 import { installParent } from "./index"
+import { ProgramStatusReporter } from "./program-status"
 import { type Exec, readProcess } from "./rex"
 import {
 	type RunMetadata,
@@ -57,8 +58,15 @@ function events<Context>() {
 				handlers[event].delete(handler)
 			}
 		},
-		emit(event: keyof LifecycleEvents, ctx: Context, reason: LifecycleEvents["session_shutdown"]["reason"] = "quit") {
+		emit(
+			event: keyof LifecycleEvents,
+			ctx: Context,
+			reason: LifecycleEvents["session_shutdown"]["reason"] = "quit",
+			aborted = false,
+		) {
 			if (event === "session_shutdown") return dispatch(event, { type: event, reason }, ctx)
+
+			if (event === "agent_settled") return dispatch(event, { type: event, aborted }, ctx)
 
 			return dispatch(event, { type: event }, ctx)
 		},
@@ -99,6 +107,10 @@ let parentSession: SessionManager
 let toolCounter: number
 
 let bus: EventBus
+
+let reports: string[]
+
+let reporter: ProgramStatusReporter
 
 let tools: Map<string, Tool>
 
@@ -187,36 +199,49 @@ beforeEach(() => {
 	ctx = {
 		cwd: root,
 		hasUI: false,
+		mode: "print",
 		model: { provider: "configured", id: "parent" },
 		sessionManager: parentSession,
 		ui: { theme: { fg: unexpectedUI }, setWidget: unexpectedUI, notify: unexpectedUI, custom: unexpectedUI },
 	}
+	reports = []
+	reporter = new ProgramStatusReporter({
+		write: (data) => {
+			reports.push(data)
+		},
+		isTTY: true,
+		env: {},
+	})
 	installTestParent()
 })
 
 function installTestParent(): void {
-	installParent({
-		appendEntry: (type, data) => {
-			parentSession.appendCustomEntry(type, data)
-		},
-		events: bus,
-		on: parent.on,
-		exec: async (command, args, options) => ({ ...(await exec(command, args, options?.signal)), killed: false }),
-		getThinkingLevel: () => "off",
-		registerCommand() {},
-		registerTool(tool) {
-			// Pi and this repo resolve different TypeBox versions; validate using the declared wire schema.
-			const parameters = z.custom<Static<typeof tool.parameters>>(
-				(value) => Check(tool.parameters, value),
-				`Invalid parameters for ${tool.name}`,
-			)
+	installParent(
+		{
+			appendEntry: (type, data) => {
+				parentSession.appendCustomEntry(type, data)
+			},
+			events: bus,
+			on: parent.on,
+			exec: async (command, args, options) => ({ ...(await exec(command, args, options?.signal)), killed: false }),
+			getThinkingLevel: () => "off",
+			registerCommand() {},
+			registerTool(tool) {
+				// Pi and this repo resolve different TypeBox versions; validate using the declared wire schema.
+				const parameters = z.custom<Static<typeof tool.parameters>>(
+					(value) => Check(tool.parameters, value),
+					`Invalid parameters for ${tool.name}`,
+				)
 
-			tools.set(tool.name, (id, params, signal) => tool.execute(id, parameters.parse(params), signal, undefined, ctx))
+				tools.set(tool.name, (id, params, signal) => tool.execute(id, parameters.parse(params), signal, undefined, ctx))
+			},
 		},
-	})
+		reporter,
+	)
 }
 
 afterEach(() => {
+	reporter.dispose()
 	vi.clearAllTimers()
 	vi.useRealTimers()
 	rmSync(root, { recursive: true, force: true })
@@ -301,7 +326,7 @@ async function child(run: RunMetadata) {
 		session: SessionManager.open(run.sessionFile, undefined, root),
 		names,
 		sent,
-		emit: (event: keyof LifecycleEvents, reason?: LifecycleEvents["session_shutdown"]["reason"]) =>
+		emit: (event: keyof LifecycleEvents, reason?: LifecycleEvents["session_shutdown"]["reason"], aborted = false) =>
 			hooks.emit(
 				event,
 				{
@@ -312,6 +337,7 @@ async function child(run: RunMetadata) {
 					sessionManager: c.session,
 				},
 				reason,
+				aborted,
 			),
 		begin: async () => {
 			c.idle = false
@@ -1073,6 +1099,57 @@ test.each(["quit", "resume"] as const)("bridge releases its polling timer on %s"
 	await tick(1000)
 	expect(c.sent).toEqual([])
 })
+
+test("cancellation before a new assistant response does not report the previous turn as successful", async () => {
+	const run = await spawn()
+	const c = await child(run)
+	await c.begin()
+	await c.reply("previous success")
+	await c.begin()
+	c.idle = true
+	await c.emit("agent_settled", undefined, true)
+	expect(getRun(run.handle).outcome).toBe("aborted")
+	await c.emit("session_shutdown", "reload")
+	await c.emit("session_start")
+	expect(getRun(run.handle).outcome).toBe("aborted")
+})
+
+test.each(["stop", "error", "aborted"] as const)(
+	"parent reports child %s outcome, rename, queued work and removal through its existing poll",
+	async (reason) => {
+		ctx.hasUI = true
+		ctx.mode = "tui"
+		ctx.ui = { ...ctx.ui, setWidget: () => {}, theme: { fg: (_color, text) => text } }
+		await parent.emit("session_start", ctx)
+		const run = await spawn({ name: "reviewer" })
+		await tick(1000)
+		expect(reports.at(-1)).toContain(`state=working:id=subagents/${run.handle}`)
+		const c = await child(run)
+		await c.begin()
+		await c.reply("PRIVATE RESPONSE", reason)
+		await tick(1000)
+		const expected = reason === "stop" ? "done" : reason === "error" ? "error" : "idle"
+		expect(reports.at(-1)).toContain(`state=${expected}:id=subagents/${run.handle}`)
+		expect(getRun(run.handle).outcome).toBe(reason === "stop" ? "success" : reason)
+		expect(reports.join("")).not.toContain(Buffer.from("PRIVATE RESPONSE").toString("base64"))
+		const count = reports.length
+		await tick(1000)
+		expect(reports).toHaveLength(count)
+		await call("agent_rename", { handle: run.handle, name: "renamed" })
+		await tick(1000)
+		expect(reports.at(-1)).toContain(`title=${Buffer.from("renamed").toString("base64")}`)
+		await call("agent_send", { handle: run.handle, message: "next turn" })
+		await tick(1000)
+		expect(reports.at(-1)).toContain(`state=working:id=subagents/${run.handle}`)
+		await call("agent_stop", { handle: run.handle, force: true })
+		await tick(1000)
+		expect(reports.at(-1)).toBe(`\x1b]7501;state=clear:id=subagents/${run.handle}\x1b\\`)
+		await parent.emit("session_shutdown", ctx, "reload")
+		const finalCount = reports.length
+		await tick(2000)
+		expect(reports).toHaveLength(finalCount)
+	},
+)
 
 test.each(["quit", "reload"] as const)("parent releases its widget timer on %s", async (reason) => {
 	const widgets: (string[] | undefined)[] = []

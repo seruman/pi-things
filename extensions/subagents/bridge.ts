@@ -5,6 +5,17 @@ import type { BridgeContext, BridgeHost } from "./contracts"
 import { type RunMetadata, inboxDir, inboxMessageSchema, readMetadata, updateMetadata } from "./runs"
 import { acknowledgeStop, clearStopAcknowledgement, stopAcknowledged, stopRequested } from "./stop"
 
+function settledOutcome(ctx: BridgeContext): RunMetadata["outcome"] {
+	const entry = ctx.sessionManager
+		.getBranch()
+		.findLast((entry) => entry.type === "message" && entry.message.role === "assistant")
+
+	if (entry?.type !== "message" || entry.message.role !== "assistant") return undefined
+	const reason = entry.message.stopReason
+
+	return reason === "error" ? "error" : reason === "aborted" ? "aborted" : "success"
+}
+
 export function installBridge(pi: BridgeHost, runDir: string): void {
 	let current: BridgeContext | undefined
 	let timer: ReturnType<typeof setInterval> | undefined
@@ -38,6 +49,11 @@ export function installBridge(pi: BridgeHost, runDir: string): void {
 		}
 
 		if (hasStarted) patch.hasStarted = true
+
+		if (current.isIdle()) {
+			patch.outcome =
+				metadata.sessionFile === sessionFile ? (metadata.outcome ?? settledOutcome(current)) : settledOutcome(current)
+		}
 
 		if (denial && current.isIdle()) {
 			patch.state = "error"
@@ -165,12 +181,17 @@ export function installBridge(pi: BridgeHost, runDir: string): void {
 		processStop()
 	})
 
-	pi.on("agent_settled", (_event, ctx) => {
+	pi.on("agent_settled", (event, ctx) => {
 		current = ctx
 
 		if (ctx.isIdle()) {
 			// Publish only after cancellation settles, not while sibling tools may still be running.
-			updateMetadata(runDir, denial ? { state: "error", error: denial } : { state: "idle" })
+			updateMetadata(
+				runDir,
+				denial
+					? { state: "error", error: denial, outcome: "error" }
+					: { state: "idle", outcome: event.aborted ? "aborted" : settledOutcome(ctx) },
+			)
 			processStop()
 		}
 	})

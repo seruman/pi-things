@@ -1,5 +1,6 @@
 import type { JsonValue, Static, TSchema } from "@earendil-works/pi-ai"
 import type {
+	AgentSettledEvent,
 	AgentToolResult,
 	AgentToolUpdateCallback,
 	ExtensionAPI,
@@ -13,7 +14,7 @@ export interface LifecycleEvents {
 	session_start: { type: "session_start" }
 	session_shutdown: SessionShutdownEvent
 	agent_start: { type: "agent_start" }
-	agent_settled: { type: "agent_settled" }
+	agent_settled: AgentSettledEvent
 }
 
 export type LifecycleHandler<Event, Context> = (event: Event, ctx: Context) => void | Promise<void>
@@ -25,7 +26,7 @@ export interface Lifecycle<Context> {
 	): () => void
 }
 
-export interface ParentContext extends Pick<ExtensionContext, "cwd" | "hasUI"> {
+export interface ParentContext extends Pick<ExtensionContext, "cwd" | "hasUI" | "mode"> {
 	model?: Pick<NonNullable<ExtensionContext["model"]>, "provider" | "id">
 	sessionManager: Pick<ExtensionContext["sessionManager"], "getSessionId" | "getEntries">
 	ui: {
@@ -37,7 +38,7 @@ export interface ParentContext extends Pick<ExtensionContext, "cwd" | "hasUI"> {
 }
 
 export interface BridgeContext extends Pick<ExtensionContext, "isIdle" | "abort"> {
-	sessionManager: Pick<ExtensionContext["sessionManager"], "getSessionId" | "getSessionFile">
+	sessionManager: Pick<ExtensionContext["sessionManager"], "getSessionId" | "getSessionFile" | "getBranch">
 }
 
 export interface BridgeHost extends Lifecycle<BridgeContext>, Pick<ExtensionAPI, "setSessionName" | "events"> {

@@ -22,6 +22,7 @@ import { getPiInvocationParts } from "../split-fork"
 import { UsageAccounting } from "./accounting"
 import { installBridge } from "./bridge"
 import type { ParentContext, ParentHost } from "./contracts"
+import { ProgramStatusReporter } from "./program-status"
 import {
 	type Exec,
 	type RunState,
@@ -473,7 +474,7 @@ export default function (pi: ExtensionAPI) {
 	installParent(pi)
 }
 
-export function installParent(pi: ParentHost): void {
+export function installParent(pi: ParentHost, programStatus = new ProgramStatusReporter()): void {
 	const exec: Exec = (command, args, signal) => pi.exec(command, args, signal ? { signal } : {})
 	let widgetTimer: ReturnType<typeof setInterval> | undefined
 	let widgetContext: ParentContext | undefined
@@ -489,16 +490,24 @@ export function installParent(pi: ParentHost): void {
 		refreshingWidget = true
 
 		try {
-			const activeRuns = (
-				await Promise.all(
-					listRuns(ctx.sessionManager.getSessionId()).map(async (run) => ({
-						run,
-						...(await displayStatus(exec, run)),
-					})),
-				)
-			).filter(({ state }) => state !== "exited" && state !== "suspended" && state !== "stopped")
+			const statuses = await Promise.all(
+				listRuns(ctx.sessionManager.getSessionId()).map(async (run) => ({
+					run,
+					...(await displayStatus(exec, run)),
+				})),
+			)
 
 			if (widgetContext !== ctx) return
+			programStatus.sync(
+				statuses.map(({ run, state }) => ({
+					run,
+					state: state === "idle" && inboxPending(run.handle) ? "busy" : state,
+				})),
+			)
+
+			const activeRuns = statuses.filter(
+				({ state }) => state !== "exited" && state !== "suspended" && state !== "stopped",
+			)
 
 			if (activeRuns.length === 0) {
 				ctx.ui.setWidget("subagents", undefined)
@@ -540,6 +549,11 @@ export function installParent(pi: ParentHost): void {
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
+		widgetContext = undefined
+
+		if (widgetTimer) clearInterval(widgetTimer)
+		widgetTimer = undefined
+		programStatus.dispose()
 		accounting.reconcile(ctx, "start")
 
 		if (accountingTimer) clearInterval(accountingTimer)
@@ -595,6 +609,7 @@ export function installParent(pi: ParentHost): void {
 		}
 
 		if (!ctx.hasUI) return
+		programStatus.start(ctx)
 		widgetContext = ctx
 
 		if (widgetTimer) clearInterval(widgetTimer)
@@ -617,6 +632,7 @@ export function installParent(pi: ParentHost): void {
 		if (widgetTimer) clearInterval(widgetTimer)
 		widgetTimer = undefined
 		widgetContext = undefined
+		programStatus.dispose()
 
 		if (ctx.hasUI) ctx.ui.setWidget("subagents", undefined)
 

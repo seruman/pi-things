@@ -38,6 +38,7 @@ function install(): void {
 	ctx = {
 		cwd: root,
 		hasUI: false,
+		mode: "print",
 		sessionManager: parent,
 		ui: { theme: { fg: failUI }, notify: failUI, setWidget: failUI, custom: failUI },
 	}
