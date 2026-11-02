@@ -1,10 +1,11 @@
 # subagents
 
-Persistent Pi children in Rex. Tools are available through codemode; `/subagent` attaches to an active child.
+Persistent Pi children in minimized floating terminals in Pi’s Rex window. Tools are available through codemode; `/subagent` restores and focuses an active child.
 
 Requirements:
 
-- `rex` available in `PATH` and `REX_SESSION` set.
+- `rex` available in `PATH`, with floating-layer API support.
+- `REX_SESSION` and `REX_BLOCK` set; Pi’s block must be placed in a window.
 
 ## Tools
 

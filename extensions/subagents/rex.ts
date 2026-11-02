@@ -12,15 +12,33 @@ export type Exec = (command: string, args: string[], signal?: AbortSignal) => Pr
 // Wire contracts from `rex api describe` (including the terminal creator's process method).
 const revisionSchema = z.number().int().nonnegative()
 
-const newBlockSchema = z.object({ block_id: z.string().nullable(), revision: revisionSchema })
-
-const closedBlockSchema = z.object({ block_id: z.string(), revision: revisionSchema })
-
-const movedBlockSchema = z.object({
-	created_split_id: z.string().nullable(),
-	removed_split_id: z.string().nullable().optional(),
+const newLayerSchema = z.object({
+	layer_id: z.string(),
+	block_ids: z.array(z.string()).length(1),
 	revision: revisionSchema,
 })
+
+const viewSchema = z.object({
+	windows: z
+		.array(
+			z.object({
+				window_id: z.string(),
+				layers: z
+					.array(
+						z.object({
+							layer_id: z.string(),
+							kind: z.string(),
+							blocks: z.array(z.object({ block_id: z.string() })).nullable(),
+						}),
+					)
+					.nullable(),
+			}),
+		)
+		.nullable()
+		.optional(),
+})
+
+const closedBlockSchema = z.object({ block_id: z.string(), revision: revisionSchema })
 
 const focusedBlockSchema = z.object({ revision: revisionSchema })
 
@@ -54,14 +72,26 @@ interface BlockArgs {
 	block_id: string
 }
 
-interface MoveBlockArgs extends BlockArgs {
-	anchor_block_id: string | null
-}
-
 type RexRequest =
-	| { method: "session.new_block"; args: NewBlockArgs }
+	| { method: "session.view"; args: Record<string, never> }
+	| {
+			method: "session.new_layer"
+			args: {
+				window_id: string
+				bounds: [number, number, number, number]
+				focus: false
+				layout: { block: NewBlockArgs }
+			}
+	  }
 	| { method: "block.close" | "session.focus_block"; args: BlockArgs }
-	| { method: "session.move_block"; args: MoveBlockArgs }
+	| {
+			method: "session.set_layer_state"
+			args: {
+				layer_id: string
+				state: "normal" | "minimized"
+				focus?: boolean
+			}
+	  }
 
 export const runStates = ["starting", "busy", "idle", "exited", "error", "suspended", "stopped", "unknown"] as const
 
@@ -113,30 +143,85 @@ export async function newBlock(
 	command: string[],
 	signal?: AbortSignal,
 ): Promise<string> {
+	const parentBlock = process.env.REX_BLOCK
+
+	if (!parentBlock) throw new Error("REX_BLOCK is required to place subagents in Pi's window")
+	const { window } = await placement(exec, parentBlock, signal)
+
 	const created = await api(
 		exec,
 		{
-			method: "session.new_block",
-			args: { flavor: "com.superlogical.terminal.shell", label: `subagent ${handle}`, options: { cwd, command } },
+			method: "session.new_layer",
+			args: {
+				window_id: window.window_id,
+				bounds: [0.1, 0.1, 0.8, 0.8],
+				focus: false,
+				layout: {
+					block: {
+						flavor: "com.superlogical.terminal.shell",
+						label: `subagent ${handle}`,
+						options: { cwd, command },
+					},
+				},
+			},
 		},
-		newBlockSchema,
+		newLayerSchema,
 		signal,
 	)
 
-	if (created.block_id === null) throw new Error("Rex did not create a subagent block")
+	const blockId = created.block_ids[0]!
 
-	return created.block_id
+	try {
+		await api(
+			exec,
+			{
+				method: "session.set_layer_state",
+				args: { layer_id: created.layer_id, state: "minimized" },
+			},
+			focusedBlockSchema,
+			signal,
+		)
+	} catch (error) {
+		// Creation succeeded: don't orphan a running child if minimizing fails or is cancelled.
+		try {
+			await closeBlock(exec, blockId)
+		} catch (cleanupError) {
+			throw new AggregateError([error, cleanupError], `Could not minimize or close subagent block ${blockId}`)
+		}
+
+		throw error
+	}
+
+	return blockId
+}
+
+async function placement(exec: Exec, blockId: string, signal?: AbortSignal) {
+	const view = await api(exec, { method: "session.view", args: {} }, viewSchema, signal)
+
+	for (const window of view.windows ?? []) {
+		for (const layer of window.layers ?? []) {
+			if (layer.blocks?.some((block) => block.block_id === blockId)) return { window, layer }
+		}
+	}
+
+	throw new Error(`Rex block ${blockId} is not placed in a window`)
 }
 
 export async function showBlock(exec: Exec, blockId: string): Promise<void> {
-	await api(
-		exec,
-		{
-			method: "session.move_block",
-			args: { block_id: blockId, anchor_block_id: process.env.REX_BLOCK ?? null },
-		},
-		movedBlockSchema,
-	)
+	// Resolve the current layer: the user may have moved or docked the terminal.
+	const { layer } = await placement(exec, blockId)
+
+	if (layer.kind === "floating") {
+		await api(
+			exec,
+			{
+				method: "session.set_layer_state",
+				args: { layer_id: layer.layer_id, state: "normal", focus: true },
+			},
+			focusedBlockSchema,
+		)
+	}
+
 	await api(exec, { method: "session.focus_block", args: { block_id: blockId } }, focusedBlockSchema)
 }
 

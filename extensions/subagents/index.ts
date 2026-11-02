@@ -680,7 +680,7 @@ export function installParent(pi: ParentHost, programStatus = new ProgramStatusR
 
 function registerCommand(pi: ParentHost, exec: Exec): void {
 	pi.registerCommand("subagent", {
-		description: "Select and attach to a subagent spawned by this session",
+		description: "Restore and focus a subagent spawned by this session",
 		handler: async (_args, ctx) => {
 			const runs = listRuns(ctx.sessionManager.getSessionId())
 			const items: SelectItem[] = []
@@ -759,7 +759,7 @@ function registerTools(pi: ParentHost, exec: Exec, accounting: UsageAccounting):
 		name: "agent_list",
 		label: "List agents",
 		description:
-			"List subagents spawned by this session, including detached and exited children. Set includeStopped to discover retained histories. Failed status queries return unknown with an error; other children are still listed.",
+			"List subagents spawned by this session, including exited children. Set includeStopped to discover retained histories. Failed status queries return unknown with an error; other children are still listed.",
 		promptGuidelines: [
 			"Use agent_list to rediscover children and their handles, names, and current states if you no longer remember them.",
 		],
@@ -805,7 +805,7 @@ function registerTools(pi: ParentHost, exec: Exec, accounting: UsageAccounting):
 	registerTool({
 		name: "agent_spawn",
 		label: "Spawn agent",
-		description: "Launch a persistent external Pi child in a detached Rex block.",
+		description: "Launch a persistent external Pi child in a minimized floating terminal in Pi’s Rex window.",
 		promptGuidelines: [
 			"Spawning a new child for one-off work is fine. Read its result, then call agent_stop when no follow-up work is needed.",
 			"Children persist after completion in either mode. Neither a successful spawn result nor agent_wait stops the child.",

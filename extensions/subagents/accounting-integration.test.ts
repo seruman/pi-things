@@ -33,6 +33,8 @@ test.each([false, true])(
 		const root = mkdtempSync(join(tmpdir(), "subagent-codemode-accounting-"))
 		const savedDir = process.env.PI_CODING_AGENT_DIR
 		const savedRex = process.env.REX_SESSION
+		const savedBlock = process.env.REX_BLOCK
+		process.env.REX_BLOCK = "block:parent"
 		process.env.PI_CODING_AGENT_DIR = root
 		process.env.REX_SESSION = "test-session"
 		const blocks = new Map<string, string>()
@@ -41,10 +43,30 @@ test.each([false, true])(
 		const exec: ParentHost["exec"] = async (command, args) => {
 			expect(command).toBe("rex")
 
-			if (args[4] === "session.new_block") {
+			if (args[4] === "session.view") {
+				return {
+					code: 0,
+					stderr: "",
+					killed: false,
+					stdout: JSON.stringify({
+						windows: [
+							{
+								window_id: "window:parent",
+								layers: [{ layer_id: "layer:parent", kind: "tiled", blocks: [{ block_id: "block:parent" }] }],
+							},
+						],
+					}),
+				}
+			}
+
+			if (args[4] === "session.set_layer_state") {
+				return { code: 0, stderr: "", killed: false, stdout: JSON.stringify({ revision: 1 }) }
+			}
+
+			if (args[4] === "session.new_layer") {
 				const payload = z
 					.object({ options: z.object({ command: z.array(z.string()) }), label: z.string() })
-					.parse(JSON.parse(args[5]))
+					.parse(JSON.parse(args[5]).layout.block)
 
 				const handle = payload.label.replace("subagent ", "")
 				const argv = payload.options.command
@@ -73,7 +95,12 @@ test.each([false, true])(
 				const blockId = `block:${++blockCounter}`
 				blocks.set(blockId, handle)
 
-				return { code: 0, stderr: "", stdout: JSON.stringify({ block_id: blockId, revision: 1 }), killed: false }
+				return {
+					code: 0,
+					stderr: "",
+					stdout: JSON.stringify({ layer_id: `layer:${blockCounter}`, block_ids: [blockId], revision: 1 }),
+					killed: false,
+				}
 			}
 
 			if (args[0] === "block") {
@@ -286,6 +313,9 @@ test.each([false, true])(
 
 			if (savedRex === undefined) Reflect.deleteProperty(process.env, "REX_SESSION")
 			else process.env.REX_SESSION = savedRex
+
+			if (savedBlock === undefined) Reflect.deleteProperty(process.env, "REX_BLOCK")
+			else process.env.REX_BLOCK = savedBlock
 			rmSync(root, { recursive: true, force: true })
 		}
 	},

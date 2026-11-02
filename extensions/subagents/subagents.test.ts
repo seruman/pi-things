@@ -86,9 +86,16 @@ const resultSchema = z.record(jsonSchema)
 const launchRequestSchema = z
 	.object({
 		session_id: z.string(),
-		flavor: z.literal("com.superlogical.terminal.shell"),
-		label: z.string(),
-		options: z.object({ cwd: z.string(), command: z.array(z.string()) }).strict(),
+		window_id: z.literal("window:parent"),
+		bounds: z.array(z.number()).length(4),
+		focus: z.literal(false),
+		layout: z.object({
+			block: z.object({
+				flavor: z.literal("com.superlogical.terminal.shell"),
+				label: z.string(),
+				options: z.object({ cwd: z.string(), command: z.array(z.string()) }).strict(),
+			}),
+		}),
 	})
 	.strict()
 
@@ -151,14 +158,39 @@ const exec: Exec = async (command, args, signal) => {
 		}
 	}
 
-	if (args[4] === "session.new_block") {
-		const payload = launchRequestSchema.parse(JSON.parse(args[5] ?? "{}"))
+	if (args[4] === "session.view") {
+		return {
+			code: 0,
+			stderr: "",
+			stdout: JSON.stringify({
+				windows: [
+					{
+						window_id: "window:parent",
+						layers: [{ layer_id: "layer:parent", kind: "tiled", blocks: [{ block_id: "block:parent" }] }],
+					},
+				],
+			}),
+		}
+	}
+
+	if (args[4] === "session.set_layer_state") {
+		expect(JSON.parse(args[5] ?? "{}")).toMatchObject({ state: "minimized" })
+
+		return { code: 0, stderr: "", stdout: JSON.stringify({ revision: nextBlockId }) }
+	}
+
+	if (args[4] === "session.new_layer") {
+		const payload = launchRequestSchema.parse(JSON.parse(args[5] ?? "{}")).layout.block
 		launches.push(payload.options)
 		onLaunch?.(payload.options.command)
 		const blockId = `block:${++nextBlockId}`
 		blocks.set(blockId, { exit: null })
 
-		return { code: 0, stderr: "", stdout: JSON.stringify({ block_id: blockId, revision: nextBlockId }) }
+		return {
+			code: 0,
+			stderr: "",
+			stdout: JSON.stringify({ layer_id: `layer:${nextBlockId}`, block_ids: [blockId], revision: nextBlockId }),
+		}
 	}
 
 	if (args[4] === "block.close") {
@@ -186,6 +218,7 @@ beforeEach(() => {
 	root = mkdtempSync(join(tmpdir(), "subagents-test-"))
 	process.env.PI_CODING_AGENT_DIR = root
 	process.env.REX_SESSION = "session:parent"
+	process.env.REX_BLOCK = "block:parent"
 	Reflect.deleteProperty(process.env, "PI_SUBAGENT_RUN_DIR")
 	vi.useFakeTimers()
 	tools = new Map()
@@ -314,6 +347,20 @@ async function spawn(params: JsonObject = {}) {
 async function tick(ms = 0) {
 	vi.advanceTimersByTime(ms)
 	await setImmediate() // Drain asynchronous Rex calls without guessing how many microtasks they need.
+}
+
+// Bun's .rejects.toThrow() can stall setImmediate while this harness advances fake
+// timers. Await rejection outside the matcher, then assert on the settled error.
+async function rejectionOf<Result>(pending: Promise<Result>): Promise<Error> {
+	try {
+		await pending
+	} catch (error) {
+		if (error instanceof Error) return error
+
+		throw error
+	}
+
+	throw new Error("Expected promise to reject")
 }
 
 // Real bridge, metadata and transcripts; the typed host supplies only the capabilities the bridge uses.
@@ -663,7 +710,7 @@ test("stop timeout keeps the child alive, blocks new inbox delivery, and allows 
 	const c = await child(run)
 	await c.begin()
 	await call("agent_send", { handle: run.handle, message: "queued", followUp: true })
-	await expect(call("agent_stop", { handle: run.handle })).rejects.toThrow("force: true")
+	expect((await rejectionOf(call("agent_stop", { handle: run.handle }))).message).toContain("force: true")
 	expect(c.abortRequests).toBe(1)
 	expect(c.sent).toEqual([])
 	expect(blocks.has(run.blockId)).toBe(true)
@@ -693,7 +740,7 @@ test("force after a stop timeout retains completed history without recharging it
 	await c.reply("COMPLETED")
 	expect((await execute("agent_wait", { handle: run.handle })).usage?.totalTokens).toBe(5)
 	await c.begin()
-	await expect(call("agent_stop", { handle: run.handle })).rejects.toThrow("10 seconds")
+	expect((await rejectionOf(call("agent_stop", { handle: run.handle }))).message).toContain("10 seconds")
 	expect((await execute("agent_stop", { handle: run.handle, force: true })).usage).toBeUndefined()
 	expect(c.abortRequests).toBe(1)
 	expect(readFileSync(run.sessionFile, "utf8")).toContain("COMPLETED")
@@ -706,7 +753,7 @@ test("cancelled stop leaves the requested child alive for a retry or force", asy
 	await c.begin()
 	const controller = new AbortController()
 	const stopping = call("agent_stop", { handle: run.handle }, controller.signal)
-	const rejected = expect(stopping).rejects.toThrow()
+	const rejected = rejectionOf(stopping)
 
 	for (let attempt = 0; attempt < 10 && c.abortRequests === 0; attempt++) await tick(100)
 	controller.abort()
@@ -722,7 +769,7 @@ test("a stale acknowledgement from another Rex block cannot authorize closing a 
 	const c = await child(run)
 	await c.begin()
 	acknowledgeStop({ ...run, blockId: "block:previous-process" })
-	await expect(call("agent_stop", { handle: run.handle })).rejects.toThrow("10 seconds")
+	expect((await rejectionOf(call("agent_stop", { handle: run.handle }))).message).toContain("10 seconds")
 	expect(blocks.has(run.blockId)).toBe(true)
 	await call("agent_stop", { handle: run.handle, force: true })
 })
@@ -1300,7 +1347,7 @@ test.each(["inspection", "close"])("failed stop during %s preserves history and 
 		exit: null,
 		...(phase === "close" ? { closeError: "Rex unavailable" } : { error: "Rex unavailable" }),
 	})
-	await expect(call("agent_stop", { handle: run.handle })).rejects.toThrow("Rex unavailable")
+	expect((await rejectionOf(call("agent_stop", { handle: run.handle }))).message).toContain("Rex unavailable")
 	expect(blocks.has(run.blockId)).toBe(true)
 	expect(getRun(run.handle).stoppedAt).toBeUndefined()
 	expect(readFileSync(run.sessionFile, "utf8")).toBe(transcript)
@@ -1483,5 +1530,5 @@ test("metadata skips corrupt records, list stays parent-scoped, and names/handle
 	expect(readMetadata(runDirectory(other.handle))).toBeUndefined()
 	expect(listRuns()).toHaveLength(1)
 	await expect(call("agent_rename", { handle: run.handle, name: "bad\nname" })).rejects.toThrow()
-	await expect(call("agent_stop", { handle: "../escape" })).rejects.toThrow("Invalid subagent handle")
+	expect((await rejectionOf(call("agent_stop", { handle: "../escape" }))).message).toContain("Invalid subagent handle")
 })
