@@ -1,6 +1,6 @@
 ---
 name: rex
-description: Runs persistent shells, dev servers, long-running commands, and interactive programs in Rex. Use for terminal input and output, process or status waits, and explicitly requested terminal inspection. Prefer Rex over ht/hauntty or tmux when available; ordinary non-interactive commands do not need it.
+description: Runs persistent shells, dev servers, long-running commands, and interactive programs in Rex. Use for terminal input and output, process or status waits, and explicitly requested terminal inspection. Ordinary non-interactive commands do not need it.
 ---
 
 # Rex
