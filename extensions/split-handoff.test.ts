@@ -66,16 +66,13 @@ describe("command arguments", () => {
 })
 
 describe("Rex split launcher", () => {
-	const envKeys = ["REX_SERVER", "REX_BLOCK", "TETEYE_SOCKET", "TETEYE_PANE_ID"] as const
+	const envKeys = ["REX_SERVER", "REX_BLOCK"] as const
 	let originalEnv: (string | undefined)[]
 
 	beforeEach(() => {
 		originalEnv = envKeys.map((key) => process.env[key])
 		process.env.REX_SERVER = "unix:///tmp/rex.sock"
 		process.env.REX_BLOCK = "block:source"
-		// Rex must win even if an outer terminal's variables are inherited.
-		process.env.TETEYE_SOCKET = "/tmp/teteye.sock"
-		process.env.TETEYE_PANE_ID = "outer-pane"
 	})
 
 	afterEach(() => {

@@ -26,40 +26,7 @@ type SplitContext = Pick<ExtensionCommandContext, "cwd">
 
 type SplitForkArgs = { direction: SplitDirection; prompt: string }
 
-const teteyeErrorSchema = z.object({ error: z.string().optional() })
-
-const teteyePaneSchema = z.object({ result: z.object({ pane_id: z.string().optional() }).optional() })
-
 const packageNameSchema = z.object({ piConfig: z.object({ name: z.string().optional() }).optional() })
-
-const GHOSTTY_SPLIT_SCRIPT = `on run argv
-	set targetCwd to item 1 of argv
-	set startupInput to item 2 of argv
-	set splitDirection to item 3 of argv
-	tell application "Ghostty"
-		set cfg to new surface configuration
-		set initial working directory of cfg to targetCwd
-		set initial input of cfg to startupInput
-		if (count of windows) > 0 then
-			set targetTerminalId to id of focused terminal of selected tab of front window
-			-- Ghostty's AppleScript split command accepts literal direction tokens here.
-			if splitDirection is "right" then
-				split terminal id targetTerminalId direction right with configuration cfg
-			else if splitDirection is "left" then
-				split terminal id targetTerminalId direction left with configuration cfg
-			else if splitDirection is "down" then
-				split terminal id targetTerminalId direction down with configuration cfg
-			else if splitDirection is "up" then
-				split terminal id targetTerminalId direction up with configuration cfg
-			else
-				error "Invalid split direction: " & splitDirection
-			end if
-		else
-			new window with configuration cfg
-		end if
-		activate
-	end tell
-end run`
 
 function shellQuote(value: string): string {
 	if (value.length === 0) return "''"
@@ -69,37 +36,6 @@ function shellQuote(value: string): string {
 
 export function isRexSession(): boolean {
 	return Boolean(process.env.REX_SERVER?.trim() && process.env.REX_BLOCK?.trim())
-}
-
-export function isTeteyeSession(): boolean {
-	return Boolean(process.env.TETEYE_SOCKET?.trim() && process.env.TETEYE_PANE_ID?.trim())
-}
-
-function getTeteyeCtlPath(): string {
-	return process.env.TETEYECTL_PATH?.trim() || "teteyectl"
-}
-
-function getTeteyeResponseError(stdout: string | undefined, stderr: string | undefined): string {
-	const trimmedStdout = stdout?.trim()
-
-	if (trimmedStdout) {
-		try {
-			const response = teteyeErrorSchema.safeParse(JSON.parse(trimmedStdout))
-
-			if (response.success && response.data.error) return response.data.error
-		} catch {
-			// Fall back to the raw output below.
-		}
-	}
-
-	return stderr?.trim() || trimmedStdout || "unknown teteyectl error"
-}
-
-function getPaneIdFromTeteyeResponse(stdout: string | undefined): string | undefined {
-	if (!stdout?.trim()) return undefined
-	const response = teteyePaneSchema.safeParse(JSON.parse(stdout))
-
-	return response.success ? response.data.result?.pane_id : undefined
 }
 
 /** Pi takes its command name from `piConfig.name` in its package.json, but does not export it. */
@@ -216,75 +152,6 @@ export function parseSplitForkArgs(raw: string): SplitForkArgs {
 	throw new Error(`Unknown option: ${unknownFlag ?? trimmed}`)
 }
 
-async function launchGhosttySplit(
-	pi: SplitExecutor,
-	ctx: SplitContext,
-	startupInput: string,
-	direction: SplitDirection,
-): Promise<SplitLaunchResult> {
-	const result = await pi.exec("osascript", ["-e", GHOSTTY_SPLIT_SCRIPT, "--", ctx.cwd, startupInput, direction])
-
-	if (result.code !== 0) {
-		return {
-			ok: false,
-			terminalName: "Ghostty",
-			reason: result.stderr?.trim() || result.stdout?.trim() || "unknown osascript error",
-		}
-	}
-
-	return { ok: true, terminalName: "Ghostty" }
-}
-
-async function launchTeteyeSplit(
-	pi: SplitExecutor,
-	ctx: SplitContext,
-	startupInput: string,
-	direction: SplitDirection,
-): Promise<SplitLaunchResult> {
-	const socket = process.env.TETEYE_SOCKET?.trim()
-
-	if (!socket || !process.env.TETEYE_PANE_ID?.trim()) {
-		return { ok: false, terminalName: "teteye", reason: "missing TETEYE_SOCKET or TETEYE_PANE_ID" }
-	}
-
-	const teteyectl = getTeteyeCtlPath()
-	const splitResult = await pi.exec(teteyectl, ["split", direction, "--socket", socket, "--json"])
-
-	if (splitResult.code !== 0) {
-		return { ok: false, terminalName: "teteye", reason: getTeteyeResponseError(splitResult.stdout, splitResult.stderr) }
-	}
-
-	let newPaneId: string
-
-	try {
-		newPaneId = getPaneIdFromTeteyeResponse(splitResult.stdout) ?? ""
-	} catch (error) {
-		const reason = error instanceof Error ? error.message : String(error)
-
-		return { ok: false, terminalName: "teteye", reason: `invalid split response: ${reason}` }
-	}
-
-	if (!newPaneId) {
-		return { ok: false, terminalName: "teteye", reason: "split response did not include a pane_id" }
-	}
-
-	const sendResult = await pi.exec(teteyectl, [
-		"send-text",
-		`cd ${shellQuote(ctx.cwd)} && ${startupInput}`,
-		"--socket",
-		socket,
-		"--pane",
-		newPaneId,
-		"--json",
-	])
-
-	if (sendResult.code !== 0) {
-		return { ok: false, terminalName: "teteye", reason: getTeteyeResponseError(sendResult.stdout, sendResult.stderr) }
-	}
-
-	return { ok: true, terminalName: "teteye" }
-}
-
 async function launchRexSplit(
 	pi: SplitExecutor,
 	ctx: SplitContext,
@@ -327,11 +194,9 @@ export async function launchTerminalSplit(
 	startupInput: string,
 	direction: SplitDirection,
 ): Promise<SplitLaunchResult> {
-	if (isRexSession()) return launchRexSplit(pi, ctx, startupInput, direction)
+	if (!isRexSession()) return { ok: false, terminalName: "Rex", reason: "not running inside Rex" }
 
-	return isTeteyeSession()
-		? launchTeteyeSplit(pi, ctx, startupInput, direction)
-		: launchGhosttySplit(pi, ctx, startupInput, direction)
+	return launchRexSplit(pi, ctx, startupInput, direction)
 }
 
 export function createClonedSession(ctx: ExtensionCommandContext): string | undefined {
@@ -394,11 +259,11 @@ function getArgumentCompletions(prefix: string): AutocompleteItem[] | null {
 export default function (pi: ExtensionAPI): void {
 	pi.registerCommand("split-fork", {
 		description:
-			"Clone the active session branch into a new pi process in a Rex, teteye, or Ghostty split. Usage: /split-fork [-d right|left|down|up] [optional prompt]",
+			"Clone the active session branch into a new pi process in a Rex split. Usage: /split-fork [-d right|left|down|up] [optional prompt]",
 		getArgumentCompletions,
 		handler: async (args, ctx) => {
-			if (process.platform !== "darwin" && !isRexSession() && !isTeteyeSession()) {
-				ctx.ui.notify("/split-fork currently requires Rex, teteye, or macOS (Ghostty AppleScript).", "warning")
+			if (!isRexSession()) {
+				ctx.ui.notify("/split-fork requires Rex.", "warning")
 
 				return
 			}
