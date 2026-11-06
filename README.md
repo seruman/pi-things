@@ -19,6 +19,7 @@ Me just prompting the shit out of LLMs to create things I want in pi.
   - [rex](./skills/rex/SKILL.md)
   - [sumocli](./skills/sumocli/SKILL.md)
   - [Matt Pocock skills](./skills/matt-pocock/README.md)
+  - [pstack](./skills/pstack/UPSTREAM.md) — vendored from cursor/plugins with a [pi adapter](./skills/pstack/ADAPTER.md); update with `bun run sync:pstack`
 
 ## Install
 
