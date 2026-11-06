@@ -18,6 +18,7 @@
     "format:check": "oxfmt --check .",
     "check": "bun run lint && bun run format:check",
     "check:write": "bun run lint:fix && bun run format && bun run check",
+    "sync:pstack": "bun tools/sync-pstack.ts",
     "test:pi-safety": "bun --no-env-file test extensions/pi-safety/*.test.ts",
     "test:shell-leash": "bun test extensions/shell-leash/*.test.ts",
     "test:split-handoff": "bun test extensions/split-handoff.test.ts",
