@@ -44,7 +44,7 @@ test("independent in-process SDK sessions communicate both ways with visible sen
 		const entries = h.session.sessionManager.getBranch()
 		expect(entries.filter((e) => e.type === "custom_message" && e.customType === INCOMING && e.display)).toHaveLength(1)
 		expect(entries.filter((e) => e.type === "custom" && e.customType === OUTGOING)).toHaveLength(1)
-		expect(JSON.stringify(h.requests)).toContain("Final replies stay in this session")
+		expect(JSON.stringify(h.requests)).toContain("Session messages are visible extension input")
 		expect(JSON.stringify(h.requests)).toContain("Reply target:")
 		expect(workStatus({ sessionId: sessionIdSchema.parse(h.session.sessionId) }, root).kind).toBe("idle")
 		expect(h.errors).toEqual([])

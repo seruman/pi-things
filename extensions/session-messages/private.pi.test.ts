@@ -28,8 +28,8 @@ test("loading public messaging does not enroll or expose independent sessions", 
 	const extension = createSessionMessages({ root, pollMs: 5 })
 	const a = await sdk({ root, extension, pool: false })
 	await sdk({ root, extension, pool: false })
-	const result = await invoke(a, "session_list")
-	expect(result.details).toMatchObject({ sessions: [] })
+	expect(a.session.extensionRunner.getToolDefinition("session_list")?.exposure).toBe("hidden")
+	expect(a.session.extensionRunner.getToolDefinition("session_send")?.exposure).toBe("hidden")
 })
 
 test("pool generations revoke queued traffic without poisoning private work status", () => {
@@ -112,11 +112,11 @@ test.each([true, false])("both adapter orders acquire one private runtime, publi
 		},
 	})
 
-	expect((await invoke(h, "session_list")).details).toMatchObject({ sessions: [] })
+	expect(h.session.extensionRunner.getToolDefinition("session_list")?.exposure).toBe("hidden")
 	await h.session.prompt("/session-messages join one")
 	expect((await invoke(h, "session_list")).details).toMatchObject({ pool: "one" })
 	await h.session.reload()
-	expect((await invoke(h, "session_list")).details).toMatchObject({ sessions: [] })
+	expect(h.session.extensionRunner.getToolDefinition("session_list")?.exposure).toBe("hidden")
 })
 
 test("private model messages keep family authority and completion text without a pool prefix", async () => {

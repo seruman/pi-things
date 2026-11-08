@@ -73,6 +73,7 @@ type Pending =
 
 function installDelivery(pi: ExtensionAPI, options: { root: string; pollMs: number }) {
 	let familyPolicy: FamilyPolicy | undefined
+	let poolChanged: ((joined: boolean) => void) | undefined
 	const claims = new Set<string>()
 	const gates = new Map<MessageId, SubmissionGate>()
 
@@ -296,6 +297,7 @@ function installDelivery(pi: ExtensionAPI, options: { root: string; pollMs: numb
 			(route, from, to) => familyPolicy?.(route, from, to) === true,
 		)
 
+		poolChanged?.(false)
 		showScope()
 
 		if (timer) clearInterval(timer)
@@ -312,6 +314,7 @@ function installDelivery(pi: ExtensionAPI, options: { root: string; pollMs: numb
 		context?.ui.setStatus("session-messages", undefined)
 		mailbox?.dispose()
 		mailbox = undefined
+		poolChanged?.(false)
 		context = undefined
 		pending.clear()
 		observed.clear()
@@ -413,15 +416,20 @@ function installDelivery(pi: ExtensionAPI, options: { root: string; pollMs: numb
 		setFamilyPolicy(policy: FamilyPolicy) {
 			familyPolicy = policy
 		},
+		onPoolChange(listener: (joined: boolean) => void) {
+			poolChanged = listener
+		},
 		setPoolCommand(command: (args: string) => string | undefined) {
 			installPendingControls(pi, () => pendingWidget, command)
 		},
 		join(pool: string) {
 			ready().join(pool)
+			poolChanged?.(true)
 			showScope()
 		},
 		leave() {
 			ready().leave()
+			poolChanged?.(false)
 			showScope()
 			tick()
 		},

@@ -7,6 +7,7 @@ test.each([
 	["default", ["--no-builtin-tools"], ["session_list", "session_send"]],
 	["no tools", ["--no-tools"], []],
 	["readonly selection", ["--tools", "read,grep,find,ls"], []],
+	["explicit list selection", ["--tools", "session_list"], ["session_list"]],
 	["exclude send", ["--exclude-tools", "session_send"], ["session_list"]],
 ] as const)(
 	"installed Pi honors %s with an explicitly loaded messaging extension",
@@ -24,6 +25,8 @@ test.each([
 				"--no-prompt-templates",
 				"--no-themes",
 				...flags,
+				"--session-pool",
+				"test",
 				"-e",
 				join(import.meta.dir, "fixtures/runtime-proof.ts"),
 				"--provider",

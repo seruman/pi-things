@@ -44,6 +44,8 @@ export async function sdk(
 		pool?: string | false
 		steps?: Step[]
 		extension?: ExtensionFactory
+		extensions?: ExtensionFactory[]
+		defaultPrompt?: boolean
 		status?: (key: string, text: string | undefined) => void
 		mode?: "tui" | "rpc"
 		selection?: Pick<CreateAgentSessionOptions, "tools" | "noTools" | "excludeTools">
@@ -79,13 +81,14 @@ export async function sdk(
 		noPromptTemplates: true,
 		noThemes: true,
 		noContextFiles: true,
-		systemPrompt: "Isolated messaging test.",
+		systemPrompt: options.defaultPrompt ? undefined : "Isolated messaging test.",
 		extensionFactories: [
 			(pi) => {
 				api = pi
 				controlledProvider(pi, steps, requests)
 			},
 			...(options.extension ? [options.extension] : []),
+			...(options.extensions ?? []),
 		],
 	})
 

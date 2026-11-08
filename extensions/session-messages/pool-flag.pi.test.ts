@@ -116,6 +116,8 @@ async function launch(args: string[], publicFirst = true) {
 		factoryFlags,
 		statuses,
 		modelRuntime,
+		exposure: () =>
+			["session_list", "session_send"].map((name) => runtime.session.extensionRunner.getToolDefinition(name)?.exposure),
 		endpoint: () => {
 			const endpoints = listEndpoints(join(root, "session-messages"))
 			expect(endpoints).toHaveLength(1)
@@ -132,6 +134,7 @@ for (const publicFirst of [true, false]) {
 			const h = await launch(pool === undefined ? [] : ["--session-pool", pool], publicFirst)
 			const valid = pool !== undefined && ["r", "Review_1.2-3", "x".repeat(64)].includes(pool)
 			expect(h.endpoint().membership?.pool).toBe(valid ? pool : undefined)
+			expect(h.exposure()).toEqual(valid ? ["direct", "direct"] : ["hidden", "hidden"])
 			expect(h.statuses.at(-1)).toEqual(["session-messages", valid ? `scope: pool/${pool}` : "scope: private"])
 			expect(h.factoryFlags).toEqual([undefined])
 			expect(h.diagnostics).toEqual([])
@@ -147,9 +150,11 @@ for (const publicFirst of [true, false]) {
 		const { runtime } = h
 		const original = h.endpoint()
 		expect(original.membership?.pool).toBe("review")
+		expect(h.exposure()).toEqual(["direct", "direct"])
 		await runtime.session.prompt("/session-messages leave")
 		await Bun.sleep(250)
 		expect(h.endpoint().membership).toBeUndefined()
+		expect(h.exposure()).toEqual(["hidden", "hidden"])
 		await h.modelRuntime.refresh({ allowNetwork: false })
 		const model = h.modelRuntime.getModel("session-message-test", "controlled")
 
@@ -173,6 +178,7 @@ for (const publicFirst of [true, false]) {
 			const endpoint = h.endpoint()
 			expect(h.statuses.at(-1)).toEqual(["session-messages", "scope: pool/review"])
 			expect(endpoint.membership?.pool).toBe("review")
+			expect(h.exposure()).toEqual(["direct", "direct"])
 			expect(generations.has(endpoint.membership?.generation)).toBe(false)
 			expect(instances.has(endpoint.instanceId)).toBe(false)
 			generations.add(endpoint.membership?.generation)
@@ -185,16 +191,22 @@ for (const publicFirst of [true, false]) {
 	})
 }
 
-test("without a launch flag, manual membership is lost on reload and new", async () => {
+test("without a launch flag, manual membership is lost on reload, new and resume", async () => {
 	const h = await launch([])
+	const file = h.runtime.session.sessionFile
 
-	for (const transition of ["reload", "new"] as const) {
+	if (!file) throw new Error("Expected persistent session")
+
+	for (const transition of ["reload", "new", "resume"] as const) {
 		await h.runtime.session.prompt("/session-messages join manual")
 		expect(h.endpoint().membership?.pool).toBe("manual")
+		expect(h.exposure()).toEqual(["direct", "direct"])
 
 		if (transition === "reload") await h.runtime.session.reload()
-		else await h.runtime.newSession()
+		else if (transition === "new") await h.runtime.newSession()
+		else await h.runtime.switchSession(file)
 		expect(h.endpoint().membership).toBeUndefined()
+		expect(h.exposure()).toEqual(["hidden", "hidden"])
 	}
 
 	expect(h.errors).toEqual([])

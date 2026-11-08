@@ -10,7 +10,7 @@ export function installPrivateChild(pi: ExtensionAPI, runDir: string, delivery: 
 		exposure: "direct",
 		label: "Reply to parent",
 		description:
-			"Send a visible private question or progress message to your parent. No pool or target ID is required. queued confirms publication, not receipt or processing.",
+			"Send a visible private question or progress message to your parent. No target ID is required. queued confirms publication, not receipt or processing.",
 		promptGuidelines: [
 			"Replies wake an idle parent. Busy parents receive steering by default. followUp: true queues the reply after their current work.",
 			"Use agent_reply to ask a question or report progress, then yield. Completion reporting is automatic. Do not send your final answer twice or acknowledge acknowledgements.",

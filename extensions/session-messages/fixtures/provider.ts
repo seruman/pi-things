@@ -12,7 +12,7 @@ export function gate() {
 	return { promise, open }
 }
 
-export type Step = { wait?: Promise<void>; tool?: boolean; error?: boolean; text?: string }
+export type Step = { wait?: Promise<void>; tool?: boolean; error?: boolean; text?: string; code?: string }
 
 export function controlledProvider(pi: ExtensionAPI, steps: Step[], requests: TranscriptContext[]) {
 	pi.registerProvider("session-message-test", {
@@ -69,10 +69,13 @@ export function controlledProvider(pi: ExtensionAPI, steps: Step[], requests: Tr
 					options?.signal?.throwIfAborted()
 
 					if (step.error) throw new Error("Controlled provider failure")
-					message.content = step.tool
-						? [{ type: "toolCall", id: `probe-${requests.length}`, name: "probe", arguments: {} }]
-						: [{ type: "text", text: step.text ?? `answer-${requests.length}` }]
-					message.stopReason = step.tool ? "toolUse" : "stop"
+					message.content =
+						step.code !== undefined
+							? [{ type: "toolCall", id: `code-${requests.length}`, name: "codemode", arguments: { code: step.code } }]
+							: step.tool
+								? [{ type: "toolCall", id: `probe-${requests.length}`, name: "probe", arguments: {} }]
+								: [{ type: "text", text: step.text ?? `answer-${requests.length}` }]
+					message.stopReason = step.tool || step.code !== undefined ? "toolUse" : "stop"
 					stream.push({ type: "done", reason: message.stopReason, message })
 				} catch (error) {
 					message.stopReason = options?.signal?.aborted ? "aborted" : "error"
