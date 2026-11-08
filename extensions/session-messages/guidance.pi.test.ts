@@ -52,5 +52,5 @@ test("parent spawn guidance explains idle and busy completion delivery", async (
 	const tool = h.session.extensionRunner.getToolDefinition("agent_spawn")
 	const guidance = [tool?.description, ...(tool?.promptGuidelines ?? [])].join(" ")
 	expect(guidance).toMatch(/wake.*idle/i)
-	expect(guidance).toMatch(/busy.*after/i)
+	expect(guidance).toContain("Busy parents receive it at the next steering opportunity.")
 })

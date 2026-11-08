@@ -8,7 +8,7 @@ import { sessionIdSchema } from "../lib/session-delivery/identity"
 import { listEndpoints, messageSchema, SessionMailbox, workStatus } from "../lib/session-delivery/mailbox"
 import { INCOMING } from "../lib/session-delivery/ui"
 import { sdk, testDirectory, until } from "../session-messages/fixtures/sdk"
-import { gate } from "../session-messages/fixtures/provider"
+import { gate, type Step } from "../session-messages/fixtures/provider"
 import { installParent } from "./index"
 import { installBridge } from "./bridge"
 import { familyPolicy } from "./family"
@@ -24,6 +24,7 @@ async function fixture(
 		childWait?: ReturnType<typeof gate>
 		childError?: boolean
 		pollMs?: number
+		parentSteps?: Step[]
 	} = {},
 ) {
 	const root = testDirectory()
@@ -34,8 +35,8 @@ async function fixture(
 	const parent = await sdk({
 		root,
 		pool: false,
-		selection: { noTools: "all" },
-		steps: options.busy ? [{ wait: options.busy.promise }, {}] : [{}, {}, {}],
+		selection: options.parentSteps ? undefined : { noTools: "all" },
+		steps: options.parentSteps ?? (options.busy ? [{ wait: options.busy.promise }, {}] : [{}, {}, {}]),
 		extension: (pi) => {
 			const delivery = acquireDelivery(pi, { root: join(root, "session-messages"), pollMs: options.pollMs ?? 5 })
 			delivery.setFamilyPolicy(familyPolicy)
@@ -367,6 +368,40 @@ test("long Unicode completion wakes the parent with a UTF-8 bounded notice and r
 		expect(f.parent.requests).toHaveLength(1)
 		expect(f.parent.errors).toEqual([])
 	} finally {
+		await f.dispose()
+	}
+})
+
+test("busy parent sees completion at the next steering opportunity before its final answer", async () => {
+	const first = gate(),
+		second = gate()
+
+	const f = await fixture({
+		parentSteps: [{ tool: true, wait: first.promise }, { tool: true, wait: second.promise }, {}],
+	})
+
+	try {
+		const running = f.parent.session.prompt("parent work")
+		await until(() => f.parent.requests.length === 1)
+		await f.child.session.prompt("child task")
+		await until(() => f.parent.session.agent.peekQueuedMessages().length > 0)
+		first.open()
+		await until(() => f.parent.requests.length === 2)
+		expect(JSON.stringify(f.parent.requests[1])).toContain("answer-1")
+		expect(f.parent.session.getLastAssistantText()).not.toBe("answer-3")
+		second.open()
+		await running
+		await f.parent.session.waitForIdle()
+		expect(f.parent.requests).toHaveLength(3)
+		expect(
+			f.parent.session.sessionManager
+				.getEntries()
+				.filter((e) => e.type === "custom_message" && e.customType === INCOMING),
+		).toHaveLength(1)
+		expect(f.parent.errors).toEqual([])
+	} finally {
+		first.open()
+		second.open()
 		await f.dispose()
 	}
 })

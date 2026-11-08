@@ -4,6 +4,8 @@ import type { TranscriptContext } from "@earendil-works/pi-ai"
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 import { controlledProvider, gate, type Step } from "./provider"
 import sessionMessages from "../index"
+import { acquireDelivery } from "../../lib/session-delivery/runtime"
+import { relationIdSchema, runHandleSchema, sessionIdSchema } from "../../lib/session-delivery/identity"
 
 export default function (pi: ExtensionAPI) {
 	sessionMessages(pi)
@@ -59,6 +61,34 @@ export default function (pi: ExtensionAPI) {
 				)
 				results.push(delivery)
 			}
+
+			const completionHold = gate()
+			let submitted = false
+			const start = requests.length
+			steps.push({ wait: completionHold.promise, tool: true }, { tool: true }, {})
+			pi.sendMessage({ customType: "fixture-start", content: "completion-start", display: true }, { triggerTurn: true })
+			await until(() => requests.length === start + 1)
+			acquireDelivery(pi).stageCompletion({
+				route: {
+					kind: "completion",
+					relation: relationIdSchema.parse("00000000-0000-4000-8000-000000000001"),
+					handle: runHandleSchema.parse("child"),
+					sequence: 1,
+				},
+				from: { sessionId: sessionIdSchema.parse("child") },
+				text: "completion-proof",
+				gate: () => {
+					submitted = true
+
+					return "submit"
+				},
+			})
+			await until(() => submitted)
+			completionHold.open()
+			await ctx.waitForIdle()
+			assert.equal(requests.length - start, 3)
+			assert(JSON.stringify(requests[start + 1]).includes("completion-proof"))
+			results.push("completion-steer")
 
 			const count = requests.length
 			pi.sendMessage({ customType: "fixture-peer", content: "idle-passive", display: true }, { triggerTurn: false })

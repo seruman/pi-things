@@ -93,8 +93,8 @@ test("installed Pi runtime proves idle, steer, follow-up and passive delivery wi
 		expect({ code: await child.exited, error }).toEqual({ code: 0, error: "" })
 		expect(output).not.toContain("extension_error")
 		expect(JSON.parse(readFileSync(report, "utf8"))).toEqual({
-			results: ["steer", "followUp", "passive", "idle-passive", "idle-wake"],
-			requests: 8,
+			results: ["steer", "followUp", "passive", "completion-steer", "idle-passive", "idle-wake"],
+			requests: 11,
 		})
 	} finally {
 		clearTimeout(timeout)

@@ -971,7 +971,7 @@ function registerTools(
 		name: "agent_spawn",
 		label: "Spawn agent",
 		description:
-			"Launch a persistent private child in Pi's Rex window. Waits for a result by default. Background completion wakes an idle parent. Busy parents receive it after their current work. The child does not join a public pool.",
+			"Launch a persistent private child in Pi's Rex window. Waits for a result by default. Background completion wakes an idle parent. Busy parents receive it at the next steering opportunity. The child does not join a public pool.",
 		promptGuidelines: [
 			"Spawning for one-off work is fine. Read the result, then stop the child when no follow-up work is needed.",
 			"Children persist after completion in either mode. A successful result does not stop the child.",

@@ -458,7 +458,7 @@ function installDelivery(pi: ExtensionAPI, options: { root: string; pollMs: numb
 				from: { ...input.from, instanceId: input.route.relation },
 				to: { sessionId: endpoint.sessionId, instanceId: endpoint.instanceId, name: endpoint.name },
 				text: input.text,
-				delivery: "followUp",
+				delivery: "steer",
 				createdAt: Date.now(),
 			})
 
