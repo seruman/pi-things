@@ -44,6 +44,8 @@ export async function sdk(
 		pool?: string | false
 		steps?: Step[]
 		extension?: ExtensionFactory
+		status?: (key: string, text: string | undefined) => void
+		mode?: "tui" | "rpc"
 		selection?: Pick<CreateAgentSessionOptions, "tools" | "noTools" | "excludeTools">
 	} = {},
 ) {
@@ -102,11 +104,18 @@ export async function sdk(
 		...options.selection,
 	})
 
-	await session.bindExtensions({
+	const bindings: Parameters<typeof session.bindExtensions>[0] = {
 		onError: (error) => {
 			errors.push(error)
 		},
-	})
+	}
+
+	if (options.status) {
+		bindings.uiContext = { ...session.extensionRunner.getUIContext(), setStatus: options.status }
+		bindings.mode = options.mode ?? "rpc"
+	}
+
+	await session.bindExtensions(bindings)
 	await runtime.refresh({ allowNetwork: false })
 	const model = runtime.getModel("session-message-test", "controlled")
 

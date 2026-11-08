@@ -32,6 +32,7 @@ async function launch(args: string[], publicFirst = true) {
 	const errors: unknown[] = []
 	const diagnostics: unknown[] = []
 	const factoryFlags: unknown[] = []
+	const statuses: [string, string | undefined][] = []
 
 	const modelRuntime = await ModelRuntime.create({
 		credentials: new InMemoryCredentialStore(),
@@ -95,7 +96,14 @@ async function launch(args: string[], publicFirst = true) {
 	})
 
 	const bind = async () => {
-		await runtime.session.bindExtensions({ onError: (error) => errors.push(error) })
+		await runtime.session.bindExtensions({
+			uiContext: {
+				...runtime.session.extensionRunner.getUIContext(),
+				setStatus: (key, text) => statuses.push([key, text]),
+			},
+			mode: "rpc",
+			onError: (error) => errors.push(error),
+		})
 	}
 
 	runtime.setRebindSession(bind)
@@ -106,6 +114,7 @@ async function launch(args: string[], publicFirst = true) {
 		errors,
 		diagnostics,
 		factoryFlags,
+		statuses,
 		modelRuntime,
 		endpoint: () => {
 			const endpoints = listEndpoints(join(root, "session-messages"))
@@ -123,6 +132,7 @@ for (const publicFirst of [true, false]) {
 			const h = await launch(pool === undefined ? [] : ["--session-pool", pool], publicFirst)
 			const valid = pool !== undefined && ["r", "Review_1.2-3", "x".repeat(64)].includes(pool)
 			expect(h.endpoint().membership?.pool).toBe(valid ? pool : undefined)
+			expect(h.statuses.at(-1)).toEqual(["session-messages", valid ? `scope: pool/${pool}` : "scope: private"])
 			expect(h.factoryFlags).toEqual([undefined])
 			expect(h.diagnostics).toEqual([])
 			expect(h.runtime.session.extensionRunner.getFlagValues().get("session-pool")).toBe(pool)
@@ -161,6 +171,7 @@ for (const publicFirst of [true, false]) {
 			else if (transition === "new") await runtime.newSession()
 			else await runtime.switchSession(file)
 			const endpoint = h.endpoint()
+			expect(h.statuses.at(-1)).toEqual(["session-messages", "scope: pool/review"])
 			expect(endpoint.membership?.pool).toBe("review")
 			expect(generations.has(endpoint.membership?.generation)).toBe(false)
 			expect(instances.has(endpoint.instanceId)).toBe(false)

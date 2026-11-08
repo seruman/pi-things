@@ -91,6 +91,13 @@ function installDelivery(pi: ExtensionAPI, options: { root: string; pollMs: numb
 	registerRenderers(pi)
 	installPendingControls(pi, () => pendingWidget)
 
+	const showScope = () => {
+		if (!context || !mailbox) return
+		const pool = mailbox.endpoint.membership?.pool
+		const text = `scope: ${pool === undefined ? "private" : `pool/${pool}`}`
+		context.ui.setStatus("session-messages", context.mode === "tui" ? context.ui.theme.fg("muted", text) : text)
+	}
+
 	const report = (reason: string, message?: Message) => {
 		lastDiagnosticEpoch = epoch
 		pi.appendEntry(DIAGNOSTIC, message ? { reason, message } : reason)
@@ -289,6 +296,8 @@ function installDelivery(pi: ExtensionAPI, options: { root: string; pollMs: numb
 			(route, from, to) => familyPolicy?.(route, from, to) === true,
 		)
 
+		showScope()
+
 		if (timer) clearInterval(timer)
 		timer = setInterval(tick, options.pollMs)
 		timer.unref()
@@ -300,6 +309,7 @@ function installDelivery(pi: ExtensionAPI, options: { root: string; pollMs: numb
 		pendingWidget?.dispose()
 		pendingWidget = undefined
 		context?.ui.setWidget(PENDING_WIDGET, undefined)
+		context?.ui.setStatus("session-messages", undefined)
 		mailbox?.dispose()
 		mailbox = undefined
 		context = undefined
@@ -408,9 +418,11 @@ function installDelivery(pi: ExtensionAPI, options: { root: string; pollMs: numb
 		},
 		join(pool: string) {
 			ready().join(pool)
+			showScope()
 		},
 		leave() {
 			ready().leave()
+			showScope()
 			tick()
 		},
 		status() {
