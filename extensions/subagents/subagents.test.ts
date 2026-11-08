@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, expect, test, vi } from "bun:test"
+import { randomUUID } from "node:crypto"
+import { messageIdSchema, runHandleSchema, sessionIdSchema } from "../lib/session-delivery/identity"
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -15,19 +17,24 @@ import { type AgentToolResult, type EventBus, SessionManager, createEventBus } f
 import { Check } from "typebox/value"
 import { z } from "zod"
 import { registerChildPolicy } from "../shell-leash/child-policy"
+import { SessionMailbox, workStatus } from "../lib/session-delivery/mailbox"
 import { policyFlags, shellLeashHost } from "../shell-leash/test-host"
 import { SOURCE_ENTRY, sourceSchema } from "./accounting"
 import { installBridge } from "./bridge"
+import { familyPolicy } from "./family"
+import { COMPLETION_MARKER, CompletionCoordinator, publishCompletion, readCompletion } from "./completion"
+import type { DeliveryService } from "../lib/session-delivery/runtime"
 import type { BridgeContext, LifecycleEvents, LifecycleHandler, ParentContext } from "./contracts"
 import { installParent } from "./index"
+import { isManagedChildLaunch } from "./parent-flags"
 import { ProgramStatusReporter } from "./program-status"
 import { type Exec, readProcess } from "./rex"
 import {
 	type RunMetadata,
 	getRun,
-	inboxDir,
 	listRuns,
 	readMetadata,
+	readRunIdentity,
 	runDirectory,
 	updateMetadata,
 	writeMetadata,
@@ -131,11 +138,14 @@ let launches: { cwd: string; command: string[] }[]
 
 let onProcess: (() => void) | undefined
 
-let onLaunch: ((command: string[]) => void) | undefined
+let onLaunch: ((command: string[]) => void | Promise<void>) | undefined
+
+let parentMailbox: SessionMailbox
+
+let staged: Parameters<DeliveryService["stageCompletion"]>[0][]
 
 const envKeys = ["PI_CODING_AGENT_DIR", "PI_SUBAGENT_RUN_DIR", "REX_SESSION", "REX_BLOCK"]
 
-// Only the external Rex transport is faked. Unexpected operations fail, rather than silently succeeding.
 const exec: Exec = async (command, args, signal) => {
 	signal?.throwIfAborted()
 	expect(command).toBe("rex")
@@ -182,7 +192,7 @@ const exec: Exec = async (command, args, signal) => {
 	if (args[4] === "session.new_layer") {
 		const payload = launchRequestSchema.parse(JSON.parse(args[5] ?? "{}")).layout.block
 		launches.push(payload.options)
-		onLaunch?.(payload.options.command)
+		await onLaunch?.(payload.options.command)
 		const blockId = `block:${++nextBlockId}`
 		blocks.set(blockId, { exit: null })
 
@@ -231,6 +241,8 @@ beforeEach(() => {
 	parentSession = SessionManager.create(root, root, { id: "parent" })
 	parentSession.appendMessage({ role: "user", content: "parent task", timestamp: Date.now() })
 	toolCounter = 0
+	parentMailbox = new SessionMailbox({ sessionId: sessionIdSchema.parse("parent"), cwd: root }, undefined, familyPolicy)
+	staged = []
 	bus = createEventBus()
 	ctx = {
 		cwd: root,
@@ -273,6 +285,23 @@ function installTestParent(): void {
 			},
 		},
 		reporter,
+		{
+			assertContext(context) {
+				expect(context.sessionManager).toBe(parentSession)
+			},
+			send(to, text, mode, route) {
+				parentMailbox.heartbeat(undefined)
+				const m = parentMailbox.send(to, text, mode, route)
+				parentSession.appendCustomEntry("session-message-sent", m)
+
+				return { status: "queued", messageId: m.id, to: m.to, from: m.from, text: m.text, delivery: m.delivery }
+			},
+			stageCompletion(input) {
+				staged.push(input)
+
+				return messageIdSchema.parse(randomUUID())
+			},
+		},
 	)
 }
 
@@ -341,7 +370,7 @@ function flagValue(command: string[], flag: string) {
 async function spawn(params: JsonObject = {}) {
 	const result = await call("agent_spawn", { prompt: "task", background: true, ...params })
 
-	return getRun(z.string().parse(result.handle))
+	return getRun(runHandleSchema.parse(result.handle))
 }
 
 async function tick(ms = 0) {
@@ -363,14 +392,41 @@ async function rejectionOf<Result>(pending: Promise<Result>): Promise<Error> {
 	throw new Error("Expected promise to reject")
 }
 
-// Real bridge, metadata and transcripts; the typed host supplies only the capabilities the bridge uses.
 async function child(run: RunMetadata) {
 	const hooks = events<BridgeContext>()
 	const childBus = createEventBus()
 	const names: string[] = []
 	const sent: { message: string; deliverAs?: "steer" | "followUp" }[] = []
+	let messaging: SessionMailbox | undefined
+	hooks.on("session_start", (_event, ctx) => {
+		messaging?.dispose()
+		messaging = new SessionMailbox(
+			{
+				sessionId: sessionIdSchema.parse(ctx.sessionManager.getSessionId()),
+				sessionFile: ctx.sessionManager.getSessionFile(),
+				cwd: root,
+			},
+			undefined,
+			familyPolicy,
+		)
+		messaging.join("test")
+	})
+	hooks.on("session_shutdown", () => {
+		messaging?.dispose()
+	})
+	hooks.on("agent_start", () => {
+		messaging?.heartbeat(undefined)
+	})
+	hooks.on("agent_settled", () => {
+		messaging?.heartbeat(undefined)
+	})
 
 	const c = {
+		get messaging() {
+			if (!messaging) throw new Error("Missing mailbox")
+
+			return messaging
+		},
 		events: childBus,
 		idle: true,
 		abortRequests: 0,
@@ -429,16 +485,303 @@ async function child(run: RunMetadata) {
 			setSessionName: (name) => {
 				names.push(name)
 			},
-			sendUserMessage: (message, options) => {
-				sent.push({ message, ...options })
-			},
 		},
 		runDirectory(run.handle),
 	)
+	const admitted: ReturnType<SessionMailbox["receive"]> = []
+
+	const deliveryTimer = setInterval(() => {
+		if (!messaging) return
+		parentMailbox.heartbeat(undefined)
+
+		for (const m of messaging.receive(() => {})) {
+			admitted.push(m)
+			messaging.transition(m, { kind: "submitted" })
+			updateMetadata(runDirectory(run.handle), { state: "busy" }, ["error"])
+			const input: (typeof sent)[number] = { message: m.text }
+
+			if (!c.idle) input.deliverAs = m.delivery === "followUp" ? "followUp" : "steer"
+			sent.push(input)
+		}
+	}, 200)
+
+	hooks.on("agent_settled", () => {
+		for (const message of admitted.splice(0)) messaging?.transition(message, { kind: "settled" })
+	})
+	hooks.on("session_shutdown", () => clearInterval(deliveryTimer))
 	await c.emit("session_start")
 
 	return c
 }
+
+test("private handles reject an unrelated parent before changing a child", async () => {
+	const run = await spawn()
+	updateMetadata(runDirectory(run.handle), { parentSessionId: sessionIdSchema.parse("unrelated") })
+	await expect(call("agent_rename", { handle: run.handle, name: "stolen" })).rejects.toThrow(/owner|parent/i)
+	expect(getRun(run.handle).name).toBeUndefined()
+})
+
+test("actual child settlement persists a sequenced completion fact", async () => {
+	const run = await spawn()
+	const c = await child(run)
+	await c.begin()
+	await c.reply("completed privately")
+	const path = join(runDirectory(run.handle), "completion.json")
+	expect(existsSync(path)).toBe(true)
+	const fact = JSON.parse(readFileSync(path, "utf8"))
+	expect(fact).toMatchObject({ sequence: 1, outcome: "success", sessionFile: c.session.getSessionFile() })
+	await c.begin()
+	await c.reply("completed privately")
+	expect(JSON.parse(readFileSync(path, "utf8"))).toMatchObject({ sequence: 2 })
+})
+
+test("background completion commits one headless wake across polling and reload", async () => {
+	await parent.emit("session_start", ctx)
+	const run = await spawn({ noTools: "all" })
+	const c = await child(run)
+	await c.begin()
+	await c.reply("background done")
+	await tick(200)
+	expect(staged).toHaveLength(1)
+	expect(staged[0]?.text).toContain("background done")
+	expect(staged[0]?.gate()).toBe("submit")
+	await tick(2000)
+	expect(staged).toHaveLength(1)
+	await parent.emit("session_shutdown", ctx, "reload")
+	parent = events<ParentContext>()
+	installTestParent()
+	await parent.emit("session_start", ctx)
+	await tick(1000)
+	expect(staged).toHaveLength(1)
+	expect(await call("agent_wait", { handle: run.handle })).toMatchObject({ answer: "background done" })
+	await tick(1000)
+	expect(staged).toHaveLength(1)
+	const markers = parentSession.getEntries().filter((e) => e.type === "custom" && e.customType === COMPLETION_MARKER)
+	expect(markers).toHaveLength(2)
+})
+
+test.each([false, true])(
+	"fast completion before launch returns is reserved only for foreground, background %s",
+	async (background) => {
+		await parent.emit("session_start", ctx)
+		onLaunch = async (command) => {
+			const file = z.string().parse(flagValue(command, "--session"))
+
+			const directory = z
+				.string()
+				.parse(command.find((arg) => arg.startsWith("PI_SUBAGENT_RUN_DIR="))?.slice("PI_SUBAGENT_RUN_DIR=".length))
+
+			const identity = readRunIdentity(directory)
+
+			if (!identity) throw new Error("Missing prepared identity")
+			expect(readMetadata(directory)).toBeUndefined()
+
+			const run: RunMetadata = {
+				...identity,
+				version: 1,
+				blockId: "fixture-before-launch-response",
+				sessionFile: file,
+				cwd: root,
+				provider: "configured",
+				model: "parent",
+				thinking: "off",
+				launchArgs: [],
+				createdAt: new Date().toISOString(),
+			}
+
+			const c = await child(run)
+			await c.begin()
+			await c.reply("fast")
+			expect(readCompletion(run)).toMatchObject({ sequence: 1, outcome: "success" })
+		}
+
+		const pending = call("agent_spawn", { prompt: "fast", background })
+		await tick()
+		await tick(500)
+		await tick(500)
+		const result = await pending
+
+		if (!background) {
+			expect(result).toMatchObject({ answer: "fast" })
+
+			for (const item of staged) expect(item.gate()).toBe("withdraw")
+		} else expect(staged[0]?.gate()).toBe("submit")
+		const count = staged.length
+		await tick(1000)
+		expect(staged).toHaveLength(count)
+	},
+)
+
+test("finite consumption leaves later work eligible and retired waiters cannot consume or release new reservations", async () => {
+	const coordinator = new CompletionCoordinator(
+		{
+			appendEntry(type, data) {
+				parentSession.appendCustomEntry(type, data)
+			},
+		},
+		{
+			stageCompletion(input) {
+				staged.push(input)
+
+				return messageIdSchema.parse(randomUUID())
+			},
+		},
+	)
+
+	coordinator.start(ctx)
+	const run = await spawn()
+	const c = await child(run)
+	await c.begin()
+	await c.reply("same")
+	const waiter = coordinator.invocation(ctx)
+	waiter.reserve(run.handle)
+	waiter.terminal(readCompletion(getRun(run.handle)))
+	await c.begin()
+	await c.reply("same")
+	waiter.commit()
+	waiter.release()
+	coordinator.scan()
+	expect(staged[0]?.route.sequence).toBe(2)
+	const retired = coordinator.invocation(ctx)
+	retired.reserve(run.handle)
+	retired.terminal(readCompletion(getRun(run.handle)))
+	coordinator.stop()
+	coordinator.start(ctx)
+	expect(() => retired.commit()).toThrow("retired parent")
+	expect(staged[0]?.gate()).toBe("withdraw")
+	const current = coordinator.invocation(ctx)
+	current.reserve(run.handle)
+	retired.release()
+	coordinator.scan()
+	expect(staged[1]?.route.sequence).toBe(2)
+	expect(staged[1]?.gate()).toBe("defer")
+	current.release()
+	expect(staged[1]?.gate()).toBe("submit")
+})
+
+test("parallel waits retain separate reservations when one is cancelled", async () => {
+	await parent.emit("session_start", ctx)
+	const run = await spawn()
+	const c = await child(run)
+	await c.begin()
+	const cancelled = new AbortController()
+	const first = call("agent_wait", { handle: run.handle }, cancelled.signal)
+	const second = call("agent_wait", { handle: run.handle })
+	await tick()
+	cancelled.abort()
+	await tick(500)
+	expect(await first).toMatchObject({ status: "aborted" })
+	await c.reply("parallel")
+	await tick(200)
+	expect(staged[0]?.gate()).toBe("defer")
+	await tick(500)
+	expect(await second).toMatchObject({ answer: "parallel" })
+	expect(staged[0]?.gate()).toBe("withdraw")
+	await parent.emit("session_shutdown", ctx, "reload")
+	parent = events<ParentContext>()
+	installTestParent()
+	await parent.emit("session_start", ctx)
+	await tick(400)
+	expect(staged).toHaveLength(1)
+})
+
+test("cancelled and timed out waits consume nothing and a later completion wakes", async () => {
+	await parent.emit("session_start", ctx)
+	const run = await spawn()
+	const c = await child(run)
+	await c.begin()
+	const waiting = call("agent_wait", { handle: run.handle, timeoutSec: 1 })
+	await tick()
+	await tick(500)
+	await tick(500)
+	expect(await waiting).toMatchObject({ status: "error", error: "timeout after 1s" })
+	await c.reply("later")
+	await tick(200)
+	expect(staged[0]?.gate()).toBe("submit")
+})
+
+test("inspection failure releases the waiter without consuming the completed child", async () => {
+	await parent.emit("session_start", ctx)
+	const run = await spawn()
+	const c = await child(run)
+	await c.begin()
+	await c.reply("retained")
+	blocks.set(run.blockId, { exit: null, error: "inspection failed" })
+	await expect(call("agent_wait", { handle: run.handle })).rejects.toThrow("inspection failed")
+	await tick(200)
+	expect(staged[0]?.gate()).toBe("submit")
+})
+
+test.each(["error", "aborted"] as const)(
+	"returned terminal %s consumes its fact without a duplicate wake",
+	async (reason) => {
+		await parent.emit("session_start", ctx)
+		const run = await spawn()
+		const c = await child(run)
+		await c.begin()
+		await c.reply("terminal", reason)
+		expect(await call("agent_wait", { handle: run.handle })).toMatchObject({ status: reason })
+		await tick(400)
+		expect(staged).toEqual([])
+	},
+)
+
+test("no-response child abort cannot inherit its earlier answer, and identical followups have distinct sequences", async () => {
+	await parent.emit("session_start", ctx)
+	const run = await spawn()
+	const c = await child(run)
+	await c.begin()
+	await c.reply("same")
+	await call("agent_wait", { handle: run.handle })
+	await c.begin()
+	await c.reply("same")
+	expect(readCompletion(getRun(run.handle))?.sequence).toBe(2)
+	await tick(200)
+	expect(staged[0]?.gate()).toBe("submit")
+	await c.begin()
+	c.idle = true
+	await c.emit("agent_settled", undefined, true)
+	expect(await call("agent_wait", { handle: run.handle })).toMatchObject({ status: "aborted", answer: "" })
+	expect(readCompletion(getRun(run.handle))).toMatchObject({ sequence: 3, response: { kind: "none" } })
+	await tick(400)
+	expect(staged).toHaveLength(1)
+})
+
+test("an unavailable response anchor is not consumed and cannot block a healthy sibling's wake", async () => {
+	await parent.emit("session_start", ctx)
+	const run = await spawn()
+	const c = await child(run)
+	await c.begin()
+	await c.reply("retained")
+	const fact = readCompletion(getRun(run.handle))
+
+	if (!fact) throw new Error("Missing fact")
+	publishCompletion(run, { ...fact, response: { kind: "response", entryId: "missing" } })
+	await expect(call("agent_wait", { handle: run.handle })).rejects.toThrow("Completion response identity")
+	const healthy = await spawn()
+	const sibling = await child(healthy)
+	await sibling.begin()
+	await sibling.reply("healthy")
+	await tick(400)
+	expect(staged).toHaveLength(1)
+	expect(staged[0]?.route.handle).toBe(healthy.handle)
+	publishCompletion(run, fact)
+	await tick(200)
+	expect(staged).toHaveLength(2)
+	expect(staged[1]?.gate()).toBe("submit")
+})
+
+test("failed stop releases temporary wake suppression", async () => {
+	await parent.emit("session_start", ctx)
+	const run = await spawn()
+	const c = await child(run)
+	await c.begin()
+	await c.reply("available")
+	blocks.set(run.blockId, { exit: null, error: "cannot inspect" })
+	await expect(call("agent_stop", { handle: run.handle })).rejects.toThrow("cannot inspect")
+	await tick(200)
+	expect(staged[0]?.gate()).toBe("submit")
+})
 
 test.each([
 	["defaults", {}, []],
@@ -459,8 +802,12 @@ test.each([
 	})
 
 	const command = launches[0]?.command ?? []
+	expect(command).toContain(`PI_CODING_AGENT_DIR=${root}`)
+	expect(command).toContain(`PI_SUBAGENT_RUN_DIR=${runDirectory(run.handle)}`)
+	expect(command.filter((arg) => arg.endsWith("/session-messages/index.ts"))).toHaveLength(0)
 	expect(launches[0]?.cwd).toBe(cwd)
 	expect(flagValue(command, "--session")).toBe(run.sessionFile)
+	expect(run.launchSessionFile).toBe(run.sessionFile)
 	expect(flagValue(command, "--provider")).toBe("configured")
 	expect(flagValue(command, "--model")).toBe("child-model")
 	expect(flagValue(command, "--thinking")).toBe("high")
@@ -495,7 +842,7 @@ test.each([
 	["cross-provider model", { provider: "other", model: "vendor/child-model" }, "other", "vendor/child-model"],
 ] as const)("spawn selects and reports %s", async (_name, params, provider, model) => {
 	const result = await call("agent_spawn", { prompt: "task", background: true, ...params })
-	const run = getRun(z.string().parse(result.handle))
+	const run = getRun(runHandleSchema.parse(result.handle))
 	const command = launches[0]?.command ?? []
 	expect(flagValue(command, "--provider")).toBe(provider)
 	expect(flagValue(command, "--model")).toBe(model)
@@ -914,6 +1261,54 @@ test("send then wait retries a failed turn instead of returning its old error", 
 	expect(await waiting).toMatchObject({ status: "success", answer: "RECOVERED" })
 })
 
+test("session mail blocks old success through queued and submitted states, but passive does not", async () => {
+	const run = await spawn()
+	const c = await child(run)
+	await c.begin()
+	await c.reply("OLD")
+	const peer = new SessionMailbox({ sessionId: sessionIdSchema.parse("independent-peer"), cwd: root })
+	peer.join("test")
+	const message = peer.send(sessionIdSchema.parse(c.session.getSessionId()), "new work")
+	let finished = false
+
+	const waiting = call("agent_wait", { handle: run.handle }).then((result) => {
+		finished = true
+
+		return result
+	})
+
+	await tick(500)
+	expect(finished).toBe(false)
+	c.messaging.receive(() => {})
+	c.messaging.transition(message, { kind: "submitted" })
+	await tick(500)
+	expect(finished).toBe(false)
+	await c.begin()
+	await c.reply("NEW")
+	c.messaging.transition(message, { kind: "settled" })
+	await tick(500)
+	expect(await waiting).toMatchObject({ status: "success", answer: "NEW" })
+	peer.send(sessionIdSchema.parse(c.session.getSessionId()), "passive", "passive")
+	expect(workStatus({ sessionId: sessionIdSchema.parse(c.session.getSessionId()) }).kind).toBe("idle")
+	expect(await call("agent_wait", { handle: run.handle })).toMatchObject({ status: "success", answer: "NEW" })
+})
+
+test("wait pins messaging instance and reports replacement rather than old success", async () => {
+	const run = await spawn()
+	const c = await child(run)
+	await c.begin()
+	await c.reply("OLD")
+	const peer = new SessionMailbox({ sessionId: sessionIdSchema.parse("peer"), cwd: root })
+	peer.join("test")
+	peer.send(sessionIdSchema.parse(c.session.getSessionId()), "work")
+	const waiting = call("agent_wait", { handle: run.handle })
+	await tick(500)
+	await c.emit("session_shutdown", "reload")
+	await c.emit("session_start")
+	await tick(500)
+	expect(await waiting).toMatchObject({ status: "error", error: "Messaging receiver replaced or ambiguous" })
+})
+
 test("wait timeout leaves the child alive and invalid deadlines are rejected", async () => {
 	const run = await spawn()
 	const c = await child(run)
@@ -1044,20 +1439,23 @@ test("bridge initializes late metadata, syncs names and follows session changes"
 	await c.begin()
 	await c.reply("NEW SESSION")
 	expect(c.session.getSessionFile()).toBe(getRun(run.handle).sessionFile)
+	expect(getRun(run.handle).launchSessionFile).toBe(run.sessionFile)
 	expect(getRun(run.handle).sessionFiles).toEqual([run.sessionFile, z.string().parse(c.session.getSessionFile())])
 	expect(await call("agent_wait", { handle: run.handle })).toMatchObject({ answer: "NEW SESSION", name: "renamed" })
 	await c.emit("session_shutdown", "quit")
 	expect(getRun(run.handle).state).toBe("exited")
 })
 
-test("inbox removes malformed messages, prompts idle children, and steers or queues while busy", async () => {
+test("shared inbox rejects malformed files without poisoning private tasks, and delivers each delegation once", async () => {
 	const run = await spawn()
 	const c = await child(run)
-	const inbox = inboxDir(runDirectory(run.handle))
+	const inbox = join(c.messaging.root, c.messaging.endpoint.instanceId, "inbox")
 	writeFileSync(join(inbox, "bad.json"), "{")
 	await tick(250)
 	expect(readdirSync(inbox)).toEqual([])
-	expect(await call("agent_wait", { handle: run.handle })).toMatchObject({ status: "error" })
+	expect(workStatus({ sessionId: sessionIdSchema.parse(c.session.getSessionId()) }, undefined, familyPolicy).kind).toBe(
+		"idle",
+	)
 	await call("agent_send", { handle: run.handle, message: "prompt" })
 	await tick(250)
 	await c.begin()
@@ -1107,7 +1505,7 @@ test("spawn inherits parent extension isolation and persists it when resumed fro
 	expect(getRun(run.handle).launchArgs).toEqual(run.launchArgs)
 })
 
-test("resume launches the preserved transcript with its restrictions and without replaying the prompt", async () => {
+test("resume publishes changed transcript launch identity before Rex, preserving restrictions without replay", async () => {
 	const prompt = "initial task must not be replayed"
 
 	const run = await spawn({
@@ -1122,14 +1520,29 @@ test("resume launches the preserved transcript with its restrictions and without
 	const c = await child(run)
 	await c.begin()
 	await c.reply("SAVED HISTORY")
+	await c.emit("session_shutdown", "new")
+	c.session = SessionManager.create(root, root)
+	await c.emit("session_start")
+	await c.begin()
+	await c.reply("NEW SESSION HISTORY")
+	const currentFile = z.string().parse(c.session.getSessionFile())
+	expect(currentFile).not.toBe(run.sessionFile)
+	expect(getRun(run.handle).launchSessionFile).toBe(run.sessionFile)
 	requestStop(run)
 	acknowledgeStop(run)
-	const transcript = readFileSync(run.sessionFile, "utf8")
+	const transcript = readFileSync(currentFile, "utf8")
 	await parent.emit("session_shutdown", ctx, "quit")
 	await c.emit("session_shutdown", "quit")
 	expect(blocks.has(run.blockId)).toBe(false)
 	expect(getRun(run.handle).suspended).toBe(true)
 	ctx.model = { provider: "changed-parent-provider", id: "changed-parent-model" }
+	onLaunch = (command) => {
+		expect(getRun(run.handle).launchSessionFile).toBe(currentFile)
+		expect(flagValue(command, "--session")).toBe(currentFile)
+		expect(isManagedChildLaunch(runDirectory(run.handle), command, root)).toBe(true)
+		expect(isManagedChildLaunch(runDirectory(run.handle), ["--session", run.sessionFile], root)).toBe(false)
+	}
+
 	await parent.emit("session_start", ctx)
 	const resumed = getRun(run.handle)
 	expect(stopRequested(run)).toBe(false)
@@ -1142,8 +1555,9 @@ test("resume launches the preserved transcript with its restrictions and without
 	expect(resumed).toMatchObject({ provider: "other", model: "child-model" })
 	expect(flagValue(command, "--provider")).toBe("other")
 	expect(flagValue(command, "--model")).toBe("child-model")
-	expect(flagValue(command, "--session")).toBe(run.sessionFile)
-	expect(readFileSync(run.sessionFile, "utf8")).toBe(transcript)
+	expect(flagValue(command, "--session")).toBe(currentFile)
+	expect(resumed.launchSessionFile).toBe(currentFile)
+	expect(readFileSync(currentFile, "utf8")).toBe(transcript)
 	expect(new Set(flagValue(command, "--tools")?.split(","))).toEqual(new Set(["read"]))
 	expect(new Set(flagValue(command, "--exclude-tools")?.split(","))).toEqual(
 		new Set([
@@ -1163,6 +1577,7 @@ test("resume launches the preserved transcript with its restrictions and without
 
 test("resume does not duplicate a still-live child after close fails", async () => {
 	const run = await spawn()
+	updateMetadata(runDirectory(run.handle), { sessionFile: join(root, "changed.jsonl") })
 	blocks.set(run.blockId, { exit: null, closeError: "close failed" })
 	await expect(parent.emit("session_shutdown", ctx, "quit")).rejects.toThrow("subagent suspend failed")
 	expect(blocks.has(run.blockId)).toBe(true)
@@ -1170,7 +1585,12 @@ test("resume does not duplicate a still-live child after close fails", async () 
 	await parent.emit("session_start", ctx)
 	expect(launches).toHaveLength(1)
 	expect(blocks.size).toBe(1)
-	expect(getRun(run.handle)).toMatchObject({ blockId: run.blockId, suspended: false })
+	expect(getRun(run.handle)).toMatchObject({
+		blockId: run.blockId,
+		suspended: false,
+		launchSessionFile: run.sessionFile,
+		sessionFile: join(root, "changed.jsonl"),
+	})
 })
 
 test.each(["quit", "resume"] as const)("bridge releases its polling timer on %s", async (reason) => {
@@ -1180,7 +1600,9 @@ test.each(["quit", "resume"] as const)("bridge releases its polling timer on %s"
 	expect(vi.getTimerCount()).toBeGreaterThan(baseline)
 	await c.emit("session_shutdown", reason)
 	expect(vi.getTimerCount()).toBe(baseline)
-	await call("agent_send", { handle: run.handle, message: "not delivered after shutdown" })
+	await expect(call("agent_send", { handle: run.handle, message: "not delivered after shutdown" })).rejects.toThrow(
+		"Offline",
+	)
 	await tick(1000)
 	expect(c.sent).toEqual([])
 })
@@ -1424,7 +1846,7 @@ test("stopped history listing stays parent-scoped and does not hide a healthy ch
 	await child(foreign)
 	await call("agent_stop", { handle: stopped.handle })
 	await call("agent_stop", { handle: foreign.handle })
-	updateMetadata(runDirectory(foreign.handle), { parentSessionId: "other" })
+	updateMetadata(runDirectory(foreign.handle), { parentSessionId: sessionIdSchema.parse("other") })
 	expect((await call("agent_list")).runs).toEqual([expect.objectContaining({ handle: healthy.handle })])
 	const history = (await call("agent_list", { includeStopped: true })).runs
 	expect(history).toHaveLength(2)
@@ -1468,7 +1890,7 @@ test("stop keeps the latest session path if the bridge changes it during process
 	const result = await call("agent_stop", { handle: run.handle })
 	expect(result.sessionFile).toBe(z.string().parse(c.session.getSessionFile()))
 	expect(result.sessionFile).not.toBe(run.sessionFile)
-	expect(getRun(run.handle).childSessionId).toBe(c.session.getSessionId())
+	expect(getRun(run.handle).childSessionId).toBe(sessionIdSchema.parse(c.session.getSessionId()))
 	expect(readFileSync(run.sessionFile, "utf8")).toContain("ORIGINAL")
 	expect(readFileSync(z.string().parse(result.sessionFile), "utf8")).toContain("LATEST")
 })
@@ -1524,7 +1946,7 @@ test("missing blocks mean exited, but connection failures stay unknown and don't
 test("metadata skips corrupt records, list stays parent-scoped, and names/handles are validated", async () => {
 	const run = await spawn()
 	const other = await spawn()
-	updateMetadata(runDirectory(other.handle), { parentSessionId: "other" })
+	updateMetadata(runDirectory(other.handle), { parentSessionId: sessionIdSchema.parse("other") })
 	expect((await call("agent_list")).runs).toEqual([expect.objectContaining({ handle: run.handle })])
 	writeFileSync(join(runDirectory(other.handle), "metadata.json"), "{")
 	expect(readMetadata(runDirectory(other.handle))).toBeUndefined()

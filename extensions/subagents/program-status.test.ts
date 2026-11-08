@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test"
+import { runHandleSchema } from "../lib/session-delivery/identity"
 import type { ParentContext } from "./contracts"
 import { ProgramStatusReporter, type RunStatus } from "./program-status"
 
@@ -24,7 +25,7 @@ function setup(
 }
 
 function status(handle = "abc123", state: RunStatus["state"] = "busy"): RunStatus {
-	return { run: { handle, name: "reviewer", createdAt: "2026-01-01" }, state }
+	return { run: { handle: runHandleSchema.parse(handle), name: "reviewer", createdAt: "2026-01-01" }, state }
 }
 
 function fields(report: string | undefined): Record<string, string> {

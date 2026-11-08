@@ -1,9 +1,16 @@
-import { randomBytes } from "node:crypto"
+import { randomBytes, randomUUID } from "node:crypto"
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core"
 import { getAgentDir } from "@earendil-works/pi-coding-agent"
 import { z } from "zod"
+import {
+	relationIdSchema,
+	runHandleSchema,
+	sessionIdSchema,
+	type RunHandle,
+	type SessionId,
+} from "../lib/session-delivery/identity"
 
 export const thinkingLevels = [
 	"off",
@@ -30,12 +37,14 @@ export function normalizeRunName(value: string): string {
 
 const runMetadataSchema = z.object({
 	version: z.literal(1),
-	handle: z.string(),
+	handle: runHandleSchema,
+	relation: relationIdSchema.optional(),
 	name: runNameSchema.optional(),
 	blockId: z.string(),
-	parentSessionId: z.string(),
-	childSessionId: z.string().optional(),
+	parentSessionId: sessionIdSchema,
+	childSessionId: sessionIdSchema.optional(),
 	sessionFile: z.string(),
+	launchSessionFile: z.string().optional(),
 	// All session paths seen by the bridge; usage must survive child session switches.
 	sessionFiles: z.array(z.string()).optional(),
 	// Legacy runs have no reliable record of which usage was already returned to Pi.
@@ -59,38 +68,29 @@ const runMetadataSchema = z.object({
 
 export type RunMetadata = z.infer<typeof runMetadataSchema>
 
-export function runDisplayName(metadata: Pick<RunMetadata, "handle" | "name">): string {
+export function runDisplayName(metadata: { handle: string; name?: string }): string {
 	return metadata.name ? `${metadata.name} (${metadata.handle})` : metadata.handle
 }
-
-export const inboxMessageSchema = z.object({
-	message: z.string(),
-	delivery: z.enum(["auto", "followUp"]),
-})
 
 function getRunsDir(): string {
 	return join(getAgentDir(), "subagents")
 }
 
-export function runDirectory(handle: string): string {
+export function runDirectory(handle: RunHandle): string {
 	if (!/^[a-z0-9]+$/.test(handle)) throw new Error(`Invalid subagent handle: ${handle}`)
 
 	return join(getRunsDir(), handle)
-}
-
-export function inboxDir(runDir: string): string {
-	return join(runDir, "inbox")
 }
 
 export function metadataPath(runDir: string): string {
 	return join(runDir, "metadata.json")
 }
 
-function generateHandle(): string {
+function generateHandle(): RunHandle {
 	mkdirSync(getRunsDir(), { recursive: true, mode: 0o700 })
 
 	for (let attempt = 0; attempt < 100; attempt++) {
-		const handle = randomBytes(3).toString("hex")
+		const handle = runHandleSchema.parse(randomBytes(3).toString("hex"))
 
 		if (!existsSync(runDirectory(handle))) return handle
 	}
@@ -98,14 +98,45 @@ function generateHandle(): string {
 	throw new Error("Could not allocate a unique subagent handle")
 }
 
-export function prepareRun(): Pick<RunMetadata, "handle" | "sessionFile"> {
+const runIdentitySchema = z
+	.object({
+		handle: z
+			.string()
+			.regex(/^[a-z0-9]+$/)
+			.pipe(runHandleSchema),
+		relation: relationIdSchema,
+		parentSessionId: z.string().min(1).pipe(sessionIdSchema),
+	})
+	.strict()
+	.readonly()
+
+export type RunIdentity = z.infer<typeof runIdentitySchema>
+
+export function readRunIdentity(runDir: string): RunIdentity | undefined {
+	try {
+		return runIdentitySchema.parse(JSON.parse(readFileSync(join(runDir, "identity.json"), "utf8")))
+	} catch {
+		return undefined
+	}
+}
+
+export function prepareRun(parentSessionId?: SessionId) {
 	const handle = generateHandle()
 	const directory = runDirectory(handle)
 	const sessionFile = join(directory, "session.jsonl")
-	mkdirSync(inboxDir(directory), { recursive: true, mode: 0o700 })
+	mkdirSync(directory, { recursive: true, mode: 0o700 })
 	writeFileSync(sessionFile, "", { mode: 0o600 })
+	const relation = relationIdSchema.parse(randomUUID())
 
-	return { handle, sessionFile }
+	if (parentSessionId) {
+		writeFileSync(
+			join(directory, "identity.json"),
+			JSON.stringify(runIdentitySchema.parse({ handle, relation, parentSessionId })),
+			{ mode: 0o600, flag: "wx" },
+		)
+	}
+
+	return { handle, sessionFile, relation }
 }
 
 export function readMetadata(runDir: string): RunMetadata | undefined {
@@ -116,7 +147,7 @@ export function readMetadata(runDir: string): RunMetadata | undefined {
 	}
 }
 
-export function getRun(handle: string): RunMetadata {
+export function getRun(handle: RunHandle): RunMetadata {
 	const metadata = readMetadata(runDirectory(handle))
 
 	if (!metadata) throw new Error(`Unknown subagent: ${handle}`)
@@ -155,7 +186,7 @@ export function updateMetadata(
 	return next
 }
 
-export function listRuns(parentSessionId?: string, options: { includeStopped?: boolean } = {}): RunMetadata[] {
+export function listRuns(parentSessionId?: SessionId, options: { includeStopped?: boolean } = {}): RunMetadata[] {
 	const root = getRunsDir()
 
 	if (!existsSync(root)) return []
@@ -178,7 +209,7 @@ export function listRuns(parentSessionId?: string, options: { includeStopped?: b
 }
 
 // Call only after the Rex block is closed or known to be absent. Never delete history.
-export function markStopped(handle: string): RunMetadata {
+export function markStopped(handle: RunHandle): RunMetadata {
 	const current = getRun(handle)
 
 	const stopped = updateMetadata(runDirectory(handle), {
@@ -189,22 +220,4 @@ export function markStopped(handle: string): RunMetadata {
 	if (!stopped) throw new Error(`Could not retain stopped subagent: ${handle}`)
 
 	return stopped
-}
-
-export function enqueue(handle: string, message: string, followUp: boolean): void {
-	const directory = inboxDir(runDirectory(handle))
-	mkdirSync(directory, { recursive: true, mode: 0o700 })
-	const target = join(directory, `${Date.now()}-${randomBytes(4).toString("hex")}.json`)
-	const temporary = `${target}.tmp`
-	const payload = inboxMessageSchema.parse({ message, delivery: followUp ? "followUp" : "auto" })
-	writeFileSync(temporary, `${JSON.stringify(payload)}\n`, { encoding: "utf8", mode: 0o600 })
-	renameSync(temporary, target)
-}
-
-export function inboxPending(handle: string): boolean {
-	const directory = inboxDir(runDirectory(handle))
-
-	if (!existsSync(directory)) return false
-
-	return readdirSync(directory).some((file) => file.endsWith(".json"))
 }

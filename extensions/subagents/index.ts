@@ -5,6 +5,7 @@ import {
 	type AssistantMessage,
 	type JsonValue,
 	type Static,
+	type TSchema,
 	StringEnum,
 	type TextContent,
 	Type,
@@ -15,14 +16,27 @@ import {
 	type ExtensionContext,
 	type SessionEntry,
 	SessionManager,
+	getAgentDir,
 } from "@earendil-works/pi-coding-agent"
 import { type SelectItem, SelectList } from "@earendil-works/pi-tui"
 import { getChildPolicyArgs } from "../shell-leash/child-policy"
+import { workStatus, type WorkStatus } from "../lib/session-delivery/mailbox"
+import {
+	runHandleSchema,
+	sessionIdSchema,
+	type InstanceId,
+	type RunHandle,
+	type SessionId,
+} from "../lib/session-delivery/identity"
+import { acquireDelivery, type DeliveryService } from "../lib/session-delivery/runtime"
+import { familyPolicy, ownedRun } from "./family"
+import { installPrivateChild } from "./private-child"
 import { getPiInvocationParts } from "../split-fork"
 import { UsageAccounting } from "./accounting"
 import { installBridge } from "./bridge"
-import type { ParentContext, ParentHost } from "./contracts"
-import { parentExtensionFlags } from "./parent-flags"
+import type { ParentContext, ParentHost, SubagentTool } from "./contracts"
+import { CompletionCoordinator, completionAnswer, readCompletion, type CompletionInvocation } from "./completion"
+import { isManagedChildLaunch, parentExtensionFlags } from "./parent-flags"
 import { ProgramStatusReporter } from "./program-status"
 import {
 	type Exec,
@@ -36,14 +50,11 @@ import {
 } from "./rex"
 import {
 	type RunMetadata,
-	enqueue,
 	getRun,
-	inboxPending,
 	listRuns,
 	markStopped,
 	normalizeRunName,
 	prepareRun,
-	readMetadata,
 	runDirectory,
 	runDisplayName,
 	thinkingLevels,
@@ -56,6 +67,8 @@ import { childUsage } from "./usage"
 const EXCLUDED = ["codemode", "agent_spawn", "agent_send", "agent_wait", "agent_stop", "agent_list", "agent_rename"]
 
 const READONLY = ["read", "grep", "find", "ls"]
+
+type FamilyDelivery = Pick<DeliveryService, "send" | "stageCompletion" | "assertContext">
 
 const usageSchema = Type.Object({
 	input: Type.Number(),
@@ -182,13 +195,14 @@ function toolFlags(params: SpawnParameters): string[] {
 function launchCommand(run: Omit<RunMetadata, "blockId">, initial: string[] = []): string[] {
 	return [
 		"env",
+		`PI_CODING_AGENT_DIR=${getAgentDir()}`,
 		`PI_SUBAGENT_RUN_DIR=${runDirectory(run.handle)}`,
 		...getPiInvocationParts(),
 		// Load this bridge even when the installed package is older or cwd differs.
 		"--extension",
 		fileURLToPath(import.meta.url),
 		"--session",
-		run.sessionFile,
+		run.launchSessionFile ?? run.sessionFile,
 		"--provider",
 		run.provider,
 		"--model",
@@ -259,10 +273,10 @@ function assertNotStopped(run: RunMetadata): void {
 // Closing and retaining a run is shared by explicit stop and foreground cancellation.
 async function stopRun(
 	exec: Exec,
-	handle: string,
-	options: { force?: boolean; signal?: AbortSignal } = {},
+	handle: RunHandle,
+	options: { parentSessionId: SessionId; force?: boolean; signal?: AbortSignal },
 ): Promise<RunMetadata> {
-	const run = getRun(handle)
+	const run = ownedRun({ handle, parentSessionId: options.parentSessionId })
 
 	if (run.stoppedAt) return run
 	const { signal } = options
@@ -277,7 +291,7 @@ async function stopRun(
 			while (!stopAcknowledged(run)) {
 				signal?.throwIfAborted()
 
-				if (!seen.alive || getRun(handle).stoppedAt) break
+				if (!seen.alive || ownedRun({ handle, parentSessionId: run.parentSessionId }).stoppedAt) break
 
 				if (Date.now() >= deadline) {
 					throw new Error(
@@ -291,6 +305,12 @@ async function stopRun(
 		}
 	}
 
+	const current = ownedRun({ handle, parentSessionId: run.parentSessionId })
+
+	if (current.blockId !== run.blockId || current.relation !== run.relation) {
+		throw new Error("Child launch identity changed during stop")
+	}
+
 	try {
 		await closeBlock(exec, run.blockId, signal)
 	} catch (error) {
@@ -299,6 +319,8 @@ async function stopRun(
 	}
 
 	// Re-read after closing: the bridge may have updated its session path or final state.
+	ownedRun({ handle, parentSessionId: run.parentSessionId })
+
 	return markStopped(handle)
 }
 
@@ -307,14 +329,59 @@ async function settle(
 	initialRun: RunMetadata,
 	signal?: AbortSignal,
 	timeoutSec = 1800,
+	invocation?: CompletionInvocation,
 ): Promise<RunResult> {
 	if (!Number.isInteger(timeoutSec) || timeoutSec <= 0) throw new Error("timeoutSec must be a positive integer")
 	let run = initialRun
+	let messagingInstance: InstanceId | undefined
+
+	const messagingStatus = () => {
+		const status = workStatus(
+			{
+				sessionId: run.childSessionId,
+				sessionFile: run.sessionFile,
+				instanceId: messagingInstance,
+			},
+			undefined,
+			familyPolicy,
+		)
+
+		if (status.kind !== "unavailable" && status.instanceId) messagingInstance ??= status.instanceId
+
+		return status
+	}
+
+	const initialMessaging = messagingStatus()
 
 	// Read the transcript only when returning, never during startup/busy polling.
 	const finish = (status?: RunResult["status"], error?: string): RunResult => {
-		run = readMetadata(runDirectory(run.handle)) ?? run
+		run = ownedRun({ handle: run.handle, parentSessionId: initialRun.parentSessionId })
 		const session = SessionManager.open(run.sessionFile)
+		const fact = readCompletion(run)
+		const response = fact?.response
+
+		const onBranch =
+			response?.kind === "none" ||
+			(response?.kind === "response" && session.getBranch().some((entry) => entry.id === response.entryId))
+
+		if (!status && fact && fact.sessionFile === run.sessionFile && fact.childSessionId === run.childSessionId) {
+			const { answer } = completionAnswer(fact)
+
+			if (onBranch) {
+				const result = resultOf(
+					run,
+					fact.outcome,
+					answer,
+					session,
+					fact.error ?? (fact.outcome === "error" ? (run.error ?? `${run.handle} failed`) : undefined),
+				)
+
+				invocation?.terminal(fact)
+
+				return result
+			}
+		}
+
 		const latest = latestAssistant(session)
 		const answer = latest ? assistantText(latest) : ""
 
@@ -328,16 +395,33 @@ async function settle(
 		return outcome(run, latest, answer, session)
 	}
 
+	const interruptedResult = (status: Extract<WorkStatus, { kind: "interrupted" }>) => {
+		if (status.origin === "observer") return finish("error", status.reason)
+		const fact = readCompletion(run)
+
+		return fact && fact.outcome !== "success" && (run.state === "idle" || run.state === "error")
+			? finish()
+			: finish("error", status.reason)
+	}
+
+	if (initialMessaging.kind === "interrupted") return interruptedResult(initialMessaging)
 	const deadline = Date.now() + timeoutSec * 1000
 
 	while (Date.now() < deadline) {
-		run = readMetadata(runDirectory(run.handle)) ?? run
+		run = ownedRun({ handle: run.handle, parentSessionId: initialRun.parentSessionId })
 		assertNotStopped(run)
 
 		// Waiting observes the child; the caller decides whether cancellation also stops it.
 		if (signal?.aborted) return finish("aborted")
 
-		if (run.state === "error") return finish("error", run.error ?? `${run.handle} failed`)
+		const beforeInspection = messagingStatus()
+
+		if (beforeInspection.kind === "interrupted") return interruptedResult(beforeInspection)
+
+		if (run.state === "error" && beforeInspection.kind !== "pending") {
+			return readCompletion(run) ? finish() : finish("error", run.error ?? `${run.handle} failed`)
+		}
+
 		let alive: boolean
 
 		try {
@@ -349,13 +433,26 @@ async function settle(
 		}
 
 		// The bridge may finish or switch sessions during the asynchronous liveness query.
-		run = readMetadata(runDirectory(run.handle)) ?? run
-
-		if (run.state === "error") return finish("error", run.error ?? `${run.handle} failed`)
+		run = ownedRun({ handle: run.handle, parentSessionId: initialRun.parentSessionId })
 
 		if (!alive || run.state === "exited") return finish("error", `${run.handle} exited before finishing`)
 
-		if (run.hasStarted && run.state === "idle" && !inboxPending(run.handle)) return finish()
+		const messaging = messagingStatus()
+
+		if (messaging.kind === "interrupted") return interruptedResult(messaging)
+
+		if (run.state === "error" && messaging.kind !== "pending") {
+			return readCompletion(run) ? finish() : finish("error", run.error ?? `${run.handle} failed`)
+		}
+
+		if (run.hasStarted && run.state === "idle" && messaging.kind !== "pending") {
+			if (messaging.kind === "unavailable" && run.relation) {
+				return finish("error", "Session messaging receiver is unavailable; delivery outcome unknown")
+			}
+
+			return finish()
+		}
+
 		await new Promise((resolveDelay) => setTimeout(resolveDelay, 500))
 	}
 
@@ -367,7 +464,8 @@ async function spawn(
 	pi: ParentHost,
 	ctx: ParentContext,
 	params: SpawnParameters,
-	signal?: AbortSignal,
+	signal: AbortSignal | undefined,
+	invocation: CompletionInvocation,
 ): Promise<RunMetadata> {
 	const provider = params.provider ?? ctx.model?.provider
 	const model = params.model ?? ctx.model?.id
@@ -385,14 +483,19 @@ async function spawn(
 		...getChildPolicyArgs(pi.events),
 	]
 
-	const prepared = prepareRun()
+	const parentSessionId = sessionIdSchema.parse(ctx.sessionManager.getSessionId())
+	const prepared = prepareRun(parentSessionId)
+
+	if (!params.background) invocation.reserve(prepared.handle)
 
 	const draft: Omit<RunMetadata, "blockId"> = {
 		version: 1,
 		accountingVersion: 1,
 		handle: prepared.handle,
-		parentSessionId: ctx.sessionManager.getSessionId(),
+		relation: prepared.relation,
+		parentSessionId,
 		sessionFile: prepared.sessionFile,
+		launchSessionFile: prepared.sessionFile,
 		cwd,
 		provider,
 		model,
@@ -470,23 +573,35 @@ function choose(ui: Pick<ExtensionContext["ui"], "custom">, items: SelectItem[])
 }
 
 export default function (pi: ExtensionAPI) {
+	const delivery = acquireDelivery(pi)
+
+	if (!delivery.claim("subagents")) return
+	delivery.setFamilyPolicy(familyPolicy)
 	const childRun = process.env.PI_SUBAGENT_RUN_DIR
 
-	if (childRun) {
+	if (childRun && isManagedChildLaunch(childRun, process.argv.slice(2), process.cwd())) {
 		installBridge(pi, childRun)
+		installPrivateChild(pi, childRun, delivery)
 
 		return
 	}
 
-	installParent(pi)
+	installParent(pi, undefined, delivery)
 }
 
-export function installParent(pi: ParentHost, programStatus = new ProgramStatusReporter()): void {
+export function installParent(
+	pi: ParentHost,
+	programStatus = new ProgramStatusReporter(),
+	delivery?: FamilyDelivery,
+): void {
 	const exec: Exec = (command, args, signal) => pi.exec(command, args, signal ? { signal } : {})
 	let widgetTimer: ReturnType<typeof setInterval> | undefined
 	let widgetContext: ParentContext | undefined
 	let refreshingWidget = false
 	const accounting = new UsageAccounting(pi)
+	const completions = new CompletionCoordinator(pi, delivery)
+	let completionTimer: ReturnType<typeof setInterval> | undefined
+	let lastCompletionError: string | undefined
 	let accountingTimer: ReturnType<typeof setInterval> | undefined
 	let lastAccountingError: string | undefined
 
@@ -498,7 +613,7 @@ export function installParent(pi: ParentHost, programStatus = new ProgramStatusR
 
 		try {
 			const statuses = await Promise.all(
-				listRuns(ctx.sessionManager.getSessionId()).map(async (run) => ({
+				listRuns(sessionIdSchema.parse(ctx.sessionManager.getSessionId())).map(async (run) => ({
 					run,
 					...(await displayStatus(exec, run)),
 				})),
@@ -508,7 +623,7 @@ export function installParent(pi: ParentHost, programStatus = new ProgramStatusR
 			programStatus.sync(
 				statuses.map(({ run, state }) => ({
 					run,
-					state: state === "idle" && inboxPending(run.handle) ? "busy" : state,
+					state,
 				})),
 			)
 
@@ -556,6 +671,22 @@ export function installParent(pi: ParentHost, programStatus = new ProgramStatusR
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
+		completions.start(ctx)
+		lastCompletionError = undefined
+
+		if (completionTimer) clearInterval(completionTimer)
+		completionTimer = setInterval(() => {
+			try {
+				completions.scan()
+				lastCompletionError = undefined
+			} catch (error) {
+				const reason = `Subagent completion scan failed: ${String(error)}`
+
+				if (reason !== lastCompletionError) pi.appendEntry("session-message-error", reason)
+				lastCompletionError = reason
+			}
+		}, 200)
+		completionTimer.unref()
 		widgetContext = undefined
 
 		if (widgetTimer) clearInterval(widgetTimer)
@@ -580,7 +711,7 @@ export function installParent(pi: ParentHost, programStatus = new ProgramStatusR
 		}, 5000)
 		accountingTimer.unref()
 
-		for (const run of listRuns(ctx.sessionManager.getSessionId())) {
+		for (const run of listRuns(sessionIdSchema.parse(ctx.sessionManager.getSessionId()))) {
 			if (!run.suspended) continue
 
 			try {
@@ -604,7 +735,14 @@ export function installParent(pi: ParentHost, programStatus = new ProgramStatusR
 				}
 
 				clearStopSignals(run)
-				const starting = updateMetadata(runDirectory(run.handle), { state: "starting" }, ["error"]) ?? run
+
+				const starting = updateMetadata(
+					runDirectory(run.handle),
+					{ state: "starting", launchSessionFile: run.sessionFile },
+					["error"],
+				)
+
+				if (!starting) throw new Error(`Cannot resume: metadata missing for ${run.handle}`)
 				const blockId = await newBlock(exec, run.cwd, run.handle, launchCommand(starting))
 				updateMetadata(runDirectory(run.handle), { blockId, suspended: false })
 			} catch (error) {
@@ -631,6 +769,10 @@ export function installParent(pi: ParentHost, programStatus = new ProgramStatusR
 	})
 
 	pi.on("session_shutdown", async (event, ctx) => {
+		completions.stop()
+
+		if (completionTimer) clearInterval(completionTimer)
+		completionTimer = undefined
 		accounting.releaseReservations(ctx)
 
 		if (accountingTimer) clearInterval(accountingTimer)
@@ -651,7 +793,7 @@ export function installParent(pi: ParentHost, programStatus = new ProgramStatusR
 
 		const failures: Error[] = []
 
-		for (const run of listRuns(ctx.sessionManager.getSessionId())) {
+		for (const run of listRuns(sessionIdSchema.parse(ctx.sessionManager.getSessionId()))) {
 			try {
 				const seen = await readProcess(exec, run.blockId)
 
@@ -675,14 +817,14 @@ export function installParent(pi: ParentHost, programStatus = new ProgramStatusR
 	})
 
 	registerCommand(pi, exec)
-	registerTools(pi, exec, accounting)
+	registerTools(pi, exec, accounting, completions, delivery)
 }
 
 function registerCommand(pi: ParentHost, exec: Exec): void {
 	pi.registerCommand("subagent", {
 		description: "Restore and focus a subagent spawned by this session",
 		handler: async (_args, ctx) => {
-			const runs = listRuns(ctx.sessionManager.getSessionId())
+			const runs = listRuns(sessionIdSchema.parse(ctx.sessionManager.getSessionId()))
 			const items: SelectItem[] = []
 
 			for (const run of runs) {
@@ -708,32 +850,51 @@ function registerCommand(pi: ParentHost, exec: Exec): void {
 			const selected = await choose(ctx.ui, items)
 
 			if (!selected) return
-			const run = getRun(selected)
+			const run = getRun(runHandleSchema.parse(selected))
 			await showBlock(exec, run.blockId)
 		},
 	})
 }
 
-function registerTools(pi: ParentHost, exec: Exec, accounting: UsageAccounting): void {
-	// Keep provenance outside model-selected codemode output. All subagent tools can
-	// deliver pending background/shutdown usage, but never return cumulative charges.
-	const registerTool: ParentHost["registerTool"] = (tool) =>
+type InternalTool<Params extends TSchema, Result extends JsonValue> = Omit<SubagentTool<Params, Result>, "execute"> & {
+	execute(
+		...args: [...Parameters<SubagentTool<Params, Result>["execute"]>, CompletionInvocation]
+	): ReturnType<SubagentTool<Params, Result>["execute"]>
+}
+
+function registerTools(
+	pi: ParentHost,
+	exec: Exec,
+	accounting: UsageAccounting,
+	completions: CompletionCoordinator,
+	delivery?: FamilyDelivery,
+): void {
+	const registerTool = <Params extends TSchema, Result extends JsonValue>(tool: InternalTool<Params, Result>) =>
 		pi.registerTool({
 			...tool,
 			async execute(id, params, signal, update, ctx) {
-				let result
+				delivery?.assertContext(ctx)
+				const invocation = completions.invocation(ctx)
 
 				try {
-					result = await tool.execute(id, params, signal, update, ctx)
+					let result
+
+					try {
+						result = await tool.execute(id, params, signal, update, ctx, invocation)
+					} finally {
+						accounting.reconcile(ctx, tool.name)
+					}
+
+					const usage = accounting.charge(ctx, id)
+
+					if (usage) result.usage = usage
+
+					if (!signal?.aborted) invocation.commit()
+
+					return result
 				} finally {
-					accounting.reconcile(ctx, tool.name)
+					invocation.release()
 				}
-
-				const usage = accounting.charge(ctx, id)
-
-				if (usage) result.usage = usage
-
-				return result
 			},
 		})
 
@@ -744,8 +905,12 @@ function registerTools(pi: ParentHost, exec: Exec, accounting: UsageAccounting):
 		exposure: "codemode",
 		parameters: Type.Object({ handle: Type.String({ minLength: 1 }), name: nameParameter }),
 		outputSchema: Type.Object({ handle: Type.String(), name: Type.String() }),
-		async execute(_id, params) {
-			const run = getRun(params.handle)
+		async execute(_id, params, _signal, _update, ctx) {
+			const run = ownedRun({
+				handle: runHandleSchema.parse(params.handle),
+				parentSessionId: sessionIdSchema.parse(ctx.sessionManager.getSessionId()),
+			})
+
 			const name = normalizeRunName(params.name)
 			const updated = updateMetadata(runDirectory(run.handle), { name })
 
@@ -772,7 +937,7 @@ function registerTools(pi: ParentHost, exec: Exec, accounting: UsageAccounting):
 		outputSchema: listSchema,
 		async execute(_id, params, signal, _onUpdate, ctx) {
 			const runs = await Promise.all(
-				listRuns(ctx.sessionManager.getSessionId(), params).map(async (run) => {
+				listRuns(sessionIdSchema.parse(ctx.sessionManager.getSessionId()), params).map(async (run) => {
 					const item: Static<typeof listSchema>["runs"][number] = {
 						handle: run.handle,
 						blockId: run.blockId,
@@ -805,19 +970,21 @@ function registerTools(pi: ParentHost, exec: Exec, accounting: UsageAccounting):
 	registerTool({
 		name: "agent_spawn",
 		label: "Spawn agent",
-		description: "Launch a persistent external Pi child in a minimized floating terminal in Pi’s Rex window.",
+		description:
+			"Launch a persistent private child in Pi's Rex window. Waits for a result by default. Background completion wakes an idle parent. Busy parents receive it after their current work. The child does not join a public pool.",
 		promptGuidelines: [
-			"Spawning a new child for one-off work is fine. Read its result, then call agent_stop when no follow-up work is needed.",
-			"Children persist after completion in either mode. Neither a successful spawn result nor agent_wait stops the child.",
-			"With background omitted or false, cancelling agent_spawn closes the child but preserves its transcript. Its 1800-second wait timeout leaves the child running; use agent_wait or agent_stop afterward.",
-			"Keep an idle child alive only when concrete follow-up work is expected. It retains its conversation history; use agent_send for that follow-up, then stop it afterward.",
+			"Spawning for one-off work is fine. Read the result, then stop the child when no follow-up work is needed.",
+			"Children persist after completion in either mode. A successful result does not stop the child.",
+			"With background omitted or false, cancelling agent_spawn closes the child but preserves its transcript. Its 1800-second wait timeout leaves the child running.",
+			"Keep an idle child alive only for planned follow-up work. It retains its history. Use subagent tools with its handle, not public session IDs, to communicate.",
+			"A returned terminal result consumes its completion. Do not wait for a duplicate notice. Print results you need from codemode. Discarding a result or throwing later does not undo consumption.",
 			"Children survive /reload. Parent shutdown suspends running children, and resuming the parent relaunches them with their history. Explicitly stopped children retain their files but never auto-resume.",
 		],
 		exposure: "codemode",
 		parameters: spawnParameters,
 		outputSchema: spawnSchema,
-		async execute(_id, params, signal, _onUpdate, ctx) {
-			const run = await spawn(exec, pi, ctx, params, signal)
+		async execute(_id, params, signal, _onUpdate, ctx, invocation) {
+			const run = await spawn(exec, pi, ctx, params, signal, invocation)
 
 			if (params.background) {
 				const body: BackgroundResult = {
@@ -834,9 +1001,9 @@ function registerTools(pi: ParentHost, exec: Exec, accounting: UsageAccounting):
 			}
 
 			try {
-				return settledResult(await settle(exec, run, signal))
+				return settledResult(await settle(exec, run, signal, 1800, invocation))
 			} finally {
-				if (signal?.aborted) await stopRun(exec, run.handle)
+				if (signal?.aborted) await stopRun(exec, run.handle, { parentSessionId: run.parentSessionId })
 			}
 		},
 	})
@@ -844,9 +1011,11 @@ function registerTools(pi: ParentHost, exec: Exec, accounting: UsageAccounting):
 	registerTool({
 		name: "agent_send",
 		label: "Message agent",
-		description: "Prompt an idle child, steer active work, or queue a follow-up.",
+		description:
+			"Send private delegated input to this session's child. The message remains visible. Use its handle, not a session ID. Publication does not prove receipt or processing.",
 		promptGuidelines: [
 			"Idle children start a new turn with their existing history. Busy children receive steering by default; followUp: true queues another turn after the current work finishes.",
+			"Answer child questions with agent_send({ handle, message }). Do not acknowledge acknowledgements. The child receives a custom message under existing parent authority, not new human input. This message bypasses input hooks.",
 		],
 		exposure: "codemode",
 		parameters: Type.Object({
@@ -855,16 +1024,40 @@ function registerTools(pi: ParentHost, exec: Exec, accounting: UsageAccounting):
 			followUp: Type.Optional(Type.Boolean()),
 		}),
 		outputSchema: handleSchema,
-		async execute(_id, params) {
-			const run = getRun(params.handle)
+		async execute(_id, params, signal, _update, ctx) {
+			const identity = {
+				handle: runHandleSchema.parse(params.handle),
+				parentSessionId: sessionIdSchema.parse(ctx.sessionManager.getSessionId()),
+			}
+
+			let run = ownedRun(identity)
 			assertNotStopped(run)
-			const seen = await readProcess(exec, run.blockId)
-			assertNotStopped(getRun(run.handle))
+			const initial = run
+			const seen = await readProcess(exec, run.blockId, signal)
+			run = ownedRun(identity)
+			assertNotStopped(run)
+
+			if (
+				run.blockId !== initial.blockId ||
+				run.relation !== initial.relation ||
+				run.childSessionId !== initial.childSessionId ||
+				run.sessionFile !== initial.sessionFile
+			) {
+				throw new Error("Child identity changed during process inspection")
+			}
 
 			if (stopRequested(run)) throw new Error(`${run.handle} is stopping; retry agent_stop or use force: true`)
 
 			if (!seen.alive) throw new Error(`${run.handle} is not running`)
-			enqueue(run.handle, params.message, params.followUp ?? false)
+			signal?.throwIfAborted()
+
+			if (!delivery || !run.relation || !run.childSessionId) throw new Error("Private child delivery is not ready")
+			delivery.send(run.childSessionId, params.message, params.followUp ? "followUp" : "steer", {
+				kind: "family",
+				relation: run.relation,
+				handle: run.handle,
+				direction: "delegate",
+			})
 
 			return toolResult({ handle: run.handle }, `Sent ${runDisplayName(run)}`)
 		},
@@ -875,9 +1068,10 @@ function registerTools(pi: ParentHost, exec: Exec, accounting: UsageAccounting):
 		label: "Wait for agent",
 		description: "Wait for a child's current work to finish and return its result. Defaults to a 1800-second timeout.",
 		promptGuidelines: [
-			"A completed wait does not stop the child. Read its result, then use agent_send for concrete follow-up work or agent_stop when it is no longer needed.",
-			"Cancelling or timing out agent_wait stops only the wait, not the child. Use agent_stop to terminate the child explicitly.",
-			"agent_wait is for unfinished or idle children, not stopped archives. After stopping, read the retained sessionFile; agent_list with includeStopped finds it.",
+			"A completed wait does not stop the child. Read its result, then send concrete follow-up work or stop it when no longer needed.",
+			"Cancelling or timing out agent_wait stops only the wait, not the child, and does not consume a completion. Stop the child explicitly to terminate it.",
+			"agent_wait is for unfinished or idle children, not stopped archives. After stopping, read the retained sessionFile.",
+			"An active wait defers completion notices. A returned terminal result consumes its exact completion, even if codemode discards it or fails later. Print the result when needed. A child may ask and yield; a blocked parent cannot answer immediately.",
 			"The structured usage is session-cumulative, not a new charge. Per-source usage and model attribution are persisted independently in the parent session.",
 		],
 		exposure: "codemode",
@@ -886,8 +1080,15 @@ function registerTools(pi: ParentHost, exec: Exec, accounting: UsageAccounting):
 			timeoutSec: Type.Optional(Type.Integer({ minimum: 1, default: 1800 })),
 		}),
 		outputSchema: runResultSchema,
-		async execute(_id, params, signal) {
-			return settledResult(await settle(exec, getRun(params.handle), signal, params.timeoutSec))
+		async execute(_id, params, signal, _update, ctx, invocation) {
+			const run = ownedRun({
+				handle: runHandleSchema.parse(params.handle),
+				parentSessionId: sessionIdSchema.parse(ctx.sessionManager.getSessionId()),
+			})
+
+			invocation.reserve(run.handle)
+
+			return settledResult(await settle(exec, run, signal, params.timeoutSec, invocation))
 		},
 	})
 
@@ -897,7 +1098,7 @@ function registerTools(pi: ParentHost, exec: Exec, accounting: UsageAccounting):
 		description:
 			"Gracefully abort a child, wait for its response and usage to be saved, then close its Rex block. Set force to skip the wait and kill a stuck child. History is retained.",
 		promptGuidelines: [
-			"Stopping is repeatable and preserves history on disk. Use the returned sessionFile or agent_list with includeStopped to find it.",
+			"Stopping is repeatable and preserves history on disk. Use the returned sessionFile to read it.",
 			"Graceful stop times out after 10 seconds without killing the child. Retry or use force: true; force can lose unsaved response usage.",
 			"Explicitly stop every child when it is no longer needed; do not leave completed children running idle.",
 		],
@@ -907,8 +1108,20 @@ function registerTools(pi: ParentHost, exec: Exec, accounting: UsageAccounting):
 			force: Type.Optional(Type.Boolean({ description: "Kill immediately without waiting for usage to be saved." })),
 		}),
 		outputSchema: Type.Object({ handle: Type.String(), sessionFile: Type.String() }),
-		async execute(_id, params, signal) {
-			const run = await stopRun(exec, params.handle, { force: params.force, signal })
+		async execute(_id, params, signal, _update, ctx, invocation) {
+			const identity = {
+				handle: runHandleSchema.parse(params.handle),
+				parentSessionId: sessionIdSchema.parse(ctx.sessionManager.getSessionId()),
+			}
+
+			ownedRun(identity)
+			invocation.reserve(identity.handle)
+
+			const run = await stopRun(exec, identity.handle, {
+				parentSessionId: identity.parentSessionId,
+				force: params.force,
+				signal,
+			})
 
 			return toolResult(
 				{ handle: run.handle, sessionFile: run.sessionFile },

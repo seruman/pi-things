@@ -1,7 +1,23 @@
 import { existsSync } from "node:fs"
 import { homedir } from "node:os"
-import { resolve } from "node:path"
+import { join, resolve } from "node:path"
 import { parseArgs } from "@earendil-works/pi-coding-agent"
+import { metadataPath, readMetadata } from "./runs"
+
+export function isManagedChildLaunch(runDir: string, argv: string[], cwd: string): boolean {
+	const session = parseArgs(argv).session
+
+	if (!session) return false
+	const initial = join(runDir, "session.jsonl")
+	const metadata = readMetadata(runDir)
+	const launched = resolve(cwd, session)
+
+	if (!metadata) return !existsSync(metadataPath(runDir)) && launched === resolve(initial)
+
+	if (metadata.launchSessionFile !== undefined) return launched === resolve(metadata.launchSessionFile)
+
+	return launched === resolve(metadata.sessionFile) || launched === resolve(initial)
+}
 
 /** Inherit extension selection, not the parent's session, prompt, or execution mode. */
 export function parentExtensionFlags(argv: string[], cwd: string): string[] {

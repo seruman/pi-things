@@ -18,10 +18,13 @@ import {
 	createCodemodeExtension,
 } from "@earendil-works/pi-coding-agent"
 import { z } from "zod"
+import { SessionMailbox } from "../lib/session-delivery/mailbox"
+import { runHandleSchema, sessionIdSchema, type RunHandle } from "../lib/session-delivery/identity"
+import { publishCompletion, COMPLETION_MARKER } from "./completion"
 import { ATTRIBUTION_ENTRY, SOURCE_ENTRY, attributionSchema, sourceSchema } from "./accounting"
 import type { ParentHost } from "./contracts"
 import { installParent } from "./index"
-import { getRun, runDirectory, updateMetadata } from "./runs"
+import { getRun, readRunIdentity, runDirectory, updateMetadata } from "./runs"
 import { acknowledgeStop, stopRequested } from "./stop"
 import { childUsage, sumUsage } from "./usage"
 
@@ -37,7 +40,7 @@ test.each([false, true])(
 		process.env.REX_BLOCK = "block:parent"
 		process.env.PI_CODING_AGENT_DIR = root
 		process.env.REX_SESSION = "test-session"
-		const blocks = new Map<string, string>()
+		const blocks = new Map<string, RunHandle>()
 		let blockCounter = 0
 
 		const exec: ParentHost["exec"] = async (command, args) => {
@@ -68,7 +71,7 @@ test.each([false, true])(
 					.object({ options: z.object({ command: z.array(z.string()) }), label: z.string() })
 					.parse(JSON.parse(args[5]).layout.block)
 
-				const handle = payload.label.replace("subagent ", "")
+				const handle = runHandleSchema.parse(payload.label.replace("subagent ", ""))
 				const argv = payload.options.command
 				const path = z.string().parse(argv[argv.indexOf("--session") + 1])
 				const model = z.string().parse(argv[argv.indexOf("--model") + 1])
@@ -92,6 +95,17 @@ test.each([false, true])(
 						cost: { input: tokens / 100, output: 0, cacheRead: 0, cacheWrite: 0, total: tokens / 100 },
 					},
 				})
+				const identity = readRunIdentity(runDirectory(handle))
+
+				if (!identity) throw new Error("Missing prepared identity")
+				const childSessionId = sessionIdSchema.parse(child.getSessionId())
+				new SessionMailbox({ sessionId: childSessionId, sessionFile: path, cwd: root })
+				publishCompletion(identity, {
+					outcome: "success",
+					childSessionId,
+					sessionFile: path,
+					response: { kind: "response", entryId: z.string().parse(child.getLeafId()) },
+				})
 				const blockId = `block:${++blockCounter}`
 				blocks.set(blockId, handle)
 
@@ -107,7 +121,11 @@ test.each([false, true])(
 				const handle = blocks.get(args[3])
 
 				if (!handle) return { code: 1, stderr: `Error: block target "${args[3]}" not found`, stdout: "", killed: false }
-				updateMetadata(runDirectory(handle), { state: "idle", hasStarted: true })
+				updateMetadata(runDirectory(handle), {
+					state: "idle",
+					hasStarted: true,
+					childSessionId: sessionIdSchema.parse(SessionManager.open(getRun(handle).sessionFile).getSessionId()),
+				})
 				const run = getRun(handle)
 
 				// This fake child has already persisted its complete response above.
@@ -208,7 +226,7 @@ test.each([false, true])(
 						await tools.agent_stop({handle: run.handle});
 						return result.answer;
 					}));
-					text(answers);
+					text("results deliberately discarded");
 					${fails ? 'throw new Error("planned script failure");' : ""}
 				`
 							: "text((await tools.agent_list({includeStopped: true})).runs.length);"
@@ -244,6 +262,12 @@ test.each([false, true])(
 
 				await session.prompt("Review in parallel and print only answers")
 				const entries = session.sessionManager.getEntries()
+				expect(
+					entries.filter((entry) => entry.type === "custom" && entry.customType === COMPLETION_MARKER),
+				).toMatchObject([
+					{ data: { kind: "consumed", throughSequence: 1 } },
+					{ data: { kind: "consumed", throughSequence: 1 } },
+				])
 				const result = entries.find((entry) => entry.type === "message" && entry.message.role === "toolResult")
 				expect(result).toMatchObject({
 					type: "message",
@@ -290,7 +314,7 @@ test.each([false, true])(
 				expect(session.getSessionStats().cost).toBeCloseTo(0.17)
 				expect(blocks.size).toBe(0)
 
-				for (const source of sources) expect(getRun(source.handle).stoppedAt).toBeString()
+				for (const source of sources) expect(getRun(runHandleSchema.parse(source.handle)).stoppedAt).toBeString()
 				await session.prompt("List the retained histories")
 				expect(session.getSessionStats().tokens.total).toBe(19)
 				const persisted = SessionManager.open(z.string().parse(session.sessionManager.getSessionFile()))

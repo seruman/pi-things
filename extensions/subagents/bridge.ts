@@ -1,9 +1,13 @@
-import { existsSync, readFileSync, readdirSync, unlinkSync } from "node:fs"
-import { join } from "node:path"
+import { sessionIdSchema } from "../lib/session-delivery/identity"
 import { onShellLeashDenial } from "../shell-leash/denial"
 import type { BridgeContext, BridgeHost } from "./contracts"
-import { type RunMetadata, inboxDir, inboxMessageSchema, readMetadata, updateMetadata } from "./runs"
+import { publishCompletion, type CompletionSnapshot } from "./completion"
+import { type RunMetadata, readMetadata, readRunIdentity, updateMetadata } from "./runs"
 import { acknowledgeStop, clearStopAcknowledgement, stopAcknowledged, stopRequested } from "./stop"
+
+type BridgePatch = Partial<
+	Pick<RunMetadata, "sessionFiles" | "sessionFile" | "childSessionId" | "state" | "hasStarted" | "outcome" | "error">
+>
 
 function settledOutcome(ctx: BridgeContext): RunMetadata["outcome"] {
 	const entry = ctx.sessionManager
@@ -19,12 +23,31 @@ function settledOutcome(ctx: BridgeContext): RunMetadata["outcome"] {
 export function installBridge(pi: BridgeHost, runDir: string): void {
 	let current: BridgeContext | undefined
 	let timer: ReturnType<typeof setInterval> | undefined
-	let processing = false
 	let sessionName: string | undefined
 	let sessionPending = true
 	let hasStarted = false
 	let denial: string | undefined
 	let abortRequested = false
+	let responseBoundary: Set<string> | undefined
+	const earlyCompletions: CompletionSnapshot[] = []
+	let lastOutcome: RunMetadata["outcome"]
+
+	const flushCompletions = () => {
+		const run = readRunIdentity(runDir) ?? readMetadata(runDir)
+
+		if (!run) return
+
+		while (earlyCompletions.length) {
+			const fact = earlyCompletions[0]
+
+			if (!fact) break
+			publishCompletion(run, fact)
+			earlyCompletions.shift()
+		}
+	}
+
+	const update = (patch: BridgePatch, clear?: Parameters<typeof updateMetadata>[2]) =>
+		updateMetadata(runDir, patch, clear)
 
 	onShellLeashDenial(pi.events, (reason) => {
 		denial ??= reason
@@ -41,9 +64,9 @@ export function installBridge(pi: BridgeHost, runDir: string): void {
 
 		const sessionFile = current.sessionManager.getSessionFile() ?? metadata.sessionFile
 
-		const patch: Partial<RunMetadata> = {
+		const patch: BridgePatch = {
 			sessionFiles: [...new Set([...(metadata.sessionFiles ?? []), metadata.sessionFile, sessionFile])],
-			childSessionId: current.sessionManager.getSessionId(),
+			childSessionId: sessionIdSchema.parse(current.sessionManager.getSessionId()),
 			sessionFile,
 			state: current.isIdle() ? "idle" : "busy",
 		}
@@ -52,7 +75,8 @@ export function installBridge(pi: BridgeHost, runDir: string): void {
 
 		if (current.isIdle()) {
 			patch.outcome =
-				metadata.sessionFile === sessionFile ? (metadata.outcome ?? settledOutcome(current)) : settledOutcome(current)
+				lastOutcome ??
+				(metadata.sessionFile === sessionFile ? (metadata.outcome ?? settledOutcome(current)) : settledOutcome(current))
 		}
 
 		if (denial && current.isIdle()) {
@@ -60,10 +84,11 @@ export function installBridge(pi: BridgeHost, runDir: string): void {
 			patch.error = denial
 		}
 
-		const updated = updateMetadata(runDir, patch, patch.error ? ["suspended"] : ["suspended", "error"])
+		const updated = update(patch, patch.error ? ["suspended"] : ["suspended", "error"])
 
 		if (!updated) return false
 		sessionPending = false
+		flushCompletions()
 
 		return true
 	}
@@ -103,57 +128,9 @@ export function installBridge(pi: BridgeHost, runDir: string): void {
 		return true
 	}
 
-	// Upstream inbox processing with Zod validation.
-	const processInbox = (): void => {
-		if (processing || !current || !initializeSession()) return
-
-		if (processStop()) return
+	const poll = (): void => {
+		if (!current || !initializeSession() || processStop()) return
 		syncSessionName()
-		const directory = inboxDir(runDir)
-
-		if (!existsSync(directory)) return
-		processing = true
-
-		try {
-			for (const name of readdirSync(directory)
-				.filter((entry) => entry.endsWith(".json"))
-				.sort()) {
-				if (processStop()) return
-				const path = join(directory, name)
-				let payload: ReturnType<typeof inboxMessageSchema.parse>
-
-				try {
-					payload = inboxMessageSchema.parse(JSON.parse(readFileSync(path, "utf8")))
-				} catch (error) {
-					unlinkSync(path)
-					updateMetadata(runDir, { state: "error", error: error instanceof Error ? error.message : String(error) })
-					continue
-				}
-
-				updateMetadata(runDir, { state: "busy" }, ["error"])
-
-				try {
-					if (current.isIdle()) {
-						pi.sendUserMessage(payload.message)
-					} else {
-						pi.sendUserMessage(payload.message, {
-							deliverAs: payload.delivery === "followUp" ? "followUp" : "steer",
-						})
-					}
-
-					unlinkSync(path)
-				} catch (error) {
-					updateMetadata(runDir, {
-						state: current.isIdle() ? "idle" : "busy",
-						error: error instanceof Error ? error.message : String(error),
-					})
-
-					return
-				}
-			}
-		} finally {
-			processing = false
-		}
 	}
 
 	pi.on("session_start", (_event, ctx) => {
@@ -163,18 +140,19 @@ export function installBridge(pi: BridgeHost, runDir: string): void {
 
 		if (!timer) {
 			// Rex may start the child before the parent has written its metadata.
-			timer = setInterval(processInbox, 250)
+			timer = setInterval(poll, 250)
 			timer.unref()
 		}
 
-		processInbox()
+		poll()
 	})
 
 	pi.on("agent_start", (_event, ctx) => {
 		current = ctx
 		hasStarted = true
+		responseBoundary ??= new Set(ctx.sessionManager.getBranch().map((entry) => entry.id))
 		denial = undefined
-		updateMetadata(runDir, { state: "busy", hasStarted: true }, ["error"])
+		update({ state: "busy", hasStarted: true }, ["error"])
 		// Initial CLI prompts and already queued work can start after an idle poll.
 		// A stop request remains latched until the parent closes or resumes the child.
 		abortRequested = false
@@ -185,9 +163,31 @@ export function installBridge(pi: BridgeHost, runDir: string): void {
 		current = ctx
 
 		if (ctx.isIdle()) {
+			const entry = [...ctx.sessionManager.getBranch()]
+				.reverse()
+				.find(
+					(entry) => entry.type === "message" && entry.message.role === "assistant" && !responseBoundary?.has(entry.id),
+				)
+
+			const sessionFile = ctx.sessionManager.getSessionFile()
+			const outcome = denial ? "error" : event.aborted ? "aborted" : (settledOutcome(ctx) ?? "error")
+			lastOutcome = outcome
+
+			if (sessionFile) {
+				const snapshot: CompletionSnapshot = {
+					childSessionId: sessionIdSchema.parse(ctx.sessionManager.getSessionId()),
+					sessionFile,
+					outcome,
+					response: entry ? { kind: "response", entryId: entry.id } : { kind: "none" },
+				}
+
+				earlyCompletions.push(denial ? { ...snapshot, error: denial } : snapshot)
+			}
+
+			flushCompletions()
+			responseBoundary = undefined
 			// Publish only after cancellation settles, not while sibling tools may still be running.
-			updateMetadata(
-				runDir,
+			update(
 				denial
 					? { state: "error", error: denial, outcome: "error" }
 					: { state: "idle", outcome: event.aborted ? "aborted" : settledOutcome(ctx) },
@@ -198,12 +198,13 @@ export function installBridge(pi: BridgeHost, runDir: string): void {
 
 	pi.on("session_shutdown", (event) => {
 		current = undefined
+		responseBoundary = undefined
 
 		if (timer) {
 			clearInterval(timer)
 			timer = undefined
 		}
 
-		if (event.reason === "quit") updateMetadata(runDir, { state: "exited" })
+		if (event.reason === "quit") update({ state: "exited" })
 	})
 }

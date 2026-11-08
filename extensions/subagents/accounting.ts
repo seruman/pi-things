@@ -4,6 +4,7 @@ import { join } from "node:path"
 import { isDeepStrictEqual } from "node:util"
 import type { Usage } from "@earendil-works/pi-ai"
 import { z } from "zod"
+import { sessionIdSchema } from "../lib/session-delivery/identity"
 import type { ParentContext, ParentHost } from "./contracts"
 import { listRuns, runDirectory } from "./runs"
 import { sumUsage } from "./usage"
@@ -268,7 +269,7 @@ export class UsageAccounting {
 	}
 
 	reconcile(ctx: ParentContext, reason: string): void {
-		const parentSessionId = ctx.sessionManager.getSessionId()
+		const parentSessionId = sessionIdSchema.parse(ctx.sessionManager.getSessionId())
 		const ledger = this.ledger(ctx)
 
 		// Materialize confirmed links only after Pi has persisted its native result. A crash

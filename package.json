@@ -22,6 +22,8 @@
     "test:pi-safety": "bun --no-env-file test extensions/pi-safety/*.test.ts",
     "test:shell-leash": "bun test extensions/shell-leash/*.test.ts",
     "test:split-handoff": "bun test extensions/split-handoff.test.ts",
+    "test:session-messages": "bun --no-env-file test extensions/session-messages/*.test.ts",
+    "test:subagents": "bun --no-env-file test extensions/subagents/*.test.ts",
     "test:model-router": "bun --no-env-file test extensions/model-router/*.test.ts",
     "smoke:model-router": "bun --no-env-file run extensions/model-router/smoke.ts",
     "eval:model-router": "bun --no-env-file run extensions/model-router/evaluate.ts",
@@ -30,13 +32,15 @@
     "typecheck:pi-safety": "bunx tsc -p extensions/pi-safety/tsconfig.json",
     "typecheck:shell-leash": "bunx tsc -p extensions/shell-leash/tsconfig.json",
     "typecheck:subagents": "bunx tsc -p extensions/subagents/tsconfig.json",
+    "typecheck:session-messages": "bunx tsc -p extensions/session-messages/tsconfig.json",
     "typecheck:single-extensions": "bunx tsc -p extensions/tsconfig.json",
-    "typecheck": "bun run typecheck:web-tools && bun run typecheck:pi-safety && bun run typecheck:shell-leash && bun run typecheck:subagents && bun run typecheck:single-extensions && bun run typecheck:model-router"
+    "typecheck": "bun run typecheck:web-tools && bun run typecheck:pi-safety && bun run typecheck:shell-leash && bun run typecheck:subagents && bun run typecheck:single-extensions && bun run typecheck:model-router && bun run typecheck:session-messages"
   },
   "pi": {
     "extensions": [
       "./extensions/web-tools/index.ts",
       "./extensions/subagents/index.ts",
+      "./extensions/session-messages/index.ts",
       "./extensions/split-fork.ts",
       "./extensions/split-handoff.ts",
       "./extensions/goal.ts",

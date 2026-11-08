@@ -41,9 +41,7 @@ export interface BridgeContext extends Pick<ExtensionContext, "isIdle" | "abort"
 	sessionManager: Pick<ExtensionContext["sessionManager"], "getSessionId" | "getSessionFile" | "getBranch">
 }
 
-export interface BridgeHost extends Lifecycle<BridgeContext>, Pick<ExtensionAPI, "setSessionName" | "events"> {
-	sendUserMessage(message: string, options?: { deliverAs: "steer" | "followUp" }): void
-}
+export interface BridgeHost extends Lifecycle<BridgeContext>, Pick<ExtensionAPI, "setSessionName" | "events"> {}
 
 export type SubagentTool<Params extends TSchema, Result extends JsonValue> = Omit<
 	ToolDefinition<Params, Result>,

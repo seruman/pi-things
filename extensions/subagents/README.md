@@ -1,76 +1,27 @@
 # subagents
 
-Persistent Pi children in minimized floating terminals in Pi’s Rex window. Tools are available through codemode; `/subagent` restores and focuses an active child.
+Persistent Pi children in minimized Rex panes. `/subagent` opens a child pane.
 
-Requirements:
-
-- `rex` available in `PATH`, with floating-layer API support.
-- `REX_SESSION` and `REX_BLOCK` set; Pi’s block must be placed in a window.
+Needs `rex` on `PATH` and `REX_SESSION` / `REX_BLOCK` pointing to a pane in a Rex window.
 
 ## Tools
 
-### `agent_spawn`
+Parent tools are available through codemode.
 
-Launch a child. Waits for its first result unless `background: true`. Children stay alive until stopped.
+| Tool           | Use                                                                                                              |
+| -------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `agent_spawn`  | Start a child and wait for its answer. Use `background: true` to return immediately.                             |
+| `agent_send`   | Send to a child by handle. Wakes idle children or steers busy ones. `followUp: true` queues behind current work. |
+| `agent_wait`   | Wait for a child. Default timeout is 1800 seconds.                                                               |
+| `agent_stop`   | Stop a child and close its pane. `force: true` skips graceful shutdown.                                          |
+| `agent_list`   | List children. `includeStopped: true` includes retained histories.                                               |
+| `agent_rename` | Change the display name, not the handle.                                                                         |
 
-```ts
-agent_spawn({
-  prompt: string,
-  name?: string,
-  cwd?: string,
-  provider?: string,             // defaults to parent's provider
-  model?: string,                // defaults to parent's model
-  thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max",
-  tools?: "readonly" | string[],
-  excludeTools?: string[],
-  noTools?: "all" | "builtin",
-  background?: boolean,          // default false
-})
-```
+Children use `agent_reply` to message their parent.
 
-### `agent_send`
+## Checks
 
-Prompt an idle child or steer active work. Use `followUp` to queue another turn instead.
-
-```ts
-agent_send({
-  handle: string,
-  message: string,
-  followUp?: boolean,
-})
-```
-
-### `agent_wait`
-
-Wait for a result without stopping the child. Repeated waits do not double-count usage.
-
-```ts
-agent_wait({
-  handle: string,
-  timeoutSec?: number,            // default 1800
-})
-```
-
-### `agent_stop`
-
-Abort and save available usage before closing. Returns `{ handle, sessionFile }`, keeping history. After a 10-second timeout, retry or force-kill (unsaved usage may be lost).
-
-```ts
-agent_stop({ handle: string, force?: boolean })
-```
-
-### `agent_list`
-
-List this session’s children. Include stopped children to find retained histories.
-
-```ts
-agent_list({ includeStopped?: boolean })
-```
-
-### `agent_rename`
-
-Change a child’s display name without changing its handle.
-
-```ts
-agent_rename({ handle: string, name: string })
+```sh
+bun run test:subagents
+bun run typecheck:subagents
 ```

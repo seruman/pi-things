@@ -5,6 +5,7 @@ import { join } from "node:path"
 import type { ToolResultMessage, Usage } from "@earendil-works/pi-ai"
 import { SessionManager } from "@earendil-works/pi-coding-agent"
 import { z } from "zod"
+import { sessionIdSchema } from "../lib/session-delivery/identity"
 import {
 	ATTRIBUTION_ENTRY,
 	CHARGE_ENTRY,
@@ -81,7 +82,7 @@ function child(legacy = false) {
 	const metadata: RunMetadata = {
 		...prepared,
 		version: 1,
-		parentSessionId: "parent",
+		parentSessionId: sessionIdSchema.parse("parent"),
 		blockId: "block",
 		cwd: root,
 		provider: "launch-provider",
@@ -529,7 +530,7 @@ test("accounting preserves optional token fields and isolates foreign-parent run
 	c.session.appendUsage("custom", "provider", "model", part)
 	const foreign = child()
 	reply(foreign.session, 100)
-	updateMetadata(runDirectory(foreign.handle), { parentSessionId: "other-parent" })
+	updateMetadata(runDirectory(foreign.handle), { parentSessionId: sessionIdSchema.parse("other-parent") })
 	accounting.reconcile(ctx, "wait")
 	expect(accounting.charge(ctx, "list")).toEqual(part)
 	expect(records()).toHaveLength(1)
