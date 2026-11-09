@@ -75,7 +75,6 @@ function accessCompilationGroups(policy: Policy, rules: readonly FileAccessRule[
 function runtimeRule(rule: Policy["rules"][number]): readonly Rule[] {
 	switch (rule.kind) {
 		case "file-access":
-		case "snapshot":
 			return []
 		case "file":
 		case "file-except-processes":

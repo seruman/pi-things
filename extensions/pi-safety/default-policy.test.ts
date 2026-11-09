@@ -3,7 +3,7 @@ import assert from "node:assert/strict"
 import { execFileSync } from "node:child_process"
 import * as fs from "node:fs"
 import * as path from "node:path"
-import { createDefaultPolicy, createSnapshotPolicy } from "./default-policy"
+import { createDefaultPolicy } from "./default-policy"
 import { type EvaluationSubject, evaluatePolicy } from "./policy"
 import { unwrap } from "./result"
 import { emitSeatbelt } from "./seatbelt"
@@ -30,7 +30,6 @@ test("linked worktrees protect shared Git config and hooks and per-worktree conf
 			const paths = {
 				workspace: canonicalPath(workspace),
 				home: canonicalPath(path.join(root, "home")),
-				stateHome: canonicalPath(path.join(root, "state")),
 				piConfigDirectory: canonicalPath(path.join(root, "agent")),
 			}
 
@@ -118,7 +117,6 @@ test("a final shared denial constrains sandbox runtime capabilities", () => {
 				paths: {
 					workspace: canonicalPath(workspace),
 					home: canonicalPath(home),
-					stateHome: canonicalPath(stateHome),
 					piConfigDirectory: canonicalPath(piConfigDirectory),
 				},
 				additionalNoAccessPatterns: ["/dev/null"],
@@ -173,7 +171,6 @@ test("Nix daemon access is scoped to the canonical Nix executable", () => {
 				paths: {
 					workspace: canonicalPath(workspace),
 					home: canonicalPath(home),
-					stateHome: canonicalPath(stateHome),
 					piConfigDirectory: canonicalPath(piConfigDirectory),
 				},
 				additionalNoAccessPatterns: [],
@@ -209,7 +206,7 @@ test("Nix daemon access is scoped to the canonical Nix executable", () => {
 	})
 })
 
-test("every default access and snapshot declaration has an observable policy decision", () => {
+test("every default access declaration has an observable policy decision", () => {
 	withTestTempDirectory("default-policy-decisions-", (root) => {
 		const workspace = path.join(root, "workspace")
 		const home = path.join(root, "home")
@@ -225,7 +222,6 @@ test("every default access and snapshot declaration has an observable policy dec
 				paths: {
 					workspace: canonicalPath(workspace),
 					home: canonicalPath(home),
-					stateHome: canonicalPath(stateHome),
 					piConfigDirectory: canonicalPath(piConfigDirectory),
 				},
 				additionalNoAccessPatterns: ["custom-secrets/**"],
@@ -353,53 +349,9 @@ test("every default access and snapshot declaration has an observable policy dec
 			path.join(workspace, "service.env"),
 			path.join(workspace, "nested", "service.env.production"),
 			path.join(workspace, "custom-secrets", "token"),
-			path.join(stateHome, "pi-safety", "snapshots", "project", "snapshot", "protected", "token"),
 		]) {
 			assert.equal(access(pathname, "read"), "deny", pathname)
 			assert.equal(access(pathname, "write"), "deny", pathname)
-		}
-
-		const snapshotOnlyPolicy = unwrap(createSnapshotPolicy(canonicalPath(workspace)))
-
-		const excludedComponents = [
-			".git",
-			".pi",
-			".wb",
-			"node_modules",
-			"dist",
-			"build",
-			"target",
-			".next",
-			".cache",
-			"coverage",
-			"__pycache__",
-			".pytest_cache",
-			"vendor",
-			".venv",
-			"venv",
-			".tox",
-			".terraform",
-			".gradle",
-			".direnv",
-			".mypy_cache",
-			".ruff_cache",
-		] as const
-
-		for (const component of excludedComponents) {
-			for (const candidate of [path.join(workspace, component), path.join(workspace, "nested", component, "file")]) {
-				assert.equal(
-					evaluatePolicy(policy, { kind: "snapshot", path: canonicalPath(candidate) }).disposition,
-					"exclude",
-				)
-				assert.equal(
-					evaluatePolicy(snapshotOnlyPolicy, { kind: "snapshot", path: canonicalPath(candidate) }).disposition,
-					"exclude",
-				)
-			}
-		}
-
-		for (const candidate of [path.join(workspace, "src", "index.ts"), path.join(workspace, ".env")]) {
-			assert.equal(evaluatePolicy(policy, { kind: "snapshot", path: canonicalPath(candidate) }).disposition, "include")
 		}
 	})
 })
@@ -442,7 +394,6 @@ test("the default policy expresses shared restrictions and sandbox capabilities 
 				paths: {
 					workspace: canonicalPath(workspace),
 					home: canonicalPath(home),
-					stateHome: canonicalPath(stateHome),
 					piConfigDirectory: canonicalPath(piConfigDirectory),
 				},
 				additionalNoAccessPatterns: [],

@@ -9,7 +9,6 @@ import {
 	type Policy,
 	type PolicyRule,
 	definePolicy,
-	excludeFromSnapshots,
 	executable,
 	noAccess,
 	pattern,
@@ -42,7 +41,6 @@ export function testPolicy(
 			readonly executable: CanonicalExecutable
 			readonly patterns: readonly PathPattern[]
 		}[]
-		readonly snapshotExclusions?: readonly PathPattern[]
 		readonly additionalRules?: readonly PolicyRule[]
 	} = {},
 ): Policy {
@@ -56,7 +54,6 @@ export function testPolicy(
 		...(options.executableWrites ?? []).flatMap((write) =>
 			write.patterns.map((value) => readWrite(executable(write.executable), pattern(value))),
 		),
-		...(options.snapshotExclusions ?? []).map((value) => excludeFromSnapshots(pattern(value))),
 		...(options.additionalRules ?? []),
 	]
 

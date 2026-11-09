@@ -10,17 +10,16 @@ export interface PolicyDisplayEntry {
 }
 
 export function describeSeatbeltPolicy(policy: Policy): readonly PolicyDisplayEntry[] {
-	return policy.rules.flatMap((rule, index) => {
-		if (rule.kind === "snapshot") return []
+	return policy.rules.map((rule, index) => {
 		const readable = describeReadableRule(rule, policy)
 
-		return [{ number: index + 1, ...readable, dsl: describeRule(rule) }]
+		return { number: index + 1, ...readable, dsl: describeRule(rule) }
 	})
 }
 
 export function describePolicy(policy: Policy): string {
 	const lines = [
-		"Pi Safety policy (ordered; file and snapshot rules are last-match-wins)",
+		"Pi Safety policy (ordered; file rules are last-match-wins)",
 		`workspace ${quote(policy.workspaceRoot)}`,
 		`home      ${quote(policy.homeRoot)}`,
 		"",
@@ -33,10 +32,7 @@ export function describePolicy(policy: Policy): string {
 	return lines.join("\n")
 }
 
-function describeReadableRule(
-	rule: Exclude<PolicyRule, { readonly kind: "snapshot" }>,
-	policy: Policy,
-): Omit<PolicyDisplayEntry, "number" | "dsl"> {
+function describeReadableRule(rule: PolicyRule, policy: Policy): Omit<PolicyDisplayEntry, "number" | "dsl"> {
 	switch (rule.kind) {
 		case "file-access":
 			return {
@@ -88,8 +84,6 @@ function describeRule(rule: PolicyRule): string {
 	switch (rule.kind) {
 		case "file-access":
 			return `file ${describeSubject(rule.subject)} ${rule.access} ${describeSelector(rule.selector)}`
-		case "snapshot":
-			return `snapshot ${rule.disposition} ${describeSelector(rule.selector)}`
 		case "file":
 			return `runtime file ${rule.effect} operations=${list(rule.operations)} match=${list(rule.matchers.map(describePathMatcher))}${describeOptionalProcess(rule.process)}`
 		case "file-except-processes":
@@ -192,9 +186,7 @@ function describeSubject(subject: RuleSubject): string {
 	}
 }
 
-function describeSelector(
-	selector: Extract<PolicyRule, { readonly kind: "file-access" | "snapshot" }>["selector"],
-): string {
+function describeSelector(selector: Extract<PolicyRule, { readonly kind: "file-access" }>["selector"]): string {
 	switch (selector.kind) {
 		case "file":
 		case "tree":

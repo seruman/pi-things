@@ -16,9 +16,7 @@ const ENABLED = "enabled"
 
 const DISABLED = "disabled"
 
-export type SafetyFeature = "protection" | "checkpoints"
-
-export function buildSafetySettings(protection: boolean, checkpoints: boolean): SettingItem[] {
+export function buildSafetySettings(protection: boolean): SettingItem[] {
 	return [
 		{
 			id: "protection",
@@ -26,13 +24,6 @@ export function buildSafetySettings(protection: boolean, checkpoints: boolean): 
 			currentValue: protection ? ENABLED : DISABLED,
 			values: [DISABLED, ENABLED],
 			description: "Toggle Seatbelt for model-issued Bash and path guards for built-in read, write, and edit tools.",
-		},
-		{
-			id: "checkpoints",
-			label: "APFS checkpoints",
-			currentValue: checkpoints ? ENABLED : DISABLED,
-			values: [DISABLED, ENABLED],
-			description: "Create one lazy project checkpoint per mutating agent turn, independently of Seatbelt.",
 		},
 	]
 }
@@ -46,9 +37,8 @@ function formatPolicyDetail(entry: PolicyDisplayEntry | undefined, theme: Safety
 export async function showPiSafetySettings(
 	context: ExtensionContext,
 	protection: boolean,
-	checkpoints: boolean,
 	policy: readonly PolicyDisplayEntry[],
-	onChange: (feature: SafetyFeature, enabled: boolean) => void,
+	onChange: (enabled: boolean) => void,
 ): Promise<void> {
 	if (context.mode !== "tui") {
 		context.ui.notify("/pi-safety requires TUI mode", "error")
@@ -63,7 +53,6 @@ export async function showPiSafetySettings(
 			() => tui.requestRender(),
 			() => done(undefined),
 			protection,
-			checkpoints,
 			policy,
 			onChange,
 		),
@@ -76,15 +65,14 @@ export function createSafetySettingsComponent(
 	requestRender: () => void,
 	done: () => void,
 	protection: boolean,
-	checkpoints: boolean,
 	policy: readonly PolicyDisplayEntry[],
-	onChange: (feature: SafetyFeature, enabled: boolean) => void,
+	onChange: (enabled: boolean) => void,
 ) {
 	const settingsView = new Container()
 	settingsView.addChild(new Text(theme.fg("accent", theme.bold("Pi Safety — session settings")), 1, 0))
 
 	const settings = new SettingsList(
-		buildSafetySettings(protection, checkpoints),
+		buildSafetySettings(protection),
 		3,
 		{
 			label: (text, selected) => (selected ? theme.fg("accent", text) : text),
@@ -94,8 +82,8 @@ export function createSafetySettingsComponent(
 			hint: (text) => theme.fg("dim", text),
 		},
 		(id, value) => {
-			if (id !== "protection" && id !== "checkpoints") return
-			onChange(id, value === ENABLED)
+			if (id !== "protection") return
+			onChange(value === ENABLED)
 		},
 		done,
 	)

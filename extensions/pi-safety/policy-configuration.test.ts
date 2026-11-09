@@ -8,7 +8,7 @@ import { unwrap } from "./result"
 import { withTestTempDirectory } from "./test-temp-directory"
 import { authorizeBuiltinToolCall } from "./tool-authorization"
 
-test("initial policy protects ambient credentials, project secrets, snapshots, and Pi state", () => {
+test("initial policy protects ambient credentials, project secrets, and Pi state", () => {
 	withTestTempDirectory("policy-configuration-", (root) => {
 		const workspace = path.join(root, "workspace")
 		const home = path.join(root, "home")
@@ -16,9 +16,8 @@ test("initial policy protects ambient credentials, project secrets, snapshots, a
 		const piConfigDir = path.join(root, "pi-agent")
 		const ssh = path.join(home, ".ssh")
 		const aws = path.join(home, ".aws")
-		const protectedSnapshot = path.join(stateHome, "pi-safety", "snapshots", "project-1", "snapshot-1", "protected")
 
-		for (const directory of [workspace, home, stateHome, piConfigDir, ssh, aws, protectedSnapshot]) {
+		for (const directory of [workspace, home, stateHome, piConfigDir, ssh, aws]) {
 			fs.mkdirSync(directory, { recursive: true })
 		}
 
@@ -28,9 +27,8 @@ test("initial policy protects ambient credentials, project secrets, snapshots, a
 		const envFile = path.join(workspace, "nested", ".env.local")
 		const configuredSecret = path.join(workspace, "secrets", "custom.txt")
 		const piAuth = path.join(piConfigDir, "auth.json")
-		const snapshotSecret = path.join(protectedSnapshot, "nested", "token.txt")
 
-		for (const file of [privateKey, publicKey, credentials, envFile, configuredSecret, piAuth, snapshotSecret]) {
+		for (const file of [privateKey, publicKey, credentials, envFile, configuredSecret, piAuth]) {
 			fs.mkdirSync(path.dirname(file), { recursive: true })
 			fs.writeFileSync(file, "x")
 		}
@@ -39,7 +37,6 @@ test("initial policy protects ambient credentials, project secrets, snapshots, a
 			parseInitialSafetyConfiguration({
 				cwd: workspace,
 				home,
-				stateHome,
 				piConfigDir,
 				additionalNoAccessPatterns: ["secrets/custom.txt"],
 			}),
@@ -63,11 +60,6 @@ test("initial policy protects ambient credentials, project secrets, snapshots, a
 		const publicRead = authorizeBuiltinToolCall("read", { path: publicKey }, policy)
 		assert.equal(publicRead.ok, true)
 
-		const protectedRead = authorizeBuiltinToolCall("read", { path: snapshotSecret }, policy)
-		assert.equal(protectedRead.ok, false)
-
-		if (!protectedRead.ok) assert.equal(protectedRead.error.kind, "access-denied")
-
 		for (const protectedWrite of [
 			path.join(workspace, ".git", "hooks", "post-commit"),
 			path.join(workspace, ".mcp.json"),
@@ -80,11 +72,7 @@ test("initial policy protects ambient credentials, project secrets, snapshots, a
 			if (!result.ok) assert.equal(result.error.kind, "access-denied")
 		}
 
-		for (const immutable of [
-			path.join(stateHome, "pi-safety", "snapshots", "new"),
-			path.join(piConfigDir, "settings.json"),
-			path.join(workspace, ".pi", "pi-safety.json"),
-		]) {
+		for (const immutable of [path.join(piConfigDir, "settings.json"), path.join(workspace, ".pi", "pi-safety.json")]) {
 			const result = authorizeBuiltinToolCall("write", { path: immutable, content: "x" }, policy)
 			assert.equal(result.ok, false, `expected ${immutable} to be immutable`)
 
@@ -107,7 +95,6 @@ test("default policy path failures are returned instead of thrown", () => {
 			parseInitialSafetyConfiguration({
 				cwd: workspace,
 				home,
-				stateHome,
 				piConfigDir,
 				additionalNoAccessPatterns: [],
 			}),

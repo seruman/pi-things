@@ -37,7 +37,6 @@ test("describes every rule in a fully integrated default policy", () => {
 				paths: {
 					workspace: canonicalPath(workspace),
 					home: canonicalPath(home),
-					stateHome: canonicalPath(stateHome),
 					piConfigDirectory: canonicalPath(piConfigDirectory),
 				},
 				additionalNoAccessPatterns: ["secrets/**"],
@@ -65,7 +64,7 @@ test("describes every rule in a fully integrated default policy", () => {
 
 		const description = describePolicy(policy)
 		const display = describeSeatbeltPolicy(policy)
-		expect(display).toHaveLength(policy.rules.filter((rule) => rule.kind !== "snapshot").length)
+		expect(display).toHaveLength(policy.rules.length)
 		expect(display).toContainEqual(
 			expect.objectContaining({
 				label: "$WORKSPACE/**",
@@ -88,7 +87,6 @@ test("describes every rule in a fully integrated default policy", () => {
 			"file shared none glob=",
 			"file sandbox read-write seatbelt-file=",
 			'file executable="/usr/bin/git" read-write tree=',
-			"snapshot exclude glob=",
 			"runtime operations allow",
 			"runtime same-sandbox allow",
 			"runtime file allow",
@@ -115,7 +113,7 @@ test("describes the complete policy in evaluation order", () => {
 
 	expect(describePolicy(policy)).toBe(
 		[
-			"Pi Safety policy (ordered; file and snapshot rules are last-match-wins)",
+			"Pi Safety policy (ordered; file rules are last-match-wins)",
 			'workspace "/"',
 			'home      "/"',
 			"",

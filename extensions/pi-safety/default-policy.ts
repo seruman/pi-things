@@ -21,7 +21,6 @@ import {
 	allowWebKitBrokerExtension,
 	definePolicy,
 	denyFileExtensionIssue,
-	excludeFromSnapshots,
 	executable,
 	fileRule,
 	literal,
@@ -46,34 +45,9 @@ import {
 import { type Result, err, ok } from "./result"
 import type { SessionPathGrant } from "./session-paths"
 
-const SNAPSHOT_EXCLUDED_COMPONENTS = [
-	".git",
-	".pi",
-	".wb",
-	"node_modules",
-	"dist",
-	"build",
-	"target",
-	".next",
-	".cache",
-	"coverage",
-	"__pycache__",
-	".pytest_cache",
-	"vendor",
-	".venv",
-	"venv",
-	".tox",
-	".terraform",
-	".gradle",
-	".direnv",
-	".mypy_cache",
-	".ruff_cache",
-] as const
-
 export interface DefaultPolicyPaths {
 	readonly workspace: CanonicalPath
 	readonly home: CanonicalPath
-	readonly stateHome: CanonicalPath
 	readonly piConfigDirectory: CanonicalPath
 }
 
@@ -83,7 +57,6 @@ export type DefaultPolicyError =
 	| { readonly kind: "rule-path"; readonly path: string; readonly cause: CanonicalPathError }
 	| {
 			readonly kind: "pattern"
-			readonly purpose: "access" | "snapshot"
 			readonly input: string
 			readonly cause: PathPatternError
 	  }
@@ -107,7 +80,7 @@ export function createDefaultPolicy(input: {
 
 /**
  * The default policy is assembled below in its exact evaluation order.
- * File and snapshot rules are last-match-wins. Runtime rules follow them.
+ * File rules are last-match-wins. Runtime rules follow them.
  */
 function createDefaultPolicyFromParsedRoots(input: {
 	readonly paths: DefaultPolicyPaths
@@ -122,7 +95,6 @@ function createDefaultPolicyFromParsedRoots(input: {
 
 	if (!root.ok) return err({ kind: "fixed-path", path: "/" })
 	const sshDirectory = pathValue(input.paths.home, ".ssh")
-	const snapshotStore = pathValue(input.paths.stateHome, "pi-safety", "snapshots")
 
 	const gitPaths = resolveGitPolicyPaths(
 		input.paths.workspace,
@@ -219,7 +191,6 @@ function createDefaultPolicyFromParsedRoots(input: {
 	rules.push(noAccess(shared(), tree(sshDirectory)))
 
 	const sshReadable = parsePatterns(
-		"access",
 		[
 			path.join(sshDirectory, "**", "*.pub"),
 			path.join(sshDirectory, "config"),
@@ -247,7 +218,6 @@ function createDefaultPolicyFromParsedRoots(input: {
 
 	// Project secret conventions and project-specific tighten-only rules.
 	const projectSecrets = parsePatterns(
-		"access",
 		[
 			path.join(input.paths.workspace, "**", ".env"),
 			path.join(input.paths.workspace, "**", ".env.*"),
@@ -260,22 +230,6 @@ function createDefaultPolicyFromParsedRoots(input: {
 
 	if (!projectSecrets.ok) return projectSecrets
 	rules.push(...projectSecrets.value.map((selector) => noAccess(shared(), pattern(selector))))
-
-	// Snapshot protected storage is never exposed through a live workspace policy.
-	const protectedSnapshots = parsePatterns(
-		"access",
-		[path.join(snapshotStore, "*", "*", "protected"), path.join(snapshotStore, "*", "*", "protected", "**")],
-		input.paths.workspace,
-	)
-
-	if (!protectedSnapshots.ok) return protectedSnapshots
-	rules.push(...protectedSnapshots.value.map((selector) => noAccess(shared(), pattern(selector))))
-
-	// Snapshot inclusion is an independent last-match-wins policy axis.
-	const snapshotExclusions = parseSnapshotExclusions(input.paths.workspace)
-
-	if (!snapshotExclusions.ok) return snapshotExclusions
-	rules.push(...snapshotExclusions.value.map((selector) => excludeFromSnapshots(pattern(selector))))
 
 	// Seatbelt runtime capabilities. These do not apply to built-in file requests.
 	if (input.sandbox.kind === "enabled") {
@@ -406,40 +360,7 @@ function createDefaultPolicyFromParsedRoots(input: {
 	)
 }
 
-export function createSnapshotPolicy(workspace: CanonicalPath): Result<Policy, DefaultPolicyError> {
-	const root = parseCanonicalPath("/")
-
-	if (!root.ok) return err({ kind: "fixed-path", path: "/" })
-	const snapshotExclusions = parseSnapshotExclusions(workspace)
-
-	if (!snapshotExclusions.ok) return snapshotExclusions
-
-	return ok(
-		definePolicy({
-			workspaceRoot: workspace,
-			homeRoot: workspace,
-			rules: [
-				readOnly(shared(), tree(root.value)),
-				readWrite(shared(), tree(workspace)),
-				...snapshotExclusions.value.map((selector) => excludeFromSnapshots(pattern(selector))),
-			],
-		}),
-	)
-}
-
-function parseSnapshotExclusions(workspace: CanonicalPath): Result<readonly PathPattern[], DefaultPolicyError> {
-	return parsePatterns(
-		"snapshot",
-		SNAPSHOT_EXCLUDED_COMPONENTS.flatMap((component) => [
-			path.join(workspace, "**", component),
-			path.join(workspace, "**", component, "**"),
-		]),
-		workspace,
-	)
-}
-
 function parsePatterns(
-	purpose: "access" | "snapshot",
 	inputs: readonly string[],
 	relativeTo: CanonicalPath,
 ): Result<readonly PathPattern[], DefaultPolicyError> {
@@ -448,7 +369,7 @@ function parsePatterns(
 	for (const input of inputs) {
 		const parsed = parsePathPattern(input, relativeTo)
 
-		if (!parsed.ok) return err({ kind: "pattern", purpose, input, cause: parsed.error })
+		if (!parsed.ok) return err({ kind: "pattern", input, cause: parsed.error })
 		patterns.push(parsed.value)
 	}
 

@@ -7,7 +7,6 @@ import * as path from "node:path"
 import { fileURLToPath } from "node:url"
 import { z } from "zod"
 import { type ScriptedResponse, jsonValueSchema } from "./headless-scripted-provider"
-import { snapshotIdSchema } from "./snapshot"
 import { withPrivateTmpDirectory, withTestTempDirectory } from "./test-temp-directory"
 
 interface HeadlessFixture {
@@ -96,12 +95,6 @@ const sessionEntrySchema = z.object({
 	data: jsonValueSchema.optional(),
 })
 
-const checkpointMarkerSchema = z.object({
-	version: z.literal(1),
-	snapshotId: snapshotIdSchema,
-	createdAt: z.string(),
-})
-
 const truncatedBashResultSchema = z.object({
 	details: z.object({
 		truncation: z.object({ truncated: z.literal(true) }),
@@ -112,7 +105,7 @@ const truncatedBashResultSchema = z.object({
 function runHeadlessPi(
 	fixture: HeadlessFixture,
 	responses: readonly ScriptedResponse[],
-	options: { readonly persistSession?: boolean; readonly protection?: boolean } = {},
+	options: { readonly persistSession?: boolean; readonly protection?: boolean; readonly stateHome?: string } = {},
 ) {
 	const piExecutable = resolveInstalledPi()
 	const extensionDirectory = path.dirname(fileURLToPath(import.meta.url))
@@ -125,7 +118,7 @@ function runHeadlessPi(
 		HOME: fixture.home,
 		CFFIXED_USER_HOME: fixture.home,
 		TMPDIR: fixture.temp,
-		XDG_STATE_HOME: fixture.stateHome,
+		XDG_STATE_HOME: options.stateHome ?? fixture.stateHome,
 		XDG_CONFIG_HOME: fixture.configHome,
 		XDG_CACHE_HOME: fixture.cacheHome,
 		PI_CODING_AGENT_DIR: fixture.piConfig,
@@ -180,7 +173,7 @@ function runHeadlessPi(
 		.map((line) => headlessEventSchema.parse(JSON.parse(line)))
 }
 
-test("headless Pi defaults protection off while retaining checkpoints", () => {
+test("headless Pi defaults protection off", () => {
 	withTestTempDirectory("headless-pi-protection-default-", (root) => {
 		const fixture = createFixture(root)
 		const outside = path.join(fixture.home, "outside.txt")
@@ -193,11 +186,11 @@ test("headless Pi defaults protection off while retaining checkpoints", () => {
 			{ protection: false },
 		)
 		assert.equal(fs.readFileSync(outside, "utf8"), "allowed")
-		assert.equal(fs.existsSync(path.join(fixture.stateHome, "pi-safety", "snapshots")), true)
+		assert.equal(fs.existsSync(path.join(fixture.stateHome, "pi-safety", "snapshots")), false)
 	})
 })
 
-test("headless Pi initializes and checkpoints linked worktrees", () => {
+test("headless Pi initializes linked worktrees", () => {
 	withTestTempDirectory("headless-pi-worktree-", (root) => {
 		const fixture = createFixture(root)
 		const main = path.join(root, "main")
@@ -227,16 +220,16 @@ test("headless Pi initializes and checkpoints linked worktrees", () => {
 			)
 			assert.equal(fs.readFileSync(path.join(fixture.workspace, "file.txt"), "utf8"), "created")
 			assert.equal(fs.readFileSync(path.join(fixture.workspace, "bash.txt"), "utf8"), "bash")
-			assert.equal(fs.existsSync(path.join(fixture.stateHome, "pi-safety", "snapshots")), true)
+			assert.equal(fs.existsSync(path.join(fixture.stateHome, "pi-safety", "snapshots")), false)
 		} finally {
 			git("worktree", "remove", "--force", fixture.workspace)
 		}
 	})
 })
 
-test("headless Pi reports a failed checkpoint once and continues without weakening Seatbelt", () => {
+test("headless Pi preserves access control when workspace contains a FIFO", () => {
 	for (const protection of [false, true]) {
-		withTestTempDirectory("headless-pi-checkpoint-failure-", (root) => {
+		withTestTempDirectory("headless-pi-fifo-", (root) => {
 			const fixture = createFixture(root)
 			assert.equal(spawnSync("/usr/bin/mkfifo", [path.join(fixture.workspace, "pipe")]).status, 0)
 			const outside = path.join(fixture.home, "outside.txt")
@@ -260,17 +253,12 @@ test("headless Pi reports a failed checkpoint once and continues without weakeni
 			assert.equal(toolEnds[1].isError, false)
 			assert.equal(toolEnds[2].isError, protection)
 
-			const warnings = toolEnds.filter((event) =>
-				JSON.stringify(event.result).includes("continuing without rollback protection"),
-			)
-
-			assert.equal(warnings.length, 1)
-			assert.match(JSON.stringify(warnings[0].result), /checkpoint failed/)
+			assert.doesNotMatch(JSON.stringify(toolEnds), /checkpoint|rollback protection/i)
 		})
 	}
 })
 
-test("headless Pi blocks denied calls before execution or checkpoint creation", () => {
+test("headless Pi blocks denied calls before execution", () => {
 	withTestTempDirectory("headless-pi-denied-", (root) => {
 		const fixture = createFixture(root)
 		const outside = path.join(root, "outside.txt")
@@ -571,58 +559,15 @@ test("headless Pi Seatbelt denies Bash writes outside workspace", () => {
 		const toolEnd = events.find((event) => event.type === "tool_execution_end")
 		assert.equal(toolEnd?.toolName, "bash")
 		assert.match(JSON.stringify(toolEnd?.result), /Operation not permitted/)
-		assert.equal(fs.existsSync(path.join(fixture.stateHome, "pi-safety", "snapshots")), true)
+		assert.equal(fs.existsSync(path.join(fixture.stateHome, "pi-safety", "snapshots")), false)
 	})
 })
 
-test("sandboxed snapshot CLI cannot mutate history or read protected content", () => {
-	withTestTempDirectory("headless-pi-snapshot-cli-", (root) => {
+test("mutating turns do not create snapshot state, markers, or warnings", () => {
+	withTestTempDirectory("headless-pi-mutations-", (root) => {
 		const fixture = createFixture(root)
-		fs.writeFileSync(path.join(fixture.workspace, ".env"), "TOP_SECRET_VALUE")
-		fs.writeFileSync(path.join(fixture.workspace, "ordinary.txt"), "before")
-		const snapshotCli = path.join(path.dirname(fileURLToPath(import.meta.url)), "pi-snapshot.ts")
 
-		const command = [
-			"printf after > ordinary.txt",
-			`${JSON.stringify(snapshotCli)} create`,
-			"create_status=$?",
-			`id=$(${JSON.stringify(snapshotCli)} list | tail -n +2 | head -n 1 | awk '{print $1}')`,
-			`${JSON.stringify(snapshotCli)} show "$id" .env`,
-			"show_status=$?",
-			`${JSON.stringify(snapshotCli)} restore "$id" --apply`,
-			"restore_status=$?",
-			'test "$(cat ordinary.txt)" = after',
-			"atomic_status=$?",
-			`${JSON.stringify(snapshotCli)} diff "$id" -- ordinary.txt >/dev/null`,
-			"diff_status=$?",
-			`${JSON.stringify(snapshotCli)} restore "$id" --apply -- ordinary.txt`,
-			"selected_status=$?",
-			"echo create:$create_status show:$show_status restore:$restore_status atomic:$atomic_status diff:$diff_status selected:$selected_status",
-			"test $create_status -ne 0 -a $show_status -ne 0 -a $restore_status -ne 0 -a $atomic_status -eq 0 -a $diff_status -eq 0 -a $selected_status -eq 0",
-		].join("; ")
-
-		const events = runHeadlessPi(fixture, [
-			{ kind: "tool", id: "snapshot-cli-1", name: "bash", arguments: { command } },
-			{ kind: "text", text: "done" },
-		])
-
-		const toolEnd = events.find((event) => event.type === "tool_execution_end")
-		const output = JSON.stringify(toolEnd?.result)
-		assert.equal(toolEnd?.isError, false, output)
-		assert.match(output, /create:[1-9][0-9]* show:[1-9][0-9]* restore:[1-9][0-9]* atomic:0 diff:0 selected:0/)
-		assert.equal(fs.readFileSync(path.join(fixture.workspace, "ordinary.txt"), "utf8"), "before")
-		assert.doesNotMatch(output, /TOP_SECRET_VALUE/)
-		const snapshotRoot = path.join(fixture.stateHome, "pi-safety", "snapshots")
-		const project = fs.readdirSync(snapshotRoot)[0]
-		const snapshots = fs.readdirSync(path.join(snapshotRoot, project)).filter((name) => !name.startsWith("."))
-		assert.equal(snapshots.length, 1)
-	})
-})
-
-test("persists one non-context checkpoint marker for each mutating agent run", () => {
-	withTestTempDirectory("headless-pi-checkpoint-entry-", (root) => {
-		const fixture = createFixture(root)
-		runHeadlessPi(
+		const events = runHeadlessPi(
 			fixture,
 			[
 				{ kind: "tool", id: "write-1", name: "write", arguments: { path: "first.txt", content: "first" } },
@@ -648,21 +593,34 @@ test("persists one non-context checkpoint marker for each mutating agent run", (
 			.map((line) => sessionEntrySchema.parse(JSON.parse(line)))
 
 		const markers = entries.filter((entry) => entry.type === "custom" && entry.customType === "pi-safety-checkpoint")
-		assert.equal(markers.length, 1)
+		assert.equal(markers.length, 0)
 		assert.equal(
 			entries.some((entry) => entry.type === "custom_message" && entry.customType === "pi-safety-checkpoint"),
 			false,
 		)
-		const marker = checkpointMarkerSchema.parse(markers[0].data)
-		assert.equal(marker.version, 1)
-		assert.match(marker.snapshotId, /^\d{17}-[0-9a-f]{16}$/)
-		const snapshotRoot = path.join(fixture.stateHome, "pi-safety", "snapshots")
-		const project = fs.readdirSync(snapshotRoot)[0]
-		const snapshotDirectory = path.join(snapshotRoot, project, String(marker.snapshotId))
-		assert.equal(fs.existsSync(snapshotDirectory), true)
-		const sessionHeader = entries.find((entry) => entry.type === "session")
-		const manifest = JSON.parse(fs.readFileSync(path.join(snapshotDirectory, "manifest.json"), "utf8"))
-		assert.deepEqual(manifest.origin, { kind: "pi-session", sessionId: sessionHeader?.id })
+		assert.equal(fs.existsSync(path.join(fixture.stateHome, "pi-safety", "snapshots")), false)
+		assert.doesNotMatch(JSON.stringify(events), /checkpoint|rollback protection/i)
+		assert.equal(fs.readFileSync(path.join(fixture.workspace, "first.txt"), "utf8"), "first")
+		assert.equal(fs.readFileSync(path.join(fixture.workspace, "second.txt"), "utf8"), "second")
+	})
+})
+
+test("invalid XDG state home does not prevent initialization", () => {
+	withTestTempDirectory("headless-pi-invalid-state-", (root) => {
+		const fixture = createFixture(root)
+
+		const events = runHeadlessPi(
+			fixture,
+			[
+				{ kind: "tool", id: "write", name: "write", arguments: { path: "file.txt", content: "ok" } },
+				{ kind: "text", text: "done" },
+			],
+			{ stateHome: "relative-invalid-state" },
+		)
+
+		const end = events.find((event) => event.type === "tool_execution_end")
+		assert.equal(end?.isError, false, JSON.stringify(end))
+		assert.equal(fs.readFileSync(path.join(fixture.workspace, "file.txt"), "utf8"), "ok")
 	})
 })
 
@@ -727,7 +685,7 @@ test("child Pi processes launched by Bash inherit the active Seatbelt", () => {
 	})
 })
 
-test("headless Pi runs Bash inside Seatbelt after checkpointing", () => {
+test("headless Pi runs Bash inside Seatbelt", () => {
 	withTestTempDirectory("headless-pi-bash-", (root) => {
 		const fixture = createFixture(root)
 		fs.writeFileSync(path.join(fixture.workspace, "existing.txt"), "before-bash")
@@ -747,15 +705,7 @@ test("headless Pi runs Bash inside Seatbelt after checkpointing", () => {
 		assert.equal(toolEnd?.toolName, "bash")
 		assert.equal(toolEnd?.isError, false)
 		assert.match(JSON.stringify(toolEnd?.result), /v\d+\.\d+\.\d+/)
-		const snapshotRoot = path.join(fixture.stateHome, "pi-safety", "snapshots")
-		const project = fs.readdirSync(snapshotRoot)[0]
-		const snapshot = fs.readdirSync(path.join(snapshotRoot, project)).find((name) => !name.startsWith("."))
-
-		if (!snapshot) throw new Error("headless Bash checkpoint was not published")
-		assert.equal(
-			fs.readFileSync(path.join(snapshotRoot, project, snapshot, "tree", "existing.txt"), "utf8"),
-			"before-bash",
-		)
+		assert.equal(fs.existsSync(path.join(fixture.stateHome, "pi-safety", "snapshots")), false)
 	})
 })
 
@@ -809,7 +759,7 @@ test("headless Pi preserves Bash errors, timeout, streaming, truncation, and ful
 	})
 })
 
-test("headless Pi preserves built-in write, edit, and read while creating one checkpoint", () => {
+test("headless Pi preserves built-in write, edit, and read", () => {
 	withTestTempDirectory("headless-pi-builtins-", (root) => {
 		const fixture = createFixture(root)
 		fs.writeFileSync(path.join(fixture.workspace, "existing.txt"), "before")
@@ -868,14 +818,6 @@ test("headless Pi preserves built-in write, edit, and read while creating one ch
 			},
 		])
 		assert.equal(fs.readFileSync(path.join(fixture.workspace, "created.txt"), "utf8"), "beta")
-		const snapshotRoot = path.join(fixture.stateHome, "pi-safety", "snapshots")
-		const projects = fs.readdirSync(snapshotRoot)
-		assert.equal(projects.length, 1)
-		const snapshots = fs.readdirSync(path.join(snapshotRoot, projects[0])).filter((name) => !name.startsWith("."))
-		assert.equal(snapshots.length, 1)
-		assert.equal(
-			fs.readFileSync(path.join(snapshotRoot, projects[0], snapshots[0], "tree", "existing.txt"), "utf8"),
-			"before",
-		)
+		assert.equal(fs.existsSync(path.join(fixture.stateHome, "pi-safety", "snapshots")), false)
 	})
 })

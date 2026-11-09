@@ -1,19 +1,18 @@
 import { describe, expect, test } from "bun:test"
 import { KeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui"
-import { type SafetyFeature, buildSafetySettings, createSafetySettingsComponent } from "./safety-settings"
+import { buildSafetySettings, createSafetySettingsComponent } from "./safety-settings"
 
 describe("Pi Safety settings", () => {
-	test("offers disabled-by-default protection and enabled-by-default checkpoints", () => {
-		expect(buildSafetySettings(false, true)).toMatchObject([
+	test("offers disabled-by-default protection", () => {
+		expect(buildSafetySettings(false)).toMatchObject([
 			{ id: "protection", label: "Seatbelt", currentValue: "disabled", values: ["disabled", "enabled"] },
-			{ id: "checkpoints", currentValue: "enabled", values: ["disabled", "enabled"] },
 		])
 	})
 
 	test("changes settings in place and opens a read-only policy view", () => {
 		const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text }
 		let closed = false
-		const changes: Array<{ feature: SafetyFeature; enabled: boolean }> = []
+		const changes: boolean[] = []
 		let renderRequests = 0
 
 		const component = createSafetySettingsComponent(
@@ -26,7 +25,6 @@ describe("Pi Safety settings", () => {
 				closed = true
 			},
 			false,
-			true,
 			[
 				{
 					number: 1,
@@ -43,8 +41,8 @@ describe("Pi Safety settings", () => {
 					dsl: 'file shared read-write tree="/home/.cache"',
 				},
 			],
-			(feature, enabled) => {
-				changes.push({ feature, enabled })
+			(enabled) => {
+				changes.push(enabled)
 			},
 		)
 
@@ -63,7 +61,7 @@ describe("Pi Safety settings", () => {
 		expect(closed).toBe(false)
 		component.handleInput("\x1b")
 		expect(renderRequests).toBeGreaterThan(0)
-		expect(changes).toEqual([{ feature: "protection", enabled: true }])
+		expect(changes).toEqual([true])
 		expect(closed).toBe(true)
 	})
 })

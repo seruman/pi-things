@@ -8,9 +8,6 @@
   "keywords": [
     "pi-package"
   ],
-  "bin": {
-    "pi-snapshot": "./extensions/pi-safety/pi-snapshot.ts"
-  },
   "scripts": {
     "lint": "oxlint --deny-warnings --report-unused-disable-directives .",
     "lint:fix": "bun run lint --fix",
@@ -57,7 +54,6 @@
   },
   "dependencies": {
     "defuddle": "^0.15.0",
-    "diff": "8.0.4",
     "glob-to-regexp": "0.4.1",
     "ignore": "^7.0.5",
     "just-bash": "^2.14.2",

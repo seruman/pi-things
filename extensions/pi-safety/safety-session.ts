@@ -1,7 +1,6 @@
 import * as path from "node:path"
 import type { ToolCallEvent } from "@earendil-works/pi-coding-agent"
 import { type CanonicalPath, parseCanonicalPath } from "./canonical-path"
-import { type CheckpointError, CheckpointRun, type CheckpointStatus } from "./checkpoint"
 import { type DefaultPolicyError, createDefaultPolicy } from "./default-policy"
 import {
 	type BashIntegrations,
@@ -19,7 +18,6 @@ import {
 } from "./policy-configuration"
 import { type PolicyDisplayEntry, describePolicy, describeSeatbeltPolicy } from "./policy-description"
 import { type Result, err, ok } from "./result"
-import { createConfiguredSnapshotStore } from "./safety-filesystem"
 import type { CompiledSbpl } from "./sbpl"
 import { emitSeatbelt } from "./seatbelt"
 import {
@@ -29,12 +27,6 @@ import {
 	parseSessionPathGrant,
 	parseSessionPathsEnvironment,
 } from "./session-paths"
-import {
-	type SnapshotCreationOrigin,
-	type SnapshotError,
-	type SnapshotStore,
-	createCheckpointSnapshot,
-} from "./snapshot"
 import { type ToolAuthorizationError, authorizeBuiltinToolCall } from "./tool-authorization"
 
 export interface RawSafetySessionConfiguration extends RawPolicyConfiguration {
@@ -51,20 +43,10 @@ export type SafetySessionError =
 	| { readonly kind: "go-path"; readonly path: string; readonly message: string }
 	| { readonly kind: "session-path"; readonly cause: SessionPathError }
 	| { readonly kind: "integration"; readonly cause: IntegrationError }
-	| { readonly kind: "snapshot-store"; readonly cause: SnapshotError }
 
 export type SafetyDecision = { readonly kind: "allow" } | { readonly kind: "block"; readonly reason: string }
 
-export type CheckpointDecision = { readonly kind: "allow" } | { readonly kind: "warning"; readonly reason: string }
-
-export type SafetySessionCheckpointStatus = CheckpointStatus | { readonly kind: "run-not-started" }
-
 export interface SafetySession {
-	readonly snapshotStore: SnapshotStore
-	beginAgentRun(
-		origin?: SnapshotCreationOrigin,
-	): Result<undefined, { readonly kind: "checkpoint-creation-in-progress" }>
-	checkpointStatus(): SafetySessionCheckpointStatus
 	seatbeltProfile(): CompiledSbpl
 	policyDescription(): string
 	seatbeltPolicy(): readonly PolicyDisplayEntry[]
@@ -77,21 +59,17 @@ export interface SafetySession {
 	): Result<SessionPathGrant, SessionPathError | DefaultPolicyError>
 	removeSessionPath(path: string): Result<boolean, SessionPathError | DefaultPolicyError>
 	guard(toolName: string, input: ToolCallEvent["input"]): SafetyDecision
-	checkpoint(toolName: string): Promise<CheckpointDecision>
 }
 
 class ManagedSafetySession implements SafetySession {
-	readonly snapshotStore: SnapshotStore
 	#policy: Policy
 	readonly #integrations: BashIntegrations
 	readonly #policyInput: Omit<Parameters<typeof createDefaultPolicy>[0], "sessionPaths">
 	#sessionPaths: readonly SessionPathGrant[]
-	#checkpointRun: CheckpointRun | undefined
 
 	constructor(
 		policy: Policy,
 		integrations: BashIntegrations,
-		snapshotStore: SnapshotStore,
 		policyInput: Omit<Parameters<typeof createDefaultPolicy>[0], "sessionPaths">,
 		sessionPaths: readonly SessionPathGrant[],
 	) {
@@ -99,23 +77,6 @@ class ManagedSafetySession implements SafetySession {
 		this.#integrations = integrations
 		this.#policyInput = policyInput
 		this.#sessionPaths = sessionPaths
-		this.snapshotStore = snapshotStore
-	}
-
-	beginAgentRun(
-		origin: SnapshotCreationOrigin = { kind: "standalone" },
-	): Result<undefined, { readonly kind: "checkpoint-creation-in-progress" }> {
-		if (this.#checkpointRun?.status().kind === "creating") {
-			return err({ kind: "checkpoint-creation-in-progress" })
-		}
-
-		this.#checkpointRun = new CheckpointRun(() => createCheckpointSnapshot(this.snapshotStore, { origin }))
-
-		return ok(undefined)
-	}
-
-	checkpointStatus(): SafetySessionCheckpointStatus {
-		return this.#checkpointRun?.status() ?? { kind: "run-not-started" }
 	}
 
 	seatbeltProfile(): CompiledSbpl {
@@ -198,28 +159,6 @@ class ManagedSafetySession implements SafetySession {
 			? { kind: "allow" }
 			: { kind: "block", reason: formatAuthorizationError(authorization.error) }
 	}
-
-	async checkpoint(toolName: string): Promise<CheckpointDecision> {
-		if (toolName !== "bash" && toolName !== "write" && toolName !== "edit") return { kind: "allow" }
-
-		if (!this.#checkpointRun) {
-			return {
-				kind: "warning",
-				reason: "pi-safety: checkpoint run has not started; continuing without rollback protection",
-			}
-		}
-
-		const checkpoint = await this.#checkpointRun.ensureCheckpoint()
-
-		if (!checkpoint.ok) {
-			return {
-				kind: "warning",
-				reason: `pi-safety: checkpoint failed (${formatCheckpointError(checkpoint.error)}); continuing without rollback protection`,
-			}
-		}
-
-		return { kind: "allow" }
-	}
 }
 
 export function createSafetySession(raw: RawSafetySessionConfiguration): Result<SafetySession, SafetySessionError> {
@@ -256,15 +195,8 @@ export function createSafetySession(raw: RawSafetySessionConfiguration): Result<
 	const policy = createDefaultPolicy({ ...policyInput, sessionPaths: sessionPaths.value })
 
 	if (!policy.ok) return cleanupAfterFailure(integrations.value, { kind: "policy", cause: policy.error })
-	const snapshotStore = createConfiguredSnapshotStore(configuration.value, policy.value)
 
-	if (!snapshotStore.ok) {
-		return cleanupAfterFailure(integrations.value, { kind: "snapshot-store", cause: snapshotStore.error })
-	}
-
-	return ok(
-		new ManagedSafetySession(policy.value, integrations.value, snapshotStore.value, policyInput, sessionPaths.value),
-	)
+	return ok(new ManagedSafetySession(policy.value, integrations.value, policyInput, sessionPaths.value))
 }
 
 function parseGoPaths(
@@ -286,7 +218,7 @@ function parseGoPaths(
 
 function cleanupAfterFailure(
 	integrations: BashIntegrations,
-	error: Extract<SafetySessionError, { readonly kind: "policy" | "snapshot-store" }>,
+	error: Extract<SafetySessionError, { readonly kind: "policy" }>,
 ): Result<never, SafetySessionError> {
 	const cleaned = cleanupBashIntegrations(integrations)
 
@@ -301,36 +233,5 @@ function formatAuthorizationError(error: ToolAuthorizationError): string {
 			return `pi-safety: blocked ${error.tool}: path resolution failed (${error.cause.kind})`
 		case "access-denied":
 			return `pi-safety: blocked ${error.tool}: ${error.required} access denied to ${error.path}`
-	}
-}
-
-function formatCheckpointError(error: CheckpointError): string {
-	switch (error.kind) {
-		case "creator-rejected":
-			return error.message
-		case "snapshot-failed":
-			return formatSnapshotError(error.cause)
-	}
-}
-
-function formatSnapshotError(error: SnapshotError): string {
-	switch (error.kind) {
-		case "invalid-store":
-		case "clone-unsupported":
-			return `${error.kind}: ${error.message}`
-		case "path-resolution":
-			return `${error.kind} at ${error.path}: ${error.message}`
-		case "unsupported-entry":
-			return `${error.kind} at ${error.path}: ${error.entryType}`
-		case "filesystem-race":
-			return `${error.kind} at ${error.path}: expected ${error.expected}`
-		case "project-locked":
-			return `${error.kind} at ${error.path}`
-		case "retention-conflict":
-			return `${error.kind}: cannot retain required snapshots within limit ${error.maxSnapshots}`
-		case "workspace-too-large":
-			return `${error.kind}: more than ${error.maximum} ${error.limit} to snapshot`
-		case "io":
-			return `${error.kind} during ${error.operation} at ${error.path}: ${error.message}`
 	}
 }

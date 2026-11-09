@@ -4,7 +4,6 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { unwrap } from "./result"
 import { createSafetySession } from "./safety-session"
-import { parseSnapshotSessionId } from "./snapshot"
 import { withTestTempDirectoryAsync } from "./test-temp-directory"
 
 function fixture(root: string, gopath?: string) {
@@ -24,7 +23,6 @@ function fixture(root: string, gopath?: string) {
 		createSafetySession({
 			cwd: workspace,
 			home,
-			stateHome,
 			piConfigDir,
 			additionalNoAccessPatterns: [],
 			gopath,
@@ -39,7 +37,7 @@ function fixture(root: string, gopath?: string) {
 	)
 }
 
-test("exposes the session's resolved policy without changing checkpoint state", async () => {
+test("exposes the session's resolved policy", async () => {
 	await withTestTempDirectoryAsync("safety-session-policy-", async (root) => {
 		const session = fixture(root)
 		const description = session.policyDescription()
@@ -47,7 +45,6 @@ test("exposes the session's resolved policy without changing checkpoint state", 
 		assert.ok(description.includes(`workspace ${JSON.stringify(path.join(root, "workspace"))}`))
 		assert.match(description, /file shared none tree=.*\.cf/)
 		assert.match(description, /runtime operations allow/)
-		assert.deepEqual(session.checkpointStatus(), { kind: "run-not-started" })
 	})
 })
 
@@ -65,7 +62,7 @@ test("uses default and configured GOPATH package caches", async () => {
 	})
 })
 
-test("session paths grant and revoke uncheckpointed external write authority", async () => {
+test("session paths grant and revoke external write authority", async () => {
 	await withTestTempDirectoryAsync("safety-session-paths-", async (root) => {
 		const session = fixture(root)
 		const external = path.join(root, "other-repo")
@@ -81,120 +78,17 @@ test("session paths grant and revoke uncheckpointed external write authority", a
 	})
 })
 
-test("reads and denied mutations do not create a lazy checkpoint", async () => {
+test("allows workspace reads and denies outside mutations", async () => {
 	await withTestTempDirectoryAsync("safety-session-read-", async (root) => {
 		const session = fixture(root)
-		session.beginAgentRun()
-
 		assert.equal(session.guard("read", { path: "existing.txt" }).kind, "allow")
 		assert.equal(session.guard("write", { path: path.join(root, "outside.txt"), content: "x" }).kind, "block")
-		assert.deepEqual(session.checkpointStatus(), { kind: "not-started" })
-		assert.equal(fs.existsSync(session.snapshotStore.projectDirectory), false)
 	})
 })
 
-test("the first allowed mutation snapshots once and later mutations reuse it", async () => {
+test("allows workspace mutations", async () => {
 	await withTestTempDirectoryAsync("safety-session-mutate-", async (root) => {
 		const session = fixture(root)
-		session.beginAgentRun()
-
 		assert.equal(session.guard("write", { path: "new.txt", content: "x" }).kind, "allow")
-		assert.equal((await session.checkpoint("write")).kind, "allow")
-		assert.equal((await session.checkpoint("edit")).kind, "allow")
-		const status = session.checkpointStatus()
-		assert.equal(status.kind, "ready")
-		assert.equal(
-			fs
-				.readdirSync(session.snapshotStore.projectDirectory, { withFileTypes: true })
-				.filter((entry) => !entry.name.startsWith(".")).length,
-			1,
-		)
-	})
-})
-
-test("records the Pi session that owns an automatic checkpoint", async () => {
-	await withTestTempDirectoryAsync("safety-session-origin-", async (root) => {
-		const session = fixture(root)
-		const sessionId = unwrap(parseSnapshotSessionId("019f6277-361d-7f97-9d5b-7db7e0618fe1"))
-		unwrap(session.beginAgentRun({ kind: "pi-session", sessionId }))
-		assert.equal((await session.checkpoint("write")).kind, "allow")
-		const status = session.checkpointStatus()
-		assert.equal(status.kind, "ready")
-
-		if (status.kind !== "ready") return
-		const manifest = JSON.parse(fs.readFileSync(path.join(status.snapshot.directory, "manifest.json"), "utf8"))
-		assert.deepEqual(manifest.origin, { kind: "pi-session", sessionId })
-	})
-})
-
-test("concurrent allowed mutations await the same real snapshot", async () => {
-	await withTestTempDirectoryAsync("safety-session-concurrent-", async (root) => {
-		const session = fixture(root)
-		unwrap(session.beginAgentRun())
-		const decisions = await Promise.all([session.checkpoint("write"), session.checkpoint("write")])
-		assert.ok(decisions.every((decision) => decision.kind === "allow"))
-		assert.equal(
-			fs
-				.readdirSync(session.snapshotStore.projectDirectory, { withFileTypes: true })
-				.filter((entry) => !entry.name.startsWith(".")).length,
-			1,
-		)
-	})
-})
-
-test("each agent run receives a fresh lazy checkpoint", async () => {
-	await withTestTempDirectoryAsync("safety-session-runs-", async (root) => {
-		const session = fixture(root)
-		session.beginAgentRun()
-		assert.equal((await session.checkpoint("bash")).kind, "allow")
-		session.beginAgentRun()
-		assert.deepEqual(session.checkpointStatus(), { kind: "not-started" })
-		assert.equal((await session.checkpoint("bash")).kind, "allow")
-		assert.equal(
-			fs
-				.readdirSync(session.snapshotStore.projectDirectory, { withFileTypes: true })
-				.filter((entry) => !entry.name.startsWith(".")).length,
-			2,
-		)
-	})
-})
-
-test("a new run cannot replace a checkpoint while creation is in flight", async () => {
-	await withTestTempDirectoryAsync("safety-session-in-flight-", async (root) => {
-		const session = fixture(root)
-		unwrap(session.beginAgentRun())
-		const mutation = session.checkpoint("bash")
-		assert.deepEqual(session.beginAgentRun(), { ok: false, error: { kind: "checkpoint-creation-in-progress" } })
-		assert.equal((await mutation).kind, "allow")
-	})
-})
-
-test("checkpoint failures are warnings, remain cached for the run, and retry on the next run", async () => {
-	await withTestTempDirectoryAsync("safety-session-checkpoint-failure-", async (root) => {
-		const session = fixture(root)
-		const obstruction = path.join(root, "state", "pi-safety")
-		fs.writeFileSync(obstruction, "not a directory")
-		unwrap(session.beginAgentRun())
-		const first = await session.checkpoint("bash")
-		assert.equal(first.kind, "warning")
-		assert.equal(session.checkpointStatus().kind, "failed")
-		fs.unlinkSync(obstruction)
-		assert.deepEqual(await session.checkpoint("write"), first)
-		assert.equal(fs.existsSync(session.snapshotStore.projectDirectory), false)
-		assert.equal(session.guard("write", { path: path.join(root, "outside.txt"), content: "x" }).kind, "block")
-		unwrap(session.beginAgentRun())
-		assert.equal((await session.checkpoint("bash")).kind, "allow")
-		assert.equal(session.checkpointStatus().kind, "ready")
-	})
-})
-
-test("tool calls warn when a checkpoint run has not started", async () => {
-	await withTestTempDirectoryAsync("safety-session-uninitialized-", async (root) => {
-		const session = fixture(root)
-		const decision = await session.checkpoint("write")
-		assert.deepEqual(decision, {
-			kind: "warning",
-			reason: "pi-safety: checkpoint run has not started; continuing without rollback protection",
-		})
 	})
 })

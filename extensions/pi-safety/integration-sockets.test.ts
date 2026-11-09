@@ -29,7 +29,6 @@ function compilePolicy(
 				paths: {
 					workspace: canonicalPath(workspace),
 					home: canonicalPath(home),
-					stateHome: canonicalPath(stateHome),
 					piConfigDirectory: canonicalPath(piConfigDirectory),
 				},
 				additionalNoAccessPatterns: [],

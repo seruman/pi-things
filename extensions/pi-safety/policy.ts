@@ -38,8 +38,6 @@ declare const ruleSubjectBrand: unique symbol
 
 export type FileAccess = "none" | "read-only" | "read-write"
 
-export type SnapshotDisposition = "include" | "exclude"
-
 export type FileOperation = "read" | "write" | "movement"
 
 export type SharedRuleSubject = { readonly kind: "shared" } & { readonly [ruleSubjectBrand]: true }
@@ -55,7 +53,6 @@ export type RuleSubject = SharedRuleSubject | SandboxRuleSubject | ExecutableRul
 
 export type EvaluationSubject =
 	| { readonly kind: "builtin" }
-	| { readonly kind: "snapshot" }
 	| { readonly kind: "sandbox" }
 	| { readonly kind: "executable"; readonly executable: CanonicalExecutable }
 
@@ -78,16 +75,9 @@ export type FileAccessRule = {
 	readonly [policyRuleBrand]: true
 }
 
-export type SnapshotRule = {
-	readonly kind: "snapshot"
-	readonly selector: FileSelector
-	readonly disposition: SnapshotDisposition
-	readonly [policyRuleBrand]: true
-}
-
 export type RuntimePolicyRule = Rule
 
-export type PolicyRule = FileAccessRule | SnapshotRule | RuntimePolicyRule
+export type PolicyRule = FileAccessRule | RuntimePolicyRule
 
 export interface Policy {
 	readonly workspaceRoot: CanonicalPath
@@ -106,15 +96,6 @@ export type FileAccessRequest = {
 export type FileAccessDecision = {
 	readonly effect: "allow" | "deny"
 	readonly access: FileAccess
-}
-
-export type SnapshotRequest = {
-	readonly kind: "snapshot"
-	readonly path: CanonicalPath
-}
-
-export type SnapshotDecision = {
-	readonly disposition: SnapshotDisposition
 }
 
 // SAFETY: the frozen shared discriminant is the entire payload of a shared subject.
@@ -184,14 +165,6 @@ export function allowRuntime(operations: NonEmptyReadonlyArray<RuntimeOperation>
 	return allowRuntimeOperations(operations)
 }
 
-export function includeInSnapshots(selector: FileSelector): SnapshotRule {
-	return snapshotRule("include", selector)
-}
-
-export function excludeFromSnapshots(selector: FileSelector): SnapshotRule {
-	return snapshotRule("exclude", selector)
-}
-
 export function definePolicy(input: {
 	readonly workspaceRoot: CanonicalPath
 	readonly homeRoot: CanonicalPath
@@ -200,7 +173,7 @@ export function definePolicy(input: {
 	let runtimeRulesStarted = false
 
 	for (const rule of input.rules) {
-		if (rule.kind === "file-access" || rule.kind === "snapshot") {
+		if (rule.kind === "file-access") {
 			if (runtimeRulesStarted) throw new TypeError("declarative policy rules must precede runtime rules")
 		} else {
 			runtimeRulesStarted = true
@@ -215,23 +188,7 @@ export function definePolicy(input: {
 	}) as Policy
 }
 
-export function evaluatePolicy(policy: Policy, request: FileAccessRequest): FileAccessDecision
-export function evaluatePolicy(policy: Policy, request: SnapshotRequest): SnapshotDecision
-export function evaluatePolicy(
-	policy: Policy,
-	request: FileAccessRequest | SnapshotRequest,
-): FileAccessDecision | SnapshotDecision {
-	switch (request.kind) {
-		case "file-access":
-			return evaluateFileAccess(policy, request)
-		case "snapshot":
-			return evaluateSnapshot(policy, request)
-		default:
-			return request satisfies never
-	}
-}
-
-function evaluateFileAccess(policy: Policy, request: FileAccessRequest): FileAccessDecision {
+export function evaluatePolicy(policy: Policy, request: FileAccessRequest): FileAccessDecision {
 	let access: FileAccess = "none"
 
 	for (const rule of effectiveFileAccessRules(policy, request.subject)) {
@@ -247,37 +204,6 @@ function evaluateFileAccess(policy: Policy, request: FileAccessRequest): FileAcc
 	const allowed = request.operation === "read" ? access !== "none" : access === "read-write"
 
 	return Object.freeze({ effect: allowed ? "allow" : "deny", access })
-}
-
-function evaluateSnapshot(policy: Policy, request: SnapshotRequest): SnapshotDecision {
-	let disposition: SnapshotDisposition = "include"
-
-	for (const rule of policy.rules) {
-		switch (rule.kind) {
-			case "snapshot":
-				if (!matchesSelector(rule.selector, request.path)) break
-				disposition = rule.disposition
-				break
-			case "file-access":
-			case "file":
-			case "file-except-processes":
-			case "mach-lookup":
-			case "unix-bind":
-			case "unix-connect":
-			case "file-extension-issue":
-			case "broker-extension-issue":
-			case "runtime-operation":
-			case "same-sandbox":
-			case "ip-network":
-			case "network-path":
-			case "posix-ipc":
-				break
-			default:
-				rule satisfies never
-		}
-	}
-
-	return Object.freeze({ disposition })
 }
 
 export function effectiveFileAccessRules(policy: Policy, subject: EvaluationSubject): readonly FileAccessRule[] {
@@ -376,9 +302,4 @@ function matchesSubject(rule: RuleSubject, request: EvaluationSubject): boolean 
 function accessRule(access: FileAccess, subject: RuleSubject, selector: FileSelector): FileAccessRule {
 	// SAFETY: subject and selector are validated constructor products; access is restricted to the FileAccess union.
 	return Object.freeze({ kind: "file-access", subject, selector, access }) as FileAccessRule
-}
-
-function snapshotRule(disposition: SnapshotDisposition, selector: FileSelector): SnapshotRule {
-	// SAFETY: the selector is validated and disposition can only be include or exclude.
-	return Object.freeze({ kind: "snapshot", selector, disposition }) as SnapshotRule
 }

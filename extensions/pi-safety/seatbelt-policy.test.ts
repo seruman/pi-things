@@ -42,7 +42,6 @@ function fixture(root: string, sessionPaths: Parameters<typeof createDefaultPoli
 			paths: {
 				workspace: canonicalPath(workspace),
 				home: canonicalPath(home),
-				stateHome: canonicalPath(stateHome),
 				piConfigDirectory: canonicalPath(piConfigDirectory),
 			},
 			additionalNoAccessPatterns: [],
@@ -54,7 +53,7 @@ function fixture(root: string, sessionPaths: Parameters<typeof createDefaultPoli
 	return { workspace, home, privateTemp, stateHome, compiled: emitSeatbelt(policy), policy }
 }
 
-test("Seatbelt grants confirmed session directories without changing the checkpoint workspace", () => {
+test("Seatbelt grants confirmed session directories", () => {
 	withTestTempDirectory("seatbelt-policy-session-path-", (root) => {
 		const external = path.join(root, "other-repo")
 		fs.mkdirSync(external)
@@ -147,7 +146,7 @@ test("Seatbelt preserves later writable exceptions under read-only parents", () 
 		const protectedDirectory = path.join(value.workspace, "protected")
 		const writableChild = path.join(protectedDirectory, "generated")
 		fs.mkdirSync(writableChild, { recursive: true })
-		const runtimeStart = value.policy.rules.findIndex((rule) => rule.kind !== "file-access" && rule.kind !== "snapshot")
+		const runtimeStart = value.policy.rules.findIndex((rule) => rule.kind !== "file-access")
 		assert.notEqual(runtimeStart, -1)
 
 		const policy = definePolicy({
@@ -239,7 +238,6 @@ test("native wb grants remain scoped to the wb executable", () => {
 				paths: {
 					workspace: canonicalPath(workspace),
 					home: canonicalPath(home),
-					stateHome: canonicalPath(stateHome),
 					piConfigDirectory: canonicalPath(piConfigDirectory),
 				},
 				additionalNoAccessPatterns: [],

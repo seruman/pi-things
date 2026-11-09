@@ -4,10 +4,8 @@ import {
 	type EvaluationSubject,
 	definePolicy,
 	evaluatePolicy,
-	excludeFromSnapshots,
 	executable,
 	file,
-	includeInSnapshots,
 	noAccess,
 	pattern,
 	readOnly,
@@ -34,10 +32,7 @@ describe("ordered policy evaluation", () => {
 			noAccess(shared(), pattern(pathPattern(path.join(workspace, "**", ".env*"), workspace))),
 			readOnly(shared(), tree(pathValue(path.join(workspace, ".git")))),
 			readWrite(executable(git), tree(pathValue(path.join(workspace, ".git")))),
-			excludeFromSnapshots(tree(pathValue(path.join(workspace, "generated")))),
-			includeInSnapshots(tree(pathValue(path.join(workspace, "generated", "keep")))),
 			readOnly(shared(), tree(pathValue(path.join(workspace, "reference-data")))),
-			excludeFromSnapshots(tree(pathValue(path.join(workspace, "reference-data")))),
 		],
 	})
 
@@ -71,24 +66,10 @@ describe("ordered policy evaluation", () => {
 		expect(accessFor({ kind: "executable", executable: git })).toBe("allow")
 	})
 
-	test("access and snapshot inclusion are independent", () => {
-		const readableExcluded = pathValue(path.join(workspace, "reference-data", "manual.txt"))
-		expect(access(readableExcluded, { kind: "builtin" })).toBe("read-only")
-		expect(evaluatePolicy(policy, { kind: "snapshot", path: readableExcluded }).disposition).toBe("exclude")
-
-		const writableExcluded = pathValue(path.join(workspace, "generated", "output.js"))
-		expect(access(writableExcluded, { kind: "builtin" })).toBe("read-write")
-		expect(evaluatePolicy(policy, { kind: "snapshot", path: writableExcluded }).disposition).toBe("exclude")
-		expect(
-			evaluatePolicy(policy, {
-				kind: "snapshot",
-				path: pathValue(path.join(workspace, "generated", "keep", "saved.js")),
-			}).disposition,
-		).toBe("include")
-
-		const protectedIncluded = pathValue(path.join(workspace, ".env.local"))
-		expect(access(protectedIncluded, { kind: "builtin" })).toBe("none")
-		expect(evaluatePolicy(policy, { kind: "snapshot", path: protectedIncluded }).disposition).toBe("include")
+	test("access rules cover reference, generated and protected files", () => {
+		expect(access(path.join(workspace, "reference-data", "manual.txt"), { kind: "builtin" })).toBe("read-only")
+		expect(access(path.join(workspace, "generated", "output.js"), { kind: "builtin" })).toBe("read-write")
+		expect(access(path.join(workspace, ".env.local"), { kind: "builtin" })).toBe("none")
 	})
 
 	test("file selectors do not match descendants", () => {

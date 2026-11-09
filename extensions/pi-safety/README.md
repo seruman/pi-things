@@ -1,11 +1,6 @@
 # Pi Safety
 
-Pi Safety provides two independent session features on macOS:
-
-- **Seatbelt**, disabled by default, applies one ordered policy to model-issued Bash and Pi's built-in `read`, `write`, and `edit` tools.
-- **APFS checkpoints**, enabled by default, create one lazy project checkpoint before the first mutating tool call in each agent turn.
-
-Use `/pi-safety` to toggle either feature immediately. Seatbelt can also start enabled in a headless session with `PI_SAFETY_PROTECTION=1`.
+Pi Safety applies an ordered policy to model-issued Bash and Pi's built-in `read`, `write`, and `edit` tools on macOS. Protection is disabled by default. Use `/pi-safety` to toggle it, or start with `PI_SAFETY_PROTECTION=1`.
 
 ## Seatbelt
 
@@ -13,24 +8,14 @@ When enabled, the host and HOME are read-only by default and the workspace is re
 
 Linked Git worktrees and submodules resolve hooks and configuration through their gitfile, including shared Git configuration and per-worktree `config.worktree`.
 
-Private SSH material, `~/.env`, `~/.netrc`, `~/.gitcookies`, `~/.config/opnix`, cloud credentials, Pi authentication data, project `.env` conventions, snapshot protected storage, and configured project secrets remain inaccessible. Public SSH keys and ordinary SSH client metadata remain readable.
+Private SSH material, `~/.env`, `~/.netrc`, `~/.gitcookies`, `~/.config/opnix`, cloud credentials, Pi authentication data, project `.env` conventions and configured project secrets remain inaccessible. Public SSH keys and ordinary SSH client metadata remain readable.
 
-The complete policy is listed in evaluation order in `default-policy.ts`. In `/pi-safety`, press `p` to browse the resolved Seatbelt ACL read-only, or use `/pi-safety policy` for its text form. `/pi-safety add [path]` grants a confirmed read-only or read-write session directory; `/pi-safety remove [path]` revokes one. Read-write session paths are not checkpointed. Headless sessions can set `PI_SAFETY_SESSION_PATHS` to strict JSON such as `[{
+The complete policy is listed in evaluation order in `default-policy.ts`. In `/pi-safety`, press `p` to browse the resolved Seatbelt ACL read-only, or use `/pi-safety policy` for its text form. `/pi-safety add [path]` grants a confirmed read-only or read-write session directory; `/pi-safety remove [path]` revokes one. Headless sessions can set `PI_SAFETY_SESSION_PATHS` to strict JSON such as `[{
   "path": "/absolute/repo",
   "access": "read-write"
 }]`.
 
-When Seatbelt is disabled, Bash and built-in file tools run with the user's ordinary permissions. Checkpoints remain independent and continue to classify policy-denied files as protected snapshot entries, but unsandboxed Bash can access user-owned state directly.
-
-## Checkpoints
-
-Before the first Bash, `write`, or `edit` call in an agent run, Pi Safety attempts a fast APFS snapshot when checkpoints are enabled. It records successful checkpoints as session metadata without sending them to the model, keeps up to 10 snapshots per project, and excludes generated directories such as `.git`, `.pi`, `.wb`, `node_modules`, `dist`, and `target`.
-
-Checkpoints are best effort: if creation fails, tools continue without rollback protection. The failure is reported once per agent run in tool output (and as a UI warning when available), with no further attempts until the next run. Enabled Seatbelt authorization remains fail-closed.
-
-The `pi-snapshot` command can create, list, inspect, verify, compare, export, garbage-collect, and restore snapshots. Restore starts as a dry run; use `--apply` to mutate the project.
-
-`pi-snapshot prune` cleans up the whole snapshot store, not just the current project. It removes snapshots older than 7 days (change with `--older-than <days>`), keeps at most 10 per project, and removes leftovers from interrupted snapshots and empty project folders. It also starts as a dry run; use `--apply` to remove. Projects with a `.lock` are skipped and listed, so a lock left by a killed process can be removed by hand.
+When Seatbelt is disabled, Bash and built-in file tools run with the user's ordinary permissions.
 
 Projects can tighten protected paths in `.pi/pi-safety.json`:
 
