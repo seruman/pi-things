@@ -19,6 +19,7 @@
     "test:pi-safety": "bun --no-env-file test extensions/pi-safety/*.test.ts",
     "test:shell-leash": "bun test extensions/shell-leash/*.test.ts",
     "test:split-handoff": "bun test extensions/split-handoff.test.ts",
+    "test:poteto": "bun --no-env-file test extensions/poteto/*.test.ts",
     "test:session-messages": "bun --no-env-file test extensions/session-messages/*.test.ts",
     "test:subagents": "bun --no-env-file test extensions/subagents/*.test.ts",
     "test:model-router": "bun --no-env-file test extensions/model-router/*.test.ts",
@@ -30,8 +31,9 @@
     "typecheck:shell-leash": "bunx tsc -p extensions/shell-leash/tsconfig.json",
     "typecheck:subagents": "bunx tsc -p extensions/subagents/tsconfig.json",
     "typecheck:session-messages": "bunx tsc -p extensions/session-messages/tsconfig.json",
+    "typecheck:poteto": "bunx tsc -p extensions/poteto/tsconfig.json",
     "typecheck:single-extensions": "bunx tsc -p extensions/tsconfig.json",
-    "typecheck": "bun run typecheck:web-tools && bun run typecheck:pi-safety && bun run typecheck:shell-leash && bun run typecheck:subagents && bun run typecheck:single-extensions && bun run typecheck:model-router && bun run typecheck:session-messages"
+    "typecheck": "bun run typecheck:web-tools && bun run typecheck:pi-safety && bun run typecheck:shell-leash && bun run typecheck:subagents && bun run typecheck:single-extensions && bun run typecheck:poteto && bun run typecheck:model-router && bun run typecheck:session-messages"
   },
   "pi": {
     "extensions": [
@@ -41,6 +43,7 @@
       "./extensions/split-fork.ts",
       "./extensions/split-handoff.ts",
       "./extensions/goal.ts",
+      "./extensions/poteto/index.ts",
       "./extensions/comment.ts",
       "./extensions/clarify.ts",
       "./extensions/shell-leash/index.ts",

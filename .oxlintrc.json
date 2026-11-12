@@ -15,6 +15,7 @@
     ".tmp-task-tools-drive/**",
     "skills/**",
     "extensions/web-tools/skills/**",
+    "extensions/poteto/vendor/**",
     "tools/oxlint/anti-slop/**"
   ],
   "jsPlugins": [

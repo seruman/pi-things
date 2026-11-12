@@ -11,6 +11,7 @@ Me just prompting the shit out of LLMs to create things I want in pi.
 - `/split-fork` — clone the current active branch into a new terminal split
 - `/split-handoff <goal>` — open a focused handoff as an editable draft in a fresh, parent-linked split; its first turn performs read-only orientation and waits for approval
 - `/goal`
+- [poteto](./extensions/poteto/README.md) — toggle the vendored pstack skill pack and automatic mode instructions
 - `/comment`
 - [pi-safety](./extensions/pi-safety/README.md)
 - [shell-leash](./extensions/shell-leash/README.md)
@@ -20,7 +21,6 @@ Me just prompting the shit out of LLMs to create things I want in pi.
   - [rex](./skills/rex/SKILL.md)
   - [sumocli](./skills/sumocli/SKILL.md)
   - [Matt Pocock skills](./skills/matt-pocock/README.md)
-  - [pstack](./skills/pstack/UPSTREAM.md) — vendored from cursor/plugins with a [pi adapter](./skills/pstack/ADAPTER.md); update with `bun run sync:pstack`
 
 ## Install
 

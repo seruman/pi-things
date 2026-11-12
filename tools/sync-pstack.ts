@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
-// Vendors pstack from cursor/plugins into skills/pstack. Rerun to update, then review the diff.
-// Vendored files are regenerated on every run. Pi-specific guidance lives in skills/pstack/ADAPTER.md.
+// Vendors pstack into extensions/poteto/vendor/pstack. Rerun to update, then review the diff.
+// Vendored files are regenerated on every run. Pi-specific guidance lives in its ADAPTER.md.
 
 import { execFileSync } from "node:child_process"
 import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs"
@@ -14,7 +14,7 @@ const ROOT = join(import.meta.dir, "..")
 
 const SKILLS_ROOT = join(ROOT, "skills")
 
-const DEST = join(SKILLS_ROOT, "pstack")
+const DEST = join(ROOT, "extensions", "poteto", "vendor", "pstack")
 
 const LOCAL_FILES = new Set(["ADAPTER.md"])
 
@@ -107,10 +107,10 @@ function enableModelInvocation(skill: string, text: string): string {
 	return next
 }
 
-function skillNames(dir: string): Map<string, string[]> {
+function skillNames(dirs: string[]): Map<string, string[]> {
 	const names = new Map<string, string[]>()
 
-	for (const path of walk(dir).filter((path) => basename(path) === "SKILL.md")) {
+	for (const path of dirs.flatMap(walk).filter((path) => basename(path) === "SKILL.md")) {
 		const name = frontmatter(readFileSync(path, "utf8"))
 			.match(/^name:(.*)$/m)?.[1]
 			?.trim()
@@ -216,7 +216,7 @@ function main(): void {
 		writeFileSync(path, text)
 	}
 
-	const collisions = [...skillNames(SKILLS_ROOT)].filter(([, paths]) => paths.length > 1)
+	const collisions = [...skillNames([SKILLS_ROOT, skillsDir])].filter(([, paths]) => paths.length > 1)
 
 	for (const [name, paths] of collisions) console.error(`skill name collision: ${name} in ${paths.join(", ")}`)
 

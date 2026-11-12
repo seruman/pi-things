@@ -98,5 +98,5 @@ pi has no Cursor Automations, Bugbot, Cursor cloud agents, Custom Modes, Origin,
 | Cursor cloud agents | `environment: "cloud"` maps to a worktree, as in Subagent fields. Skip a step that needs the cloud agent itself. |
 | Origin (`origin pr ...`) | Use the `gh` form the step gives. That is not a skip. |
 | A built-in PR tool | Use `gh pr create` and the other `gh` commands the step gives. That is not a skip. |
-| Custom Mode, "Use as Mode" | Start each task with `/skill:poteto-mode`. |
+| Custom Mode, "Use as Mode" | `/poteto` enables the skill pack and automatically injects this adapter and `poteto-mode` for the session; run it again to disable the whole pack. `/poteto repo` flips the folder default. |
 | Skills excluded from this copy: `setup-pstack`, `make-bot-ui`, `ketchup-video` | Skip any step that runs them. Use `/skill:ketchup` in place of `ketchup-video`. |
