@@ -1,6 +1,7 @@
 import { relationIdSchema, sessionIdSchema } from "../lib/session-delivery/identity"
 import { expect, test } from "bun:test"
 import { randomUUID } from "node:crypto"
+import { writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { InMemoryCredentialStore } from "@earendil-works/pi-ai"
 import {
@@ -16,7 +17,14 @@ import { SessionMailbox, listEndpoints, workStatus } from "../lib/session-delive
 import { acquireDelivery } from "../lib/session-delivery/runtime"
 import subagents from "../subagents/index"
 import { familyPolicy } from "../subagents/family"
-import { prepareRun, runDirectory, updateMetadata, writeMetadata, type RunMetadata } from "../subagents/runs"
+import {
+	metadataPath,
+	prepareRun,
+	runDirectory,
+	updateMetadata,
+	writeMetadata,
+	type RunMetadata,
+} from "../subagents/runs"
 import { createSessionMessages } from "./index"
 import { gate } from "./fixtures/provider"
 import { sdk, testDirectory } from "./fixtures/sdk"
@@ -168,7 +176,7 @@ test("all private handle mutations and waits reject a foreign parent before exte
 						undefined,
 						h.session.extensionRunner.createToolContext("routing", undefined),
 					),
-				).rejects.toThrow("belongs to another parent")
+				).rejects.toThrow("Unknown subagent")
 			}
 		} finally {
 			await h.session.extensionRunner.emit({ type: "session_shutdown", reason: "reload" })
@@ -217,7 +225,10 @@ test.each(["parent", "child", "file", "relation", "stopped", "suspended"] as con
 					suspended: { suspended: true },
 				} satisfies Record<typeof change, Partial<RunMetadata>>
 
-				updateMetadata(runDirectory(run.handle), patches[change])
+				// updateMetadata keeps the owner fixed, so a changed owner is written directly.
+				if (change === "parent") {
+					writeFileSync(metadataPath(runDirectory(run.handle)), JSON.stringify({ ...run, ...patches.parent }))
+				} else updateMetadata(runDirectory(run.handle), patches[change])
 				expect(() => parent.send(sessionIdSchema.parse("child"), "denied", "steer", delegate)).toThrow("authorized")
 				expect(() => child.send(sessionIdSchema.parse("parent"), "denied", "steer", reply)).toThrow("authorized")
 
