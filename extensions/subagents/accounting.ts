@@ -280,7 +280,7 @@ export class UsageAccounting {
 
 		for (const run of listRuns(parentSessionId, { includeStopped: true })) {
 			const paths = new Set([
-				join(runDirectory(run.handle), "session.jsonl"),
+				join(runDirectory(run.handle, run.parentSessionId), "session.jsonl"),
 				...(run.sessionFiles ?? []),
 				run.sessionFile,
 			])

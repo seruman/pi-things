@@ -53,7 +53,7 @@ test.each(selections)("managed /new then reload retains bridge and restrictions:
 	}
 
 	process.env.PI_CODING_AGENT_DIR = root
-	const prepared = prepareRun()
+	const prepared = prepareRun(sessionIdSchema.parse("parent"))
 	const runDir = runDirectory(prepared.handle)
 	process.env.PI_SUBAGENT_RUN_DIR = runDir
 	process.argv = [process.execPath, "pi", "--session", prepared.sessionFile]

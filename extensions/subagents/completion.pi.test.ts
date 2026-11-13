@@ -75,7 +75,7 @@ async function fixture(
 		},
 	})
 
-	const prepared = prepareRun()
+	const prepared = prepareRun(sessionIdSchema.parse(parent.session.sessionId))
 	writeMetadata({
 		version: 1,
 		...prepared,

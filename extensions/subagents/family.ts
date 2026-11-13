@@ -5,7 +5,7 @@ import { getRun, readMetadata, runDirectory, type RunMetadata } from "./runs"
 import { stopRequested } from "./stop"
 
 export function ownedRun({ handle, parentSessionId }: Pick<RunMetadata, "handle" | "parentSessionId">) {
-	const run = getRun(handle)
+	const run = getRun(handle, parentSessionId)
 
 	if (run.parentSessionId !== parentSessionId) throw new Error(`Subagent ${handle} belongs to another parent`)
 
@@ -30,13 +30,20 @@ export function managedParent(ctx: Pick<ExtensionContext, "sessionManager">, run
 }
 
 export const familyPolicy: FamilyPolicy = (route, from, to) => {
-	const run = readMetadata(runDirectory(route.handle))
+	const parent = route.direction === "delegate" ? from : to
+	const child = route.direction === "delegate" ? to : from
+	let run: RunMetadata | undefined
+
+	try {
+		run = readMetadata(runDirectory(route.handle, parent.sessionId))
+	} catch {
+		// An unusable handle or session id owns no run.
+		return false
+	}
 
 	if (!run || run.stoppedAt || run.suspended || run.relation !== route.relation) return false
 
 	if (route.direction === "delegate" && stopRequested(run)) return false
-	const parent = route.direction === "delegate" ? from : to
-	const child = route.direction === "delegate" ? to : from
 
 	return (
 		parent.sessionId === run.parentSessionId &&

@@ -15,7 +15,7 @@ test.each([
 	async (_name, flags, reply) => {
 		const root = testDirectory()
 		const handle = "c0ffee"
-		const runDir = join(root, "subagents", handle)
+		const runDir = join(root, "subagents", "by-parent", "parent", handle)
 		mkdirSync(runDir, { recursive: true })
 		const sessionFile = join(runDir, "session.jsonl")
 		writeFileSync(sessionFile, "")

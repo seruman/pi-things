@@ -1,5 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto"
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs"
+// Default import: tests spy on these calls to prove which run files a scan opens.
+import fs from "node:fs"
 import { join } from "node:path"
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core"
 import { getAgentDir } from "@earendil-works/pi-coding-agent"
@@ -76,23 +77,66 @@ function getRunsDir(): string {
 	return join(getAgentDir(), "subagents")
 }
 
-export function runDirectory(handle: RunHandle): string {
-	if (!/^[a-z0-9]+$/.test(handle)) throw new Error(`Invalid subagent handle: ${handle}`)
+// Runs live at <root>/by-parent/<parent session id>/<handle>, so a session lists its runs
+// by reading its own folder only. Nothing outside by-parent is ever read.
+const PARENTS = "by-parent"
 
-	return join(getRunsDir(), handle)
+const handlePattern = /^[a-z0-9]+$/
+
+// Pi's --session-id alphabet. Anything else is not trusted as a path segment.
+const parentSegmentPattern = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,198}[A-Za-z0-9])?$/
+
+function parentDirectory(parentSessionId: SessionId): string {
+	if (!parentSegmentPattern.test(parentSessionId)) {
+		throw new Error(`Session id ${JSON.stringify(parentSessionId)} is not usable as a subagent directory name`)
+	}
+
+	return join(getRunsDir(), PARENTS, parentSessionId)
+}
+
+function directories(path: string): string[] {
+	try {
+		return fs
+			.readdirSync(path, { withFileTypes: true })
+			.filter((entry) => entry.isDirectory())
+			.map((entry) => entry.name)
+	} catch (error) {
+		if (error instanceof Error && "code" in error && (error.code === "ENOENT" || error.code === "ENOTDIR")) return []
+		throw error
+	}
+}
+
+function nestedDirectories(handle: RunHandle): string[] {
+	const parents = join(getRunsDir(), PARENTS)
+
+	return directories(parents)
+		.map((parent) => join(parents, parent, handle))
+		.filter((path) => fs.existsSync(path))
+}
+
+// Pass the parent wherever it is known: the path is then computed without touching the
+// disk. Without it every parent folder is probed, so keep that form off timer paths.
+export function runDirectory(handle: RunHandle, parentSessionId?: SessionId): string {
+	if (!handlePattern.test(handle)) throw new Error(`Invalid subagent handle: ${handle}`)
+
+	if (parentSessionId !== undefined) return join(parentDirectory(parentSessionId), handle)
+	const found = nestedDirectories(handle)[0]
+
+	if (!found) throw new Error(`Unknown subagent: ${handle}`)
+
+	return found
 }
 
 export function metadataPath(runDir: string): string {
 	return join(runDir, "metadata.json")
 }
 
+// Handles stay unique across parents: Rex pane labels, status ids and handle-only lookups use them bare.
 function generateHandle(): RunHandle {
-	mkdirSync(getRunsDir(), { recursive: true, mode: 0o700 })
-
 	for (let attempt = 0; attempt < 100; attempt++) {
 		const handle = runHandleSchema.parse(randomBytes(3).toString("hex"))
 
-		if (!existsSync(runDirectory(handle))) return handle
+		if (nestedDirectories(handle).length === 0) return handle
 	}
 
 	throw new Error("Could not allocate a unique subagent handle")
@@ -114,53 +158,57 @@ export type RunIdentity = z.infer<typeof runIdentitySchema>
 
 export function readRunIdentity(runDir: string): RunIdentity | undefined {
 	try {
-		return runIdentitySchema.parse(JSON.parse(readFileSync(join(runDir, "identity.json"), "utf8")))
+		return runIdentitySchema.parse(JSON.parse(fs.readFileSync(join(runDir, "identity.json"), "utf8")))
 	} catch {
 		return undefined
 	}
 }
 
-export function prepareRun(parentSessionId?: SessionId) {
+export function prepareRun(parentSessionId: SessionId) {
+	// Validate the owner before allocating anything: an unusable id must not spawn.
+	const parent = parentDirectory(parentSessionId)
 	const handle = generateHandle()
-	const directory = runDirectory(handle)
+	const directory = join(parent, handle)
 	const sessionFile = join(directory, "session.jsonl")
-	mkdirSync(directory, { recursive: true, mode: 0o700 })
-	writeFileSync(sessionFile, "", { mode: 0o600 })
+	fs.mkdirSync(directory, { recursive: true, mode: 0o700 })
+	fs.writeFileSync(sessionFile, "", { mode: 0o600 })
 	const relation = relationIdSchema.parse(randomUUID())
 
-	if (parentSessionId) {
-		writeFileSync(
-			join(directory, "identity.json"),
-			JSON.stringify(runIdentitySchema.parse({ handle, relation, parentSessionId })),
-			{ mode: 0o600, flag: "wx" },
-		)
-	}
+	fs.writeFileSync(
+		join(directory, "identity.json"),
+		JSON.stringify(runIdentitySchema.parse({ handle, relation, parentSessionId })),
+		{ mode: 0o600, flag: "wx" },
+	)
 
 	return { handle, sessionFile, relation }
 }
 
 export function readMetadata(runDir: string): RunMetadata | undefined {
 	try {
-		return runMetadataSchema.safeParse(JSON.parse(readFileSync(metadataPath(runDir), "utf8"))).data
+		return runMetadataSchema.safeParse(JSON.parse(fs.readFileSync(metadataPath(runDir), "utf8"))).data
 	} catch {
 		return undefined
 	}
 }
 
-export function getRun(handle: RunHandle): RunMetadata {
-	const metadata = readMetadata(runDirectory(handle))
+export function getRun(handle: RunHandle, parentSessionId?: SessionId): RunMetadata {
+	const metadata = readMetadata(runDirectory(handle, parentSessionId))
 
 	if (!metadata) throw new Error(`Unknown subagent: ${handle}`)
 
 	return metadata
 }
 
-export function writeMetadata(metadata: RunMetadata): void {
+function write(runDir: string, metadata: RunMetadata): void {
 	const value = runMetadataSchema.parse(metadata)
-	const target = metadataPath(runDirectory(value.handle))
+	const target = metadataPath(runDir)
 	const temporary = `${target}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`
-	writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", mode: 0o600 })
-	renameSync(temporary, target)
+	fs.writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", mode: 0o600 })
+	fs.renameSync(temporary, target)
+}
+
+export function writeMetadata(metadata: RunMetadata): void {
+	write(runDirectory(metadata.handle, metadata.parentSessionId), metadata)
 }
 
 // Same metadata update flow as pi-subagent; the bridge applies names through Pi's SDK.
@@ -178,30 +226,41 @@ export function updateMetadata(
 		...patch,
 		version: 1,
 		handle: current.handle,
+		// The owner decides where a run is stored and who may list it; it never changes.
+		parentSessionId: current.parentSessionId,
 	}
 
 	for (const field of clear) delete next[field]
-	writeMetadata(next)
+	write(runDir, next)
 
 	return next
 }
 
-export function listRuns(parentSessionId?: SessionId, options: { includeStopped?: boolean } = {}): RunMetadata[] {
-	const root = getRunsDir()
+function runDirectories(parentSessionId: SessionId | undefined): string[] {
+	const parents = join(getRunsDir(), PARENTS)
+	const owners = parentSessionId === undefined ? directories(parents) : [parentSessionId]
 
-	if (!existsSync(root)) return []
+	return owners.flatMap((owner) =>
+		directories(join(parents, owner))
+			.filter((handle) => handlePattern.test(handle))
+			.map((handle) => join(parents, owner, handle)),
+	)
+}
+
+export function listRuns(parentSessionId?: SessionId, options: { includeStopped?: boolean } = {}): RunMetadata[] {
 	const runs: RunMetadata[] = []
 
-	for (const entry of readdirSync(root, { withFileTypes: true })) {
-		if (!entry.isDirectory()) continue
-		const dir = join(root, entry.name)
+	// An unusable session id owns no runs: spawning under it is refused.
+	if (parentSessionId !== undefined && !parentSegmentPattern.test(parentSessionId)) return []
 
-		if (!existsSync(metadataPath(dir))) continue
+	for (const dir of runDirectories(parentSessionId)) {
+		// A prepared run has no metadata until its child has launched.
 		const metadata = readMetadata(dir)
 
 		if (!metadata || (metadata.stoppedAt && !options.includeStopped)) continue
 
-		if (parentSessionId && metadata.parentSessionId !== parentSessionId) continue
+		// Session ids that differ only by case share a folder on case-insensitive filesystems.
+		if (parentSessionId !== undefined && metadata.parentSessionId !== parentSessionId) continue
 		runs.push(metadata)
 	}
 
@@ -209,10 +268,13 @@ export function listRuns(parentSessionId?: SessionId, options: { includeStopped?
 }
 
 // Call only after the Rex block is closed or known to be absent. Never delete history.
-export function markStopped(handle: RunHandle): RunMetadata {
-	const current = getRun(handle)
+export function markStopped(handle: RunHandle, parentSessionId?: SessionId): RunMetadata {
+	const directory = runDirectory(handle, parentSessionId)
+	const current = readMetadata(directory)
 
-	const stopped = updateMetadata(runDirectory(handle), {
+	if (!current) throw new Error(`Unknown subagent: ${handle}`)
+
+	const stopped = updateMetadata(directory, {
 		stoppedAt: current.stoppedAt ?? new Date().toISOString(),
 		suspended: false,
 	})

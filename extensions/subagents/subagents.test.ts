@@ -1,7 +1,7 @@
-import { afterEach, beforeEach, expect, test, vi } from "bun:test"
+import { afterEach, beforeEach, expect, spyOn, test, vi } from "bun:test"
 import { randomUUID } from "node:crypto"
 import { messageIdSchema, runHandleSchema, sessionIdSchema } from "../lib/session-delivery/identity"
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
+import fs, { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { setImmediate } from "node:timers/promises"
@@ -33,6 +33,7 @@ import {
 	type RunMetadata,
 	getRun,
 	listRuns,
+	prepareRun,
 	readMetadata,
 	readRunIdentity,
 	runDirectory,
@@ -514,9 +515,116 @@ async function child(run: RunMetadata) {
 	return c
 }
 
+// Rewrites the owner on disk, as a foreign writer or a case-folded shared folder would.
+function disown(run: RunMetadata, owner: string): void {
+	const path = join(runDirectory(run.handle, run.parentSessionId), "metadata.json")
+	writeFileSync(path, JSON.stringify({ ...JSON.parse(readFileSync(path, "utf8")), parentSessionId: owner }))
+}
+
+function foreignRun(owner: string): RunMetadata {
+	const parentSessionId = sessionIdSchema.parse(owner)
+	const prepared = prepareRun(parentSessionId)
+
+	const run: RunMetadata = {
+		version: 1,
+		...prepared,
+		parentSessionId,
+		blockId: "block:foreign",
+		cwd: root,
+		provider: "configured",
+		model: "parent",
+		thinking: "off",
+		launchArgs: [],
+		createdAt: new Date().toISOString(),
+	}
+
+	writeMetadata(run)
+
+	return run
+}
+
+test("a new run lands under its parent and the child is handed that directory", async () => {
+	const run = await spawn()
+	const directory = join(root, "subagents", "by-parent", "parent", run.handle)
+	expect(runDirectory(run.handle, run.parentSessionId)).toBe(directory)
+	expect(runDirectory(run.handle)).toBe(directory)
+	expect(run.sessionFile).toBe(join(directory, "session.jsonl"))
+	expect(readdirSync(join(root, "subagents"))).toEqual(["by-parent"])
+	expect(launches.at(-1)?.command).toContain(`PI_SUBAGENT_RUN_DIR=${directory}`)
+})
+
+test("a session's timers and listings never open another session's runs", async () => {
+	const own = await spawn()
+	const foreign = foreignRun("other")
+	const flat = join(root, "subagents", "abc123")
+	mkdirSync(flat)
+	const flatMetadata = JSON.stringify({ ...foreign, handle: "abc123", parentSessionId: "parent" })
+	writeFileSync(join(flat, "metadata.json"), flatMetadata)
+	const spies = (["readFileSync", "readdirSync", "existsSync", "statSync"] as const).map((name) => spyOn(fs, name))
+	let opened: string[] = []
+
+	try {
+		await parent.emit("session_start", ctx)
+		await tick(6000)
+		expect((await call("agent_list", { includeStopped: true })).runs).toEqual([
+			expect.objectContaining({ handle: own.handle }),
+		])
+		await call("agent_rename", { handle: own.handle, name: "mine" })
+		await expect(call("agent_rename", { handle: foreign.handle, name: "stolen" })).rejects.toThrow("Unknown subagent")
+		opened = spies.flatMap((spy) => spy.mock.calls.map((args) => String(args[0])))
+	} finally {
+		for (const spy of spies) spy.mockRestore()
+	}
+
+	const mine = join(root, "subagents", "by-parent", "parent")
+	expect(opened.filter((path) => path.startsWith(mine)).length).toBeGreaterThan(30)
+	expect(opened.filter((path) => path.startsWith(join(root, "subagents")) && !path.startsWith(mine))).toEqual([])
+	expect(readFileSync(join(flat, "metadata.json"), "utf8")).toBe(flatMetadata)
+	expect(
+		listRuns()
+			.map((run) => run.handle)
+			.sort(),
+	).toEqual([own.handle, foreign.handle].sort())
+})
+
+test("runs sharing a parent folder are still filtered by their recorded owner", async () => {
+	const run = await spawn()
+	const shared = await spawn()
+	// "PARENT" and "parent" are one folder on a case-insensitive filesystem.
+	disown(shared, "PARENT")
+	expect(listRuns(sessionIdSchema.parse("parent")).map((r) => r.handle)).toEqual([run.handle])
+	expect((await call("agent_list", { includeStopped: true })).runs).toEqual([
+		expect.objectContaining({ handle: run.handle }),
+	])
+	await expect(call("agent_stop", { handle: shared.handle })).rejects.toThrow("belongs to another parent")
+	updateMetadata(runDirectory(run.handle, run.parentSessionId), { parentSessionId: sessionIdSchema.parse("thief") })
+	expect(getRun(run.handle).parentSessionId).toBe(sessionIdSchema.parse("parent"))
+})
+
+test.each(["", ".", "..", "../escape", "a/b", "a b", "-lead", "trail.", "x".repeat(201)])(
+	"a session id unusable as a directory name refuses to spawn: %p",
+	async (id) => {
+		const owner = sessionIdSchema.parse(id)
+		expect(() => prepareRun(owner)).toThrow("not usable")
+		expect(listRuns(owner)).toEqual([])
+		// The session is recreated for every test.
+		parentSession.getSessionId = () => id
+		await expect(execute("agent_spawn", { prompt: "task", background: true })).rejects.toThrow("not usable")
+		expect(existsSync(join(root, "subagents"))).toBe(false)
+		expect(launches).toEqual([])
+	},
+)
+
+test("a prepared run without metadata is not listed", () => {
+	const prepared = prepareRun(sessionIdSchema.parse("parent"))
+	expect(existsSync(prepared.sessionFile)).toBe(true)
+	expect(listRuns(sessionIdSchema.parse("parent"))).toEqual([])
+	expect(listRuns()).toEqual([])
+})
+
 test("private handles reject an unrelated parent before changing a child", async () => {
 	const run = await spawn()
-	updateMetadata(runDirectory(run.handle), { parentSessionId: sessionIdSchema.parse("unrelated") })
+	disown(run, "unrelated")
 	await expect(call("agent_rename", { handle: run.handle, name: "stolen" })).rejects.toThrow(/owner|parent/i)
 	expect(getRun(run.handle).name).toBeUndefined()
 })
@@ -1846,7 +1954,7 @@ test("stopped history listing stays parent-scoped and does not hide a healthy ch
 	await child(foreign)
 	await call("agent_stop", { handle: stopped.handle })
 	await call("agent_stop", { handle: foreign.handle })
-	updateMetadata(runDirectory(foreign.handle), { parentSessionId: sessionIdSchema.parse("other") })
+	disown(foreign, "other")
 	expect((await call("agent_list")).runs).toEqual([expect.objectContaining({ handle: healthy.handle })])
 	const history = (await call("agent_list", { includeStopped: true })).runs
 	expect(history).toHaveLength(2)
@@ -1946,7 +2054,7 @@ test("missing blocks mean exited, but connection failures stay unknown and don't
 test("metadata skips corrupt records, list stays parent-scoped, and names/handles are validated", async () => {
 	const run = await spawn()
 	const other = await spawn()
-	updateMetadata(runDirectory(other.handle), { parentSessionId: sessionIdSchema.parse("other") })
+	disown(other, "other")
 	expect((await call("agent_list")).runs).toEqual([expect.objectContaining({ handle: run.handle })])
 	writeFileSync(join(runDirectory(other.handle), "metadata.json"), "{")
 	expect(readMetadata(runDirectory(other.handle))).toBeUndefined()

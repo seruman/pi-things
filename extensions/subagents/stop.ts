@@ -3,12 +3,12 @@ import { readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { type RunMetadata, runDirectory } from "./runs"
 
-type Target = Pick<RunMetadata, "handle" | "blockId">
+type Target = Pick<RunMetadata, "handle" | "parentSessionId" | "blockId">
 
 type Signal = "stop-request" | "stop-ready"
 
 function path(run: Target, signal: Signal): string {
-	return join(runDirectory(run.handle), signal)
+	return join(runDirectory(run.handle, run.parentSessionId), signal)
 }
 
 function matches(run: Target, signal: Signal): boolean {

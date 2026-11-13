@@ -77,7 +77,7 @@ function usage(tokens: number): Usage {
 }
 
 function child(legacy = false) {
-	const prepared = prepareRun()
+	const prepared = prepareRun(sessionIdSchema.parse("parent"))
 
 	const metadata: RunMetadata = {
 		...prepared,
@@ -530,7 +530,8 @@ test("accounting preserves optional token fields and isolates foreign-parent run
 	c.session.appendUsage("custom", "provider", "model", part)
 	const foreign = child()
 	reply(foreign.session, 100)
-	updateMetadata(runDirectory(foreign.handle), { parentSessionId: sessionIdSchema.parse("other-parent") })
+	const path = join(runDirectory(foreign.handle), "metadata.json")
+	writeFileSync(path, JSON.stringify({ ...JSON.parse(readFileSync(path, "utf8")), parentSessionId: "other-parent" }))
 	accounting.reconcile(ctx, "wait")
 	expect(accounting.charge(ctx, "list")).toEqual(part)
 	expect(records()).toHaveLength(1)

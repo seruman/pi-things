@@ -43,7 +43,7 @@ export function readCompletion(
 ): Completion | undefined {
 	try {
 		const fact = completionSchema.parse(
-			JSON.parse(readFileSync(join(runDirectory(run.handle), "completion.json"), "utf8")),
+			JSON.parse(readFileSync(join(runDirectory(run.handle, run.parentSessionId), "completion.json"), "utf8")),
 		)
 
 		return fact.relation === run.relation && fact.parentSessionId === run.parentSessionId && fact.handle === run.handle
@@ -68,7 +68,7 @@ export function publishCompletion(
 		sequence: (readCompletion(run)?.sequence ?? 0) + 1,
 	})
 
-	const target = join(runDirectory(run.handle), "completion.json")
+	const target = join(runDirectory(run.handle, run.parentSessionId), "completion.json")
 	const temporary = `${target}.${randomUUID()}.tmp`
 	writeFileSync(temporary, JSON.stringify(fact), { mode: 0o600, flag: "wx" })
 	renameSync(temporary, target)
@@ -218,7 +218,7 @@ export class CompletionCoordinator {
 					throw new Error("Completion belongs to a retired parent")
 				}
 
-				const run = readMetadata(runDirectory(terminal.handle))
+				const run = readMetadata(runDirectory(terminal.handle, terminal.parentSessionId))
 
 				if (!run || run.parentSessionId !== terminal.parentSessionId || run.relation !== terminal.relation) {
 					throw new Error("Completion ownership changed")
@@ -278,7 +278,7 @@ export class CompletionCoordinator {
 				text: completionNotice(fact, answer),
 				gate: () => {
 					if (epoch !== this.epoch) return "withdraw"
-					const current = readMetadata(runDirectory(run.handle))
+					const current = readMetadata(runDirectory(run.handle, run.parentSessionId))
 
 					if (
 						!current ||

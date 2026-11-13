@@ -19,6 +19,12 @@ Parent tools are available through codemode.
 
 Children use `agent_reply` to message their parent.
 
+## Storage
+
+Runs are kept at `<agent dir>/subagents/by-parent/<parent session id>/<handle>/`, so a session only ever reads its own folder. History is never deleted.
+
+A session whose id is not a plain directory name (letters, numbers, `.`, `_`, `-`, alphanumeric at both ends) cannot spawn.
+
 ## Checks
 
 ```sh

@@ -196,7 +196,7 @@ function launchCommand(run: Omit<RunMetadata, "blockId">, initial: string[] = []
 	return [
 		"env",
 		`PI_CODING_AGENT_DIR=${getAgentDir()}`,
-		`PI_SUBAGENT_RUN_DIR=${runDirectory(run.handle)}`,
+		`PI_SUBAGENT_RUN_DIR=${runDirectory(run.handle, run.parentSessionId)}`,
 		...getPiInvocationParts(),
 		// Load this bridge even when the installed package is older or cwd differs.
 		"--extension",
@@ -321,7 +321,7 @@ async function stopRun(
 	// Re-read after closing: the bridge may have updated its session path or final state.
 	ownedRun({ handle, parentSessionId: run.parentSessionId })
 
-	return markStopped(handle)
+	return markStopped(handle, run.parentSessionId)
 }
 
 async function settle(
@@ -517,7 +517,7 @@ async function spawn(
 	} catch (error) {
 		// A failed launch response does not prove the child never wrote history.
 		throw new Error(
-			`Could not spawn subagent ${prepared.handle}; files retained at ${runDirectory(prepared.handle)}: ${error instanceof Error ? error.message : String(error)}`,
+			`Could not spawn subagent ${prepared.handle}; files retained at ${runDirectory(prepared.handle, parentSessionId)}: ${error instanceof Error ? error.message : String(error)}`,
 			{ cause: error },
 		)
 	}
@@ -719,35 +719,35 @@ export function installParent(
 
 				if (seen.alive) {
 					clearStopSignals(run)
-					updateMetadata(runDirectory(run.handle), { suspended: false })
+					updateMetadata(runDirectory(run.handle, run.parentSessionId), { suspended: false })
 					continue
 				}
 
 				if (seen.exists) await closeBlock(exec, run.blockId)
 
 				if (!existsSync(run.sessionFile)) {
-					updateMetadata(runDirectory(run.handle), {
+					updateMetadata(runDirectory(run.handle, run.parentSessionId), {
 						state: "error",
 						error: `Cannot resume: transcript missing at ${run.sessionFile}`,
 					})
-					markStopped(run.handle)
+					markStopped(run.handle, run.parentSessionId)
 					continue
 				}
 
 				clearStopSignals(run)
 
 				const starting = updateMetadata(
-					runDirectory(run.handle),
+					runDirectory(run.handle, run.parentSessionId),
 					{ state: "starting", launchSessionFile: run.sessionFile },
 					["error"],
 				)
 
 				if (!starting) throw new Error(`Cannot resume: metadata missing for ${run.handle}`)
 				const blockId = await newBlock(exec, run.cwd, run.handle, launchCommand(starting))
-				updateMetadata(runDirectory(run.handle), { blockId, suspended: false })
+				updateMetadata(runDirectory(run.handle, run.parentSessionId), { blockId, suspended: false })
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error)
-				updateMetadata(runDirectory(run.handle), { state: "error", error: message })
+				updateMetadata(runDirectory(run.handle, run.parentSessionId), { state: "error", error: message })
 
 				if (ctx.hasUI) ctx.ui.notify(`Could not resume subagent ${runDisplayName(run)}: ${message}`, "error")
 			}
@@ -800,11 +800,11 @@ export function installParent(
 				if (!seen.alive) {
 					if (seen.exists) await closeBlock(exec, run.blockId)
 
-					if (!run.suspended) markStopped(run.handle)
+					if (!run.suspended) markStopped(run.handle, run.parentSessionId)
 					continue
 				}
 
-				updateMetadata(runDirectory(run.handle), { suspended: true })
+				updateMetadata(runDirectory(run.handle, run.parentSessionId), { suspended: true })
 				await closeBlock(exec, run.blockId)
 			} catch (error) {
 				failures.push(error instanceof Error ? error : new Error(String(error)))
@@ -850,7 +850,7 @@ function registerCommand(pi: ParentHost, exec: Exec): void {
 			const selected = await choose(ctx.ui, items)
 
 			if (!selected) return
-			const run = getRun(runHandleSchema.parse(selected))
+			const run = getRun(runHandleSchema.parse(selected), sessionIdSchema.parse(ctx.sessionManager.getSessionId()))
 			await showBlock(exec, run.blockId)
 		},
 	})
@@ -912,7 +912,7 @@ function registerTools(
 			})
 
 			const name = normalizeRunName(params.name)
-			const updated = updateMetadata(runDirectory(run.handle), { name })
+			const updated = updateMetadata(runDirectory(run.handle, run.parentSessionId), { name })
 
 			if (!updated) throw new Error(`Could not rename subagent: ${run.handle}`)
 
