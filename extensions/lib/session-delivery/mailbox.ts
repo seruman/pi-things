@@ -143,6 +143,9 @@ const MAX_FILE = 128 * 1024
 
 const FRESH_MS = 15000
 
+// Peers only need an endpoint fresher than FRESH_MS; refreshing it on every poll is wasted disk writes.
+const HEARTBEAT_MS = 5000
+
 export function mailboxRoot() {
 	return join(getAgentDir(), "session-messages")
 }
@@ -337,6 +340,11 @@ export class SessionMailbox {
 				rmSync(join(root, name), { recursive: true, force: true })
 			} catch {}
 		}
+	}
+	// The periodic form of heartbeat: publishes only a changed name or an ageing endpoint.
+	keepAlive(name: string | undefined) {
+		if (name === this.endpoint.name && Math.abs(Date.now() - this.endpoint.updatedAt) < HEARTBEAT_MS) return
+		this.heartbeat(name)
 	}
 	heartbeat(name: string | undefined) {
 		if (this.closed) return

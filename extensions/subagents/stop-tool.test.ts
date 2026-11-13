@@ -413,12 +413,9 @@ test("stop leaves submitted follow-up under Pi control and publishes cancellatio
 			followUp: true,
 		})
 		await until(() => Object.values(f.admissions()).some((item) => item.kind === "submitted"))
-		const endpoint = () => listEndpoints(f.mailboxRoot).find((item) => item.sessionId === f.child.session.sessionId)
-		const updatedAt = endpoint()?.updatedAt
-
-		if (updatedAt === undefined) throw new Error("Missing child endpoint")
 		requestStop(getRun(f.prepared.handle))
-		await until(() => (endpoint()?.updatedAt ?? 0) > updatedAt)
+		// Let the child's 5 ms delivery poll run several times with the stop request in place.
+		await Bun.sleep(100)
 		expect(Object.values(f.admissions()).some((item) => item.kind === "submitted")).toBe(true)
 		expect(
 			f.child.session.sessionManager

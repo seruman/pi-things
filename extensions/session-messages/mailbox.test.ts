@@ -1,5 +1,5 @@
 import { sessionIdSchema } from "../lib/session-delivery/identity"
-import { expect, test } from "bun:test"
+import { expect, setSystemTime, test } from "bun:test"
 import { mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { listEndpoints, MAX_INBOX, messageSchema, workStatus } from "../lib/session-delivery/mailbox"
@@ -94,6 +94,35 @@ test("both message addresses reject malformed fields and remain immutable", () =
 	]) {
 		expect(messageSchema.safeParse({ ...message, from: address }).success).toBe(false)
 		expect(messageSchema.safeParse({ ...message, to: address }).success).toBe(false)
+	}
+})
+
+test("periodic keep-alive rewrites the endpoint only when it ages or is renamed", () => {
+	const { root, a } = pair()
+	const file = join(root, a.endpoint.instanceId, "endpoint.json")
+	const inode = () => statSync(file).ino
+	const first = inode()
+	const started = Date.now()
+
+	try {
+		for (let i = 0; i < 20; i++) a.keepAlive(undefined)
+		setSystemTime(started + 4000)
+		a.keepAlive(undefined)
+		expect(inode()).toBe(first)
+		a.keepAlive("renamed")
+		const renamed = inode()
+		expect(renamed).not.toBe(first)
+		expect(a.endpoint.name).toBe("renamed")
+		setSystemTime(started + 8000)
+		a.keepAlive("renamed")
+		expect(inode()).toBe(renamed)
+		setSystemTime(started + 9500)
+		a.keepAlive("renamed")
+		expect(inode()).not.toBe(renamed)
+		// Refreshed well inside the window peers accept.
+		expect(listEndpoints(root).some((endpoint) => endpoint.sessionId === a.endpoint.sessionId)).toBe(true)
+	} finally {
+		setSystemTime()
 	}
 })
 

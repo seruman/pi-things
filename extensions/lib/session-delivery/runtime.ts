@@ -220,7 +220,7 @@ function installDelivery(pi: ExtensionAPI, options: { root: string; pollMs: numb
 		if (!owner || !ctx) return
 
 		try {
-			owner.heartbeat(ctx.sessionManager.getSessionName())
+			owner.keepAlive(ctx.sessionManager.getSessionName())
 
 			for (const message of owner.receive(report)) pending.set(message.id, { kind: "queued", message })
 			observe()

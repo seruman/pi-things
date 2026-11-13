@@ -14,16 +14,11 @@ test("clearing a session name updates discovery and new envelopes without rewrit
 	await until(() =>
 		listEndpoints(root).some((endpoint) => endpoint.sessionId === h.session.sessionId && endpoint.name === "Old name"),
 	)
-	const previous = listEndpoints(root).find((endpoint) => endpoint.sessionId === h.session.sessionId)
-
-	if (!previous) throw new Error("Receiver missing")
 	const historical = peer.send(sessionIdSchema.parse(h.session.sessionId), "before clearing", "passive")
 	h.api.setSessionName("")
 	expect(h.session.sessionManager.getSessionName()).toBeUndefined()
 	await until(() =>
-		listEndpoints(root).some(
-			(endpoint) => endpoint.sessionId === h.session.sessionId && endpoint.updatedAt > previous.updatedAt,
-		),
+		listEndpoints(root).some((endpoint) => endpoint.sessionId === h.session.sessionId && endpoint.name === undefined),
 	)
 
 	try {
