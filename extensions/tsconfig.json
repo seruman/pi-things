@@ -2,7 +2,16 @@
   "extends": "../tsconfig.base.json",
   "compilerOptions": {
     "noEmit": true,
-    "allowImportingTsExtensions": true
+    "allowImportingTsExtensions": true,
+    "types": ["node", "bun"]
   },
-  "include": ["comment.ts", "split-fork.ts", "split-handoff.ts", "goal.ts", "clarify.ts"]
+  "include": [
+    "comment.ts",
+    "split-fork.ts",
+    "split-handoff.ts",
+    "goal.ts",
+    "clarify.ts",
+    "mdreview.ts",
+    "mdreview.test.ts"
+  ]
 }

@@ -33,7 +33,8 @@
     "typecheck:session-messages": "bunx tsc -p extensions/session-messages/tsconfig.json",
     "typecheck:poteto": "bunx tsc -p extensions/poteto/tsconfig.json",
     "typecheck:single-extensions": "bunx tsc -p extensions/tsconfig.json",
-    "typecheck": "bun run typecheck:web-tools && bun run typecheck:pi-safety && bun run typecheck:shell-leash && bun run typecheck:subagents && bun run typecheck:single-extensions && bun run typecheck:poteto && bun run typecheck:model-router && bun run typecheck:session-messages"
+    "typecheck": "bun run typecheck:web-tools && bun run typecheck:pi-safety && bun run typecheck:shell-leash && bun run typecheck:subagents && bun run typecheck:single-extensions && bun run typecheck:poteto && bun run typecheck:model-router && bun run typecheck:session-messages",
+    "test:mdreview": "bun test extensions/mdreview.test.ts"
   },
   "pi": {
     "extensions": [
@@ -45,6 +46,7 @@
       "./extensions/goal.ts",
       "./extensions/poteto/index.ts",
       "./extensions/comment.ts",
+      "./extensions/mdreview.ts",
       "./extensions/clarify.ts",
       "./extensions/shell-leash/index.ts",
       "./extensions/pi-safety/index.ts",
