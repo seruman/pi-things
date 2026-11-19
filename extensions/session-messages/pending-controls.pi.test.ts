@@ -68,6 +68,7 @@ for (const fullscreen of [false, true]) {
 				toolOutputExpanded: false,
 				loadedResourcesContainer: new Container(),
 				chatContainer: chat,
+				pendingMessagesContainer: new Container(),
 				extensionWidgetsAbove: new Map(),
 				extensionWidgetsBelow: new Map(),
 				widgetContainerAbove: above,

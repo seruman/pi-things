@@ -5,7 +5,6 @@ import { join } from "node:path"
 import {
 	type AssistantMessage,
 	InMemoryCredentialStore,
-	Type,
 	createAssistantMessageEventStream,
 } from "@earendil-works/pi-ai"
 import { getModel } from "@earendil-works/pi-ai/compat"
@@ -17,6 +16,7 @@ import {
 	createAgentSession,
 	createCodemodeExtension,
 } from "@earendil-works/pi-coding-agent"
+import { Type } from "typebox"
 import { z } from "zod"
 import { SessionMailbox } from "../lib/session-delivery/mailbox"
 import { runHandleSchema, sessionIdSchema, type RunHandle } from "../lib/session-delivery/identity"
@@ -51,6 +51,7 @@ test.each([false, true])(
 					code: 0,
 					stderr: "",
 					killed: false,
+					truncated: false,
 					stdout: JSON.stringify({
 						windows: [
 							{
@@ -63,7 +64,7 @@ test.each([false, true])(
 			}
 
 			if (args[4] === "session.set_layer_state") {
-				return { code: 0, stderr: "", killed: false, stdout: JSON.stringify({ revision: 1 }) }
+				return { code: 0, stderr: "", killed: false, truncated: false, stdout: JSON.stringify({ revision: 1 }) }
 			}
 
 			if (args[4] === "session.new_layer") {
@@ -114,13 +115,23 @@ test.each([false, true])(
 					stderr: "",
 					stdout: JSON.stringify({ layer_id: `layer:${blockCounter}`, block_ids: [blockId], revision: 1 }),
 					killed: false,
+					truncated: false,
 				}
 			}
 
 			if (args[0] === "block") {
 				const handle = blocks.get(args[3])
 
-				if (!handle) return { code: 1, stderr: `Error: block target "${args[3]}" not found`, stdout: "", killed: false }
+				if (!handle) {
+					return {
+						code: 1,
+						stderr: `Error: block target "${args[3]}" not found`,
+						stdout: "",
+						killed: false,
+						truncated: false,
+					}
+				}
+
 				updateMetadata(runDirectory(handle), {
 					state: "idle",
 					hasStarted: true,
@@ -131,14 +142,20 @@ test.each([false, true])(
 				// This fake child has already persisted its complete response above.
 				if (stopRequested(run)) acknowledgeStop(run)
 
-				return { code: 0, stderr: "", stdout: JSON.stringify({ last_exit: null }), killed: false }
+				return { code: 0, stderr: "", stdout: JSON.stringify({ last_exit: null }), killed: false, truncated: false }
 			}
 
 			if (args[4] === "block.close") {
 				const { block_id } = z.object({ block_id: z.string() }).parse(JSON.parse(args[5]))
 				blocks.delete(block_id)
 
-				return { code: 0, stderr: "", stdout: JSON.stringify({ block_id, revision: 1 }), killed: false }
+				return {
+					code: 0,
+					stderr: "",
+					stdout: JSON.stringify({ block_id, revision: 1 }),
+					killed: false,
+					truncated: false,
+				}
 			}
 
 			throw new Error(`Unexpected Rex operation: ${args.join(" ")}`)

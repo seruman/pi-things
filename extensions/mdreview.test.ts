@@ -101,7 +101,7 @@ describe("what gets reviewed", () => {
 
 function fakeRex(onWait: () => Promise<void>, waited = 0) {
 	const calls: string[][] = []
-	const ok = (stdout: string) => ({ code: 0, stdout, stderr: "", killed: false })
+	const ok = (stdout: string) => ({ code: 0, stdout, stderr: "", killed: false, truncated: false })
 	const windows = { windows: [{ window_id: "window:w", layers: [{ blocks: [{ block_id: "block:b" }] }] }] }
 
 	const exec = mock(async (command: string, args: string[]) => {

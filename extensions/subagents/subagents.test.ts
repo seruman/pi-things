@@ -5,15 +5,9 @@ import fs, { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSy
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { setImmediate } from "node:timers/promises"
-import type {
-	AssistantMessage,
-	JsonObject,
-	JsonValue,
-	Static,
-	StopReason,
-	ToolResultMessage,
-} from "@earendil-works/pi-ai"
+import type { AssistantMessage, JsonObject, JsonValue, StopReason, ToolResultMessage } from "@earendil-works/pi-ai"
 import { type AgentToolResult, type EventBus, SessionManager, createEventBus } from "@earendil-works/pi-coding-agent"
+import type { Static } from "typebox"
 import { Check } from "typebox/value"
 import { z } from "zod"
 import { SessionMailbox, workStatus } from "../lib/session-delivery/mailbox"
@@ -292,7 +286,11 @@ function installTestParent(): void {
 			},
 			events: bus,
 			on: parent.on,
-			exec: async (command, args, options) => ({ ...(await exec(command, args, options?.signal)), killed: false }),
+			exec: async (command, args, options) => ({
+				...(await exec(command, args, options?.signal)),
+				killed: false,
+				truncated: false,
+			}),
 			getThinkingLevel: () => "off",
 			registerCommand() {},
 			registerTool(tool) {

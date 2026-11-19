@@ -47,10 +47,16 @@ async function fixture(
 						if (args[0] === "block") {
 							await inspect?.()
 
-							return { code: 0, stdout: JSON.stringify({ last_exit: null }), stderr: "", killed: false }
+							return {
+								code: 0,
+								stdout: JSON.stringify({ last_exit: null }),
+								stderr: "",
+								killed: false,
+								truncated: false,
+							}
 						}
 
-						if (args[4] === "block.close") return { code: 0, stdout: "{}", stderr: "", killed: false }
+						if (args[4] === "block.close") return { code: 0, stdout: "{}", stderr: "", killed: false, truncated: false }
 						throw new Error(`Unexpected process operation ${args.join(" ")}`)
 					},
 				},

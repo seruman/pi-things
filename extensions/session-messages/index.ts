@@ -74,7 +74,8 @@ export function createSessionMessages(options: { root?: string; pollMs?: number 
 				parameters: Type.Object({
 					to: Type.String({ minLength: 1 }),
 					message: Type.String({ minLength: 1, maxLength: 16384 }),
-					delivery: Type.Optional(StringEnum(deliverySchema.options)),
+					// pi-ai's StringEnum is typed for pi-schema; Pi's tool types still use TypeBox's Static.
+					delivery: Type.Optional(Type.Unsafe<z.infer<typeof deliverySchema>>(StringEnum(deliverySchema.options))),
 				}),
 				async execute(_id, params, signal, _update, ctx) {
 					delivery.assertContext(ctx)

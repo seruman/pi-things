@@ -99,7 +99,7 @@ describe("Rex split launcher", () => {
 		["up", "above"],
 		["down", "below"],
 	] as const)("launches %s using Rex direction %s", async (direction, rexDirection) => {
-		const exec = mock(async () => ({ code: 0, stdout: "", stderr: "", killed: false }))
+		const exec = mock(async () => ({ code: 0, stdout: "", stderr: "", killed: false, truncated: false }))
 		const startupInput = "'pi' '--session' '/tmp/a b.jsonl' 'literal $(whoami)'\n"
 
 		const result = await launchTerminalSplit({ exec }, { cwd: "/tmp/project with spaces" }, startupInput, direction)
@@ -126,7 +126,7 @@ describe("Rex split launcher", () => {
 		["", " failed\n", "failed"],
 		["", "", "unknown rex error"],
 	])("reports Rex errors without falling back to another terminal", async (stderr, stdout, reason) => {
-		const exec = mock(async () => ({ code: 1, stdout, stderr, killed: false }))
+		const exec = mock(async () => ({ code: 1, stdout, stderr, killed: false, truncated: false }))
 		expect(await launchTerminalSplit({ exec }, { cwd: "/tmp" }, "'pi'\n", "right")).toEqual({
 			ok: false,
 			terminalName: "Rex",

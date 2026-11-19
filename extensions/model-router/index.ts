@@ -175,7 +175,7 @@ export function createModelRouterExtension(options: { configPath?: string; class
 		})
 
 		pi.on("before_agent_start", (event) => {
-			if (!mode.enabled) return
+			if (!mode.enabled || event.messageType !== "user") return
 			freshPrompt = event.prompt
 			controllers.get(mode.preset)?.beginRun(event.prompt, !!event.images?.length)
 		})

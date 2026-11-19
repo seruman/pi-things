@@ -1,4 +1,5 @@
-import type { JsonValue, Static, TSchema } from "@earendil-works/pi-ai"
+import type { JsonValue } from "@earendil-works/pi-ai"
+import type { Static, TSchema } from "typebox"
 import type {
 	AgentSettledEvent,
 	AgentToolResult,

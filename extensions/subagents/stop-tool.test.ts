@@ -41,7 +41,13 @@ test("agent_stop rejects unsubmitted private input while awaiting Rex close", as
 						if (args[0] === "block") {
 							calls.push("process")
 
-							return { code: 0, stdout: JSON.stringify({ last_exit: null }), stderr: "", killed: false }
+							return {
+								code: 0,
+								stdout: JSON.stringify({ last_exit: null }),
+								stderr: "",
+								killed: false,
+								truncated: false,
+							}
 						}
 
 						if (args[4] === "block.close") {
@@ -56,6 +62,7 @@ test("agent_stop rejects unsubmitted private input while awaiting Rex close", as
 								stdout: JSON.stringify({ block_id: "test-block", revision: 1 }),
 								stderr: "",
 								killed: false,
+								truncated: false,
 							}
 						}
 
@@ -191,7 +198,13 @@ async function lifecycleFixture(options: { compact?: boolean; blocked?: Promise<
 						if (command !== "rex") throw new Error(`Unexpected command ${command}`)
 
 						if (args[0] === "block") {
-							return { code: 0, stdout: JSON.stringify({ last_exit: null }), stderr: "", killed: false }
+							return {
+								code: 0,
+								stdout: JSON.stringify({ last_exit: null }),
+								stderr: "",
+								killed: false,
+								truncated: false,
+							}
 						}
 
 						if (args[4] !== "block.close") throw new Error(`Unexpected Rex operation ${args.join(" ")}`)
@@ -204,6 +217,7 @@ async function lifecycleFixture(options: { compact?: boolean; blocked?: Promise<
 							stdout: JSON.stringify({ block_id: "test-block", revision: 1 }),
 							stderr: "",
 							killed: false,
+							truncated: false,
 						}
 					},
 				},

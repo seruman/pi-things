@@ -1,15 +1,8 @@
 import { existsSync } from "node:fs"
 import { resolve } from "node:path"
 import { fileURLToPath } from "node:url"
-import {
-	type AssistantMessage,
-	type JsonValue,
-	type Static,
-	type TSchema,
-	StringEnum,
-	type TextContent,
-	Type,
-} from "@earendil-works/pi-ai"
+import { type AssistantMessage, type JsonValue, StringEnum, type TextContent } from "@earendil-works/pi-ai"
+import { type Static, type TSchema, Type } from "typebox"
 import {
 	type AgentToolResult,
 	type ExtensionAPI,
@@ -118,6 +111,9 @@ const spawnSchema = Type.Union([runResultSchema, backgroundSchema])
 
 const handleSchema = Type.Object({ handle: Type.String() })
 
+// pi-ai's StringEnum is typed for pi-schema; Pi's tool types still use TypeBox's Static.
+const stringEnum = <T extends readonly string[]>(values: T) => Type.Unsafe<T[number]>(StringEnum(values))
+
 const listSchema = Type.Object({
 	runs: Type.Array(
 		Type.Object({
@@ -127,8 +123,8 @@ const listSchema = Type.Object({
 			sessionFile: Type.String(),
 			cwd: Type.String(),
 			model: modelSchema,
-			thinking: StringEnum(thinkingLevels),
-			state: StringEnum(runStates),
+			thinking: stringEnum(thinkingLevels),
+			state: stringEnum(runStates),
 			stoppedAt: Type.Optional(Type.String()),
 			error: Type.Optional(Type.String()),
 		}),
@@ -165,7 +161,7 @@ const spawnParameters = Type.Object({
 			description: "Model id. Defaults to the parent's model. Set alongside provider for cross-provider use.",
 		}),
 	),
-	thinkingLevel: Type.Optional(StringEnum(thinkingLevels)),
+	thinkingLevel: Type.Optional(stringEnum(thinkingLevels)),
 	tools: Type.Optional(Type.Union([Type.Literal("readonly"), Type.Array(Type.String())])),
 	excludeTools: Type.Optional(Type.Array(Type.String())),
 	noTools: Type.Optional(Type.Union([Type.Literal("all"), Type.Literal("builtin")])),

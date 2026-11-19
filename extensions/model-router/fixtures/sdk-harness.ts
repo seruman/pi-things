@@ -12,7 +12,6 @@ import {
 	type Provider,
 	type SimpleStreamOptions,
 	type TranscriptContext,
-	Type,
 	createAssistantMessageEventStream,
 } from "@earendil-works/pi-ai"
 import {
@@ -27,6 +26,7 @@ import {
 	initTheme,
 } from "@earendil-works/pi-coding-agent"
 import { TuiMainScreen, type Terminal, setKeybindings } from "@earendil-works/pi-tui"
+import { Type } from "typebox"
 // Pi exports this class only as a type; use its installed implementation, which includes TUI_KEYBINDINGS.
 import { KeybindingsManager } from "../../../node_modules/@earendil-works/pi-coding-agent/dist/core/keybindings.js"
 import type { Classification, ClassifyTier, RoutingInput } from "../classifier"
@@ -513,7 +513,7 @@ export async function harness(options: HarnessOptions = {}) {
 				...(extensionPath ? [] : [createModelRouterExtension({ configPath, classify: options.classify })]),
 				(pi) => {
 					pi.on("before_agent_start", (event) => {
-						boundaries.push(event.prompt)
+						if (event.messageType === "user") boundaries.push(event.prompt)
 					})
 					pi.registerTool({
 						name: "probe",
