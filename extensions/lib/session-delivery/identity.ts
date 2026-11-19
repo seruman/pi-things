@@ -21,5 +21,3 @@ export const messageIdSchema = z.string().uuid().brand<"MessageId">()
 export type MessageId = z.infer<typeof messageIdSchema>
 
 export const membershipGenerationSchema = z.string().uuid().brand<"MembershipGeneration">()
-
-export type MembershipGeneration = z.infer<typeof membershipGenerationSchema>

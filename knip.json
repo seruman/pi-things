@@ -1,0 +1,18 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "entry": [
+    "extensions/web-tools/index.ts",
+    "extensions/subagents/index.ts",
+    "extensions/session-messages/index.ts",
+    "extensions/split-fork.ts",
+    "extensions/split-handoff.ts",
+    "extensions/goal.ts",
+    "extensions/poteto/index.ts",
+    "extensions/comment.ts",
+    "extensions/mdreview.ts",
+    "extensions/clarify.ts",
+    "extensions/model-router/index.ts",
+    "extensions/*/fixtures/*.ts"
+  ],
+  "ignore": ["extensions/poteto/vendor/**", "tools/oxlint/**"]
+}

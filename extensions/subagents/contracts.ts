@@ -19,7 +19,7 @@ export interface LifecycleEvents {
 
 export type LifecycleHandler<Event, Context> = (event: Event, ctx: Context) => void | Promise<void>
 
-export interface Lifecycle<Context> {
+interface Lifecycle<Context> {
 	on<Key extends keyof LifecycleEvents>(
 		event: Key,
 		handler: LifecycleHandler<LifecycleEvents[Key], Context>,

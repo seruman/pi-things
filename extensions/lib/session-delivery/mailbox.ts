@@ -62,7 +62,7 @@ const completionRoute = z
 	.object({ kind: z.literal("completion"), relation: relationIdSchema, handle, sequence: z.number().int().positive() })
 	.strict()
 
-export const routeSchema = z.discriminatedUnion("kind", [poolRoute, familyRoute, completionRoute]).readonly()
+const routeSchema = z.discriminatedUnion("kind", [poolRoute, familyRoute, completionRoute]).readonly()
 
 export type FamilyRoute = Extract<z.infer<typeof routeSchema>, { kind: "family" }>
 
@@ -107,7 +107,7 @@ export const messageSchema = z.union([
 
 export type Message = z.infer<typeof messageSchema>
 
-export const endpointSchema = z
+const endpointSchema = z
 	.object({
 		sessionId: id,
 		instanceId,

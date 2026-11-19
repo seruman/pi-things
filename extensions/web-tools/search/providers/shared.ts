@@ -16,7 +16,7 @@ export function isRetryableNetworkError(error: Error): boolean {
 	)
 }
 
-export async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 	await new Promise<void>((resolve, reject) => {
 		if (signal?.aborted) {
 			reject(new Error("aborted"))
@@ -38,73 +38,11 @@ export async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 	})
 }
 
-export function createRequestSignal(signal: AbortSignal | undefined, timeoutMs: number): AbortSignal {
-	const timeoutSignal = AbortSignal.timeout(timeoutMs)
-
-	return signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
-}
-
-export function parseSseFrames(buffer: string) {
-	const normalized = buffer.replace(/\r\n/g, "\n").replace(/\r/g, "\n")
-	const parts = normalized.split("\n\n")
-	const rest = parts.pop() ?? ""
-
-	return { frames: parts, rest }
-}
-
-export function dataFromSseFrame(frame: string): string | null {
-	const data = frame
-		.split("\n")
-		.map((line) => line.trimEnd())
-		.filter((line) => line.startsWith("data:"))
-		.map((line) => line.slice(5).trim())
-		.join("\n")
-		.trim()
-
-	if (!data || data === "[DONE]") return null
-
-	return data
-}
-
 export function parseJson(value: string): JsonValue {
 	try {
 		return JSON.parse(value)
 	} catch {
 		return null
-	}
-}
-
-export async function consumeSseJson(options: {
-	reader: ReadableStreamDefaultReader<Uint8Array>
-	onPayload: (payload: JsonValue) => void | Promise<void>
-}): Promise<void> {
-	const decoder = new TextDecoder()
-	let buffer = ""
-
-	try {
-		while (true) {
-			const { done, value } = await options.reader.read()
-
-			if (done) break
-
-			buffer += decoder.decode(value, { stream: true })
-			const { frames, rest } = parseSseFrames(buffer)
-			buffer = rest
-
-			for (const frame of frames) {
-				const data = dataFromSseFrame(frame)
-
-				if (!data) continue
-
-				const payload = parseJson(data)
-
-				if (!payload) continue
-
-				await options.onPayload(payload)
-			}
-		}
-	} finally {
-		options.reader.releaseLock()
 	}
 }
 

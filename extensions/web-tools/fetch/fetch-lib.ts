@@ -27,13 +27,13 @@ export type FetchDetails = {
 	fetchedCount?: number
 }
 
-export const MAX_INLINE_CONTENT = 30_000
+const MAX_INLINE_CONTENT = 30_000
 
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 
 const MAX_RENDERED_RESPONSE_BYTES = 10 * 1024 * 1024
 
-export function normalizeMarkdown(text: string): string {
+function normalizeMarkdown(text: string): string {
 	return text
 		.replace(/\u00a0/g, " ")
 		.replace(/\[\\?\[\s*\\?\]\]\([^)]*\)/g, "")

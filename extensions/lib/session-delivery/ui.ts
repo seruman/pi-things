@@ -10,7 +10,7 @@ import {
 import { messageSchema, type Message } from "./mailbox"
 import { z } from "zod"
 
-export const interruptionSchema = z.object({ reason: z.string(), message: messageSchema })
+const interruptionSchema = z.object({ reason: z.string(), message: messageSchema })
 
 export const INCOMING = "session-message"
 

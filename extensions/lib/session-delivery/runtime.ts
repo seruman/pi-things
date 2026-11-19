@@ -19,7 +19,7 @@ import { installPendingControls } from "./pending-controls"
 
 const ACQUIRE = "pi-things:session-delivery:acquire"
 
-export type SubmissionGate = () => "submit" | "defer" | "withdraw"
+type SubmissionGate = () => "submit" | "defer" | "withdraw"
 
 export type DeliveryService = ReturnType<typeof installDelivery>
 
