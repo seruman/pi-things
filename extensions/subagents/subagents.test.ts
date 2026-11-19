@@ -16,9 +16,7 @@ import type {
 import { type AgentToolResult, type EventBus, SessionManager, createEventBus } from "@earendil-works/pi-coding-agent"
 import { Check } from "typebox/value"
 import { z } from "zod"
-import { registerChildPolicy } from "../shell-leash/child-policy"
 import { SessionMailbox, workStatus } from "../lib/session-delivery/mailbox"
-import { policyFlags, shellLeashHost } from "../shell-leash/test-host"
 import { SOURCE_ENTRY, sourceSchema } from "./accounting"
 import { installBridge } from "./bridge"
 import { familyPolicy } from "./family"
@@ -1019,99 +1017,11 @@ test.each([
 	expect(listRuns()).toHaveLength(0)
 })
 
-test("spawn snapshots the real shell-leash policy into Rex argv and persists it for resume", async () => {
-	const leash = shellLeashHost({ "shell-leash-allow": "git.switch", "shell-leash-deny": "git.push" }, bus)
-	leash.start()
-	leash.choices.push("Allow fs.rm for session")
-	await leash.bash("rm -rf rs")
-	const run = await spawn()
-	const child = shellLeashHost(policyFlags(run.launchArgs))
-	child.start()
-	expect(await child.bash("rm -rf rs && git switch topic")).toBeUndefined()
-	expect(await child.bash("git push")).toMatchObject({ block: true })
-	expect(await child.bash("git checkout main")).toMatchObject({ block: true })
-	expect(child.prompts).toHaveLength(0)
-	expect(flagValue(launches[0].command, "--shell-leash-default")).toBe("deny")
-	expect(flagValue(launches[0].command, "--shell-leash-allow")).toBe("fs.rm,git.switch")
-
-	await parent.emit("session_shutdown", ctx)
-	leash.start() // Parent permissions changed, but the resumed child retains its spawn-time snapshot.
-	await parent.emit("session_start", ctx)
-	expect(policyFlags(launches[1].command.slice(launches[1].command.indexOf("--shell-leash-default")))).toEqual(
-		policyFlags(run.launchArgs.slice(run.launchArgs.indexOf("--shell-leash-default"))),
-	)
-})
-
-test("a policy snapshot failure prevents launching a child", async () => {
-	registerChildPolicy(bus, () => {
-		throw new Error("Invalid shell-leash policy")
-	})
-	await expect(spawn()).rejects.toThrow("Invalid shell-leash policy")
-	expect(launches).toHaveLength(0)
-	expect(listRuns()).toHaveLength(0)
-})
-
 test.each(["all", "builtin"] as const)("spawn forwards noTools=%s to Rex", async (noTools) => {
 	await spawn({ noTools })
 	const command = launches[0]?.command ?? []
 	expect(command).toContain(noTools === "all" ? "--no-tools" : "--no-builtin-tools")
 	expect(command).not.toContain(noTools === "all" ? "--no-builtin-tools" : "--no-tools")
-})
-
-test("shell-leash denial stops the child and reports its reason only after settlement", async () => {
-	const run = await spawn()
-	const c = await child(run)
-	const guard = shellLeashHost({ "shell-leash-default": "deny" }, c.events)
-	await c.begin()
-	expect(await guard.bash("rm -f")).toMatchObject({ block: true })
-	expect(guard.signal.aborted).toBe(true)
-	expect(getRun(run.handle).state).toBe("busy")
-
-	// A denial must not look successful even if the last assistant message was a tool call.
-	await c.reply("", "toolUse")
-	expect(await call("agent_wait", { handle: run.handle })).toMatchObject({
-		status: "error",
-		error: "shell-leash policy denies: fs.rm. The current run has been stopped.",
-	})
-	expect(blocks.has(run.blockId)).toBe(true)
-
-	// A later, explicitly started run does not inherit the previous denial.
-	await call("agent_send", { handle: run.handle, message: "Do a read-only task" })
-	await tick(250)
-	await c.begin()
-	await c.reply("Read-only task complete")
-	expect(await call("agent_wait", { handle: run.handle })).toMatchObject({ status: "success" })
-})
-
-test("a legacy bridge marking the denied child idle does not hide the denial reason", async () => {
-	const run = await spawn()
-	const c = await child(run)
-	const guard = shellLeashHost({ "shell-leash-default": "deny" }, c.events)
-	await c.begin()
-	await guard.bash("rm -f")
-	await c.reply("The operation was aborted.", "error")
-	// An installed older bridge can also receive agent_settled after the explicit local bridge.
-	updateMetadata(runDirectory(run.handle), { state: "idle" })
-	expect(await call("agent_wait", { handle: run.handle })).toMatchObject({
-		status: "error",
-		error: "shell-leash policy denies: fs.rm. The current run has been stopped.",
-	})
-})
-
-test("a denial that settles before launch metadata arrives is still reported to the parent", async () => {
-	const run = await spawn()
-	rmSync(join(runDirectory(run.handle), "metadata.json"))
-	const c = await child(run)
-	const guard = shellLeashHost({ "shell-leash-default": "deny" }, c.events)
-	await c.begin()
-	await guard.bash("rm -f")
-	await c.reply("", "toolUse")
-	writeMetadata(run)
-	await tick(250)
-	expect(await call("agent_wait", { handle: run.handle })).toMatchObject({
-		status: "error",
-		error: "shell-leash policy denies: fs.rm. The current run has been stopped.",
-	})
 })
 
 test.each(["stop", "error", "aborted"] as const)(

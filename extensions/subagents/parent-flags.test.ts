@@ -144,8 +144,6 @@ test("uses Pi's argument parser so prompts and other flag values cannot become e
 				"rpc",
 				"--tools",
 				"read",
-				"--shell-leash-default",
-				"deny",
 				"parent prompt",
 				"--",
 				"-ne",

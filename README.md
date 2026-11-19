@@ -14,8 +14,6 @@ Me just prompting the shit out of LLMs to create things I want in pi.
 - [poteto](./extensions/poteto/README.md) — toggle the vendored pstack skill pack and automatic mode instructions
 - `/comment`
 - `/mdreview <file>`, `/mdreview-last` — review a Markdown file or the agent's last message in mdreview in a Rex floating layer; what you send with `:wq` becomes the next message. Runs `mdreview` from `PATH`, or `MDREVIEW_BIN` when set
-- [pi-safety](./extensions/pi-safety/README.md)
-- [shell-leash](./extensions/shell-leash/README.md)
 - skills:
   - [git-hunks](./skills/git-hunks/SKILL.md)
   - [git-wt](./skills/git-wt/SKILL.md)

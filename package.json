@@ -16,8 +16,6 @@
     "check": "bun run lint && bun run format:check",
     "check:write": "bun run lint:fix && bun run format && bun run check",
     "sync:pstack": "bun tools/sync-pstack.ts",
-    "test:pi-safety": "bun --no-env-file test extensions/pi-safety/*.test.ts",
-    "test:shell-leash": "bun test extensions/shell-leash/*.test.ts",
     "test:split-handoff": "bun test extensions/split-handoff.test.ts",
     "test:poteto": "bun --no-env-file test extensions/poteto/*.test.ts",
     "test:session-messages": "bun --no-env-file test extensions/session-messages/*.test.ts",
@@ -27,13 +25,11 @@
     "eval:model-router": "bun --no-env-file run extensions/model-router/evaluate.ts",
     "typecheck:model-router": "bunx tsc -p extensions/model-router/tsconfig.json",
     "typecheck:web-tools": "bunx tsc -p extensions/web-tools/tsconfig.json",
-    "typecheck:pi-safety": "bunx tsc -p extensions/pi-safety/tsconfig.json",
-    "typecheck:shell-leash": "bunx tsc -p extensions/shell-leash/tsconfig.json",
     "typecheck:subagents": "bunx tsc -p extensions/subagents/tsconfig.json",
     "typecheck:session-messages": "bunx tsc -p extensions/session-messages/tsconfig.json",
     "typecheck:poteto": "bunx tsc -p extensions/poteto/tsconfig.json",
     "typecheck:single-extensions": "bunx tsc -p extensions/tsconfig.json",
-    "typecheck": "bun run typecheck:web-tools && bun run typecheck:pi-safety && bun run typecheck:shell-leash && bun run typecheck:subagents && bun run typecheck:single-extensions && bun run typecheck:poteto && bun run typecheck:model-router && bun run typecheck:session-messages",
+    "typecheck": "bun run typecheck:web-tools && bun run typecheck:subagents && bun run typecheck:single-extensions && bun run typecheck:poteto && bun run typecheck:model-router && bun run typecheck:session-messages",
     "test:mdreview": "bun test extensions/mdreview.test.ts"
   },
   "pi": {
@@ -48,8 +44,6 @@
       "./extensions/comment.ts",
       "./extensions/mdreview.ts",
       "./extensions/clarify.ts",
-      "./extensions/shell-leash/index.ts",
-      "./extensions/pi-safety/index.ts",
       "./extensions/model-router/index.ts"
     ],
     "skills": [
@@ -59,12 +53,8 @@
   },
   "dependencies": {
     "defuddle": "^0.15.0",
-    "glob-to-regexp": "0.4.1",
     "ignore": "^7.0.5",
-    "just-bash": "^2.14.2",
     "linkedom": "^0.18.12",
-    "minimatch": "10.2.5",
-    "yaml": "^2.8.1",
     "zod": "^3.24.1"
   },
   "peerDependencies": {
@@ -81,7 +71,6 @@
     "@earendil-works/pi-tui": "1.1.0",
     "@oxlint/plugins": "1.88.0",
     "@types/bun": "1.3.13",
-    "@types/glob-to-regexp": "0.4.4",
     "@types/node": "^24.4.0",
     "oxfmt": "0.73.0",
     "oxlint": "1.88.0",

@@ -29,7 +29,6 @@ export const completionSchema = z
 		childSessionId: z.string().min(1).pipe(sessionIdSchema),
 		sessionFile: z.string().min(1),
 		response: responseSchema,
-		error: z.string().optional(),
 	})
 	.strict()
 	.readonly()
@@ -101,7 +100,7 @@ export function completionAnswer(fact: Completion) {
 function completionNotice(fact: Completion, answer: string) {
 	const anchor = `${fact.sessionFile}${fact.response.kind === "response" ? ` entry ${fact.response.entryId}` : " (no response)"}`
 	const header = `Subagent ${fact.handle} completed with ${fact.outcome}.\nSource: ${anchor}\n`
-	const text = fact.error ?? answer
+	const text = answer
 	const provenanceByteReserve = 4 * 1024
 	const completionNoticeByteLimit = 16 * 1024 - provenanceByteReserve
 

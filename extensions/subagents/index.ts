@@ -19,7 +19,6 @@ import {
 	getAgentDir,
 } from "@earendil-works/pi-coding-agent"
 import { type SelectItem, SelectList } from "@earendil-works/pi-tui"
-import { getChildPolicyArgs } from "../shell-leash/child-policy"
 import { workStatus, type WorkStatus } from "../lib/session-delivery/mailbox"
 import {
 	runHandleSchema,
@@ -377,7 +376,7 @@ async function settle(
 					fact.outcome,
 					answer,
 					session,
-					fact.error ?? (fact.outcome === "error" ? (run.error ?? `${run.handle} failed`) : undefined),
+					fact.outcome === "error" ? (run.error ?? `${run.handle} failed`) : undefined,
 				)
 
 				invocation?.terminal(fact)
@@ -481,11 +480,7 @@ async function spawn(
 	const thinking = params.thinkingLevel ?? pi.getThinkingLevel()
 	const cwd = resolve(ctx.cwd, params.cwd ?? ".")
 
-	const launchArgs = [
-		...parentExtensionFlags(process.argv.slice(2), process.cwd()),
-		...toolFlags(params),
-		...getChildPolicyArgs(pi.events),
-	]
+	const launchArgs = [...parentExtensionFlags(process.argv.slice(2), process.cwd()), ...toolFlags(params)]
 
 	const parentSessionId = sessionIdSchema.parse(ctx.sessionManager.getSessionId())
 	const prepared = prepareRun(parentSessionId)

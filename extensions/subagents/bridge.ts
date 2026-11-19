@@ -1,5 +1,4 @@
 import { sessionIdSchema } from "../lib/session-delivery/identity"
-import { onShellLeashDenial } from "../shell-leash/denial"
 import type { BridgeContext, BridgeHost } from "./contracts"
 import { publishCompletion, type CompletionSnapshot } from "./completion"
 import { type RunMetadata, readMetadata, readRunIdentity, updateMetadata } from "./runs"
@@ -26,7 +25,6 @@ export function installBridge(pi: BridgeHost, runDir: string): void {
 	let sessionName: string | undefined
 	let sessionPending = true
 	let hasStarted = false
-	let denial: string | undefined
 	let abortRequested = false
 	let responseBoundary: Set<string> | undefined
 	const earlyCompletions: CompletionSnapshot[] = []
@@ -48,10 +46,6 @@ export function installBridge(pi: BridgeHost, runDir: string): void {
 
 	const update = (patch: BridgePatch, clear?: Parameters<typeof updateMetadata>[2]) =>
 		updateMetadata(runDir, patch, clear)
-
-	onShellLeashDenial(pi.events, (reason) => {
-		denial ??= reason
-	})
 
 	// Unlike tmux, Rex assigns the block id at launch, so metadata can arrive after session_start.
 	const initializeSession = (): boolean => {
@@ -79,12 +73,7 @@ export function installBridge(pi: BridgeHost, runDir: string): void {
 				(metadata.sessionFile === sessionFile ? (metadata.outcome ?? settledOutcome(current)) : settledOutcome(current))
 		}
 
-		if (denial && current.isIdle()) {
-			patch.state = "error"
-			patch.error = denial
-		}
-
-		const updated = update(patch, patch.error ? ["suspended"] : ["suspended", "error"])
+		const updated = update(patch, ["suspended", "error"])
 
 		if (!updated) return false
 		sessionPending = false
@@ -136,7 +125,6 @@ export function installBridge(pi: BridgeHost, runDir: string): void {
 	pi.on("session_start", (_event, ctx) => {
 		current = ctx
 		sessionPending = true
-		denial = undefined
 
 		if (!timer) {
 			// Rex may start the child before the parent has written its metadata.
@@ -151,7 +139,6 @@ export function installBridge(pi: BridgeHost, runDir: string): void {
 		current = ctx
 		hasStarted = true
 		responseBoundary ??= new Set(ctx.sessionManager.getBranch().map((entry) => entry.id))
-		denial = undefined
 		update({ state: "busy", hasStarted: true }, ["error"])
 		// Initial CLI prompts and already queued work can start after an idle poll.
 		// A stop request remains latched until the parent closes or resumes the child.
@@ -170,28 +157,22 @@ export function installBridge(pi: BridgeHost, runDir: string): void {
 				)
 
 			const sessionFile = ctx.sessionManager.getSessionFile()
-			const outcome = denial ? "error" : event.aborted ? "aborted" : (settledOutcome(ctx) ?? "error")
+			const outcome = event.aborted ? "aborted" : (settledOutcome(ctx) ?? "error")
 			lastOutcome = outcome
 
 			if (sessionFile) {
-				const snapshot: CompletionSnapshot = {
+				earlyCompletions.push({
 					childSessionId: sessionIdSchema.parse(ctx.sessionManager.getSessionId()),
 					sessionFile,
 					outcome,
 					response: entry ? { kind: "response", entryId: entry.id } : { kind: "none" },
-				}
-
-				earlyCompletions.push(denial ? { ...snapshot, error: denial } : snapshot)
+				})
 			}
 
 			flushCompletions()
 			responseBoundary = undefined
 			// Publish only after cancellation settles, not while sibling tools may still be running.
-			update(
-				denial
-					? { state: "error", error: denial, outcome: "error" }
-					: { state: "idle", outcome: event.aborted ? "aborted" : settledOutcome(ctx) },
-			)
+			update({ state: "idle", outcome: event.aborted ? "aborted" : settledOutcome(ctx) })
 			processStop()
 		}
 	})
