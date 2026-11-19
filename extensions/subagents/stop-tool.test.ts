@@ -19,8 +19,10 @@ import { readCompletion } from "./completion"
 
 test("agent_stop rejects unsubmitted private input while awaiting Rex close", async () => {
 	const previous = process.env.PI_CODING_AGENT_DIR
+	const previousSession = process.env.REX_SESSION
 	const root = testDirectory()
 	process.env.PI_CODING_AGENT_DIR = root
+	process.env.REX_SESSION = "test-session"
 	const closeEntered = gate()
 	const closeAllowed = gate()
 	const calls: string[] = []
@@ -171,14 +173,19 @@ test("agent_stop rejects unsubmitted private input while awaiting Rex close", as
 
 		if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR
 		else process.env.PI_CODING_AGENT_DIR = previous
+
+		if (previousSession === undefined) delete process.env.REX_SESSION
+		else process.env.REX_SESSION = previousSession
 	}
 })
 
 async function lifecycleFixture(options: { compact?: boolean; blocked?: Promise<void> } = {}) {
 	const previous = process.env.PI_CODING_AGENT_DIR
+	const previousSession = process.env.REX_SESSION
 	const root = testDirectory()
 	const mailboxRoot = join(root, "session-messages")
 	process.env.PI_CODING_AGENT_DIR = root
+	process.env.REX_SESSION = "test-session"
 	const closeEntered = gate()
 	const closeAllowed = gate()
 	const compactEntered = gate()
@@ -307,6 +314,9 @@ async function lifecycleFixture(options: { compact?: boolean; blocked?: Promise<
 
 		if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR
 		else process.env.PI_CODING_AGENT_DIR = previous
+
+		if (previousSession === undefined) delete process.env.REX_SESSION
+		else process.env.REX_SESSION = previousSession
 	}
 
 	return {
