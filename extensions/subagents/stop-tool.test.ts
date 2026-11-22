@@ -64,6 +64,7 @@ test("agent_stop rejects unsubmitted private input while awaiting Rex close", as
 				},
 				undefined,
 				delivery,
+				() => () => {},
 			)
 		},
 	})
@@ -208,6 +209,7 @@ async function lifecycleFixture(options: { compact?: boolean; blocked?: Promise<
 				},
 				undefined,
 				delivery,
+				() => () => {},
 			)
 		},
 	})

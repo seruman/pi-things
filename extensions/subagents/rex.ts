@@ -84,6 +84,7 @@ type RexRequest =
 			}
 	  }
 	| { method: "block.close" | "session.focus_block"; args: BlockArgs }
+	| { method: "session.set_block_label"; args: BlockArgs & { label: string } }
 	| {
 			method: "session.set_layer_state"
 			args: {
@@ -97,11 +98,14 @@ export const runStates = ["starting", "busy", "idle", "exited", "error", "suspen
 
 export type RunState = (typeof runStates)[number]
 
+export type ProcessReader = (blockId: string, signal?: AbortSignal) => ReturnType<typeof readProcess>
+
 // The bridge owns lifecycle state. Rex only tells us whether its process still exists.
 export async function effectiveRunState(
 	exec: Exec,
 	run: Pick<RunMetadata, "blockId" | "suspended" | "stoppedAt" | "state">,
 	signal?: AbortSignal,
+	inspect: ProcessReader = (blockId, signal) => readProcess(exec, blockId, signal),
 ): Promise<RunState> {
 	if (run.stoppedAt) return "stopped"
 
@@ -110,7 +114,7 @@ export async function effectiveRunState(
 	if (run.suspended) return "suspended"
 
 	if (run.state === "exited") return "exited"
-	const { alive } = await readProcess(exec, run.blockId, signal)
+	const { alive } = await inspect(run.blockId, signal)
 
 	return alive ? (run.state ?? "starting") : "exited"
 }
@@ -139,7 +143,7 @@ async function api<Result>(
 export async function newBlock(
 	exec: Exec,
 	cwd: string,
-	handle: string,
+	name: string,
 	command: string[],
 	signal?: AbortSignal,
 ): Promise<string> {
@@ -159,7 +163,7 @@ export async function newBlock(
 				layout: {
 					block: {
 						flavor: "com.superlogical.terminal.shell",
-						label: `subagent ${handle}`,
+						label: `subagent ${name}`,
 						options: { cwd, command },
 					},
 				},
@@ -223,6 +227,15 @@ export async function showBlock(exec: Exec, blockId: string): Promise<void> {
 	}
 
 	await api(exec, { method: "session.focus_block", args: { block_id: blockId } }, focusedBlockSchema)
+}
+
+export async function setBlockName(exec: Exec, blockId: string, name: string, signal?: AbortSignal): Promise<void> {
+	await api(
+		exec,
+		{ method: "session.set_block_label", args: { block_id: blockId, label: `subagent ${name}` } },
+		focusedBlockSchema,
+		signal,
+	)
 }
 
 export async function closeBlock(exec: Exec, blockId: string, signal?: AbortSignal): Promise<void> {

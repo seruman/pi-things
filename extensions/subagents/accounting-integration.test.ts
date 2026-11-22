@@ -170,7 +170,7 @@ test.each([false, true])(
 				noContextFiles: true,
 				extensionFactories: [
 					(pi) => {
-						installParent({ ...pi, exec })
+						installParent({ ...pi, exec }, undefined, undefined, () => () => {})
 						pi.registerTool({
 							name: "native_cost_probe",
 							label: "Native cost probe",

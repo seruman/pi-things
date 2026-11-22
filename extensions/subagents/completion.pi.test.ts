@@ -56,6 +56,7 @@ async function fixture(
 				},
 				undefined,
 				delivery,
+				() => () => {},
 			)
 
 			if (options.compact) {

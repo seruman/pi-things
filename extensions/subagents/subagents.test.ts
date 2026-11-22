@@ -28,6 +28,7 @@ import type { BridgeContext, LifecycleEvents, LifecycleHandler, ParentContext } 
 import { installParent } from "./index"
 import { isManagedChildLaunch } from "./parent-flags"
 import { ProgramStatusReporter } from "./program-status"
+import type { WatchRexEvents } from "./liveness"
 import { type Exec, readProcess } from "./rex"
 import {
 	type RunMetadata,
@@ -83,7 +84,7 @@ function events<Context>() {
 
 type Tool = (id: string, params: JsonObject, signal?: AbortSignal) => Promise<AgentToolResult<JsonValue>>
 
-type Block = { exit: number | null; error?: string; closeError?: string }
+type Block = { exit: number | null; error?: string; closeError?: string; label?: string; labelError?: string }
 
 const jsonSchema: z.ZodType<JsonValue> = z.lazy(() =>
 	z.union([z.null(), z.boolean(), z.number(), z.string(), z.array(jsonSchema), z.record(jsonSchema)]),
@@ -128,6 +129,12 @@ let bus: EventBus
 let reports: string[]
 
 let reporter: ProgramStatusReporter
+
+let eventLine: ((line: string) => void) | undefined
+
+let watcherStopped: boolean
+
+let toolDescriptions: Map<string, string>
 
 let tools: Map<string, Tool>
 
@@ -190,12 +197,24 @@ const exec: Exec = async (command, args, signal) => {
 		return { code: 0, stderr: "", stdout: JSON.stringify({ revision: nextBlockId }) }
 	}
 
+	if (args[4] === "session.set_block_label") {
+		const payload = z.object({ block_id: z.string(), label: z.string() }).parse(JSON.parse(args[5] ?? "{}"))
+		const block = blocks.get(payload.block_id)
+
+		if (!block) throw new Error(`Block missing: ${payload.block_id}`)
+
+		if (block.labelError) throw new Error(block.labelError)
+		block.label = payload.label
+
+		return { code: 0, stderr: "", stdout: JSON.stringify({ revision: nextBlockId }) }
+	}
+
 	if (args[4] === "session.new_layer") {
 		const payload = launchRequestSchema.parse(JSON.parse(args[5] ?? "{}")).layout.block
 		launches.push(payload.options)
 		await onLaunch?.(payload.options.command)
 		const blockId = `block:${++nextBlockId}`
-		blocks.set(blockId, { exit: null })
+		blocks.set(blockId, { exit: null, label: payload.label })
 
 		return {
 			code: 0,
@@ -233,6 +252,9 @@ beforeEach(() => {
 	Reflect.deleteProperty(process.env, "PI_SUBAGENT_RUN_DIR")
 	vi.useFakeTimers()
 	tools = new Map()
+	toolDescriptions = new Map()
+	eventLine = undefined
+	watcherStopped = false
 	blocks = new Map()
 	nextBlockId = 0
 	launches = []
@@ -276,6 +298,8 @@ function installTestParent(): void {
 			getThinkingLevel: () => "off",
 			registerCommand() {},
 			registerTool(tool) {
+				toolDescriptions.set(tool.name, tool.description)
+
 				// Pi and this repo resolve different TypeBox versions; validate using the declared wire schema.
 				const parameters = z.custom<Static<typeof tool.parameters>>(
 					(value) => Check(tool.parameters, value),
@@ -303,6 +327,14 @@ function installTestParent(): void {
 				return messageIdSchema.parse(randomUUID())
 			},
 		},
+		((_session, line) => {
+			eventLine = line
+			watcherStopped = false
+
+			return () => {
+				watcherStopped = true
+			}
+		}) satisfies WatchRexEvents,
 	)
 }
 
@@ -1529,6 +1561,48 @@ test("failed close after foreground cancellation preserves history without marki
 	expect(getRun(run.handle).stoppedAt).toBeString()
 })
 
+test("Rex float labels follow subagent names on spawn, rename, and resume", async () => {
+	const run = await spawn({ name: " review " })
+	expect(blocks.get(run.blockId)?.label).toBe("subagent review")
+	const c = await child(run)
+	await c.begin()
+	await c.reply("saved")
+	await call("agent_rename", { handle: run.handle, name: " renamed " })
+	expect(blocks.get(run.blockId)?.label).toBe("subagent renamed")
+	await parent.emit("session_shutdown", ctx)
+	await parent.emit("session_start", ctx)
+	const resumed = getRun(run.handle)
+	expect(resumed.blockId).not.toBe(run.blockId)
+	expect(blocks.get(resumed.blockId)?.label).toBe("subagent renamed")
+	await parent.emit("session_shutdown", ctx, "reload")
+})
+
+test("reload repairs existing handle-based float labels without restarting the child", async () => {
+	const run = await spawn({ name: "reviewer" })
+	blocks.get(run.blockId)!.label = `subagent ${run.handle}`
+	await parent.emit("session_start", ctx)
+	expect(blocks.get(run.blockId)?.label).toBe("subagent reviewer")
+	expect(launches).toHaveLength(1)
+	await parent.emit("session_shutdown", ctx, "reload")
+})
+
+test("a failed Rex label change does not silently rename only the metadata", async () => {
+	const run = await spawn({ name: "reviewer" })
+	blocks.get(run.blockId)!.labelError = "label update failed"
+	await expect(call("agent_rename", { handle: run.handle, name: "renamed" })).rejects.toThrow("label update failed")
+	expect(getRun(run.handle).name).toBe("reviewer")
+})
+
+test("unnamed floats use their handle until named, and stopped archives remain renameable", async () => {
+	const run = await spawn()
+	expect(blocks.get(run.blockId)?.label).toBe(`subagent ${run.handle}`)
+	await call("agent_rename", { handle: run.handle, name: "reviewer" })
+	expect(blocks.get(run.blockId)?.label).toBe("subagent reviewer")
+	await call("agent_stop", { handle: run.handle, force: true })
+	await call("agent_rename", { handle: run.handle, name: "archive" })
+	expect(getRun(run.handle).name).toBe("archive")
+})
+
 test("bridge initializes late metadata, syncs names and follows session changes", async () => {
 	const run = await spawn({ name: "review" })
 	rmSync(join(runDirectory(run.handle), "metadata.json"))
@@ -1766,6 +1840,98 @@ test.each(["stop", "error", "aborted"] as const)(
 	},
 )
 
+test("model-visible tool descriptions prefer automatic delivery over background-then-wait", () => {
+	expect(toolDescriptions.get("agent_spawn")).toContain("Do not routinely follow a background spawn with agent_wait")
+	expect(toolDescriptions.get("agent_spawn")).toContain("end your turn")
+	expect(toolDescriptions.get("agent_wait")).toContain("Do not call merely because you have no other work")
+	expect(toolDescriptions.get("agent_wait")).toContain("defers automatic completion delivery")
+})
+
+test("widget liveness uses Rex events without treating OSC reports or exits as completions", async () => {
+	const widgets: (string[] | undefined)[] = []
+	ctx.hasUI = true
+	ctx.ui = {
+		setWidget: (_key, lines) => {
+			widgets.push(lines)
+		},
+		theme: { fg: (_color, text) => text },
+		notify: unexpectedUI,
+		custom: unexpectedUI,
+	}
+	const run = await spawn()
+	await parent.emit("session_start", ctx)
+
+	const emit = (type: string, name?: string) =>
+		eventLine?.(
+			JSON.stringify({
+				type: "session_event",
+				payload: {
+					session_id: "session:parent",
+					event: {
+						type,
+						payload: { block_id: run.blockId, name, payload: { id: "", record: { state: "done" } } },
+					},
+				},
+			}),
+		)
+
+	emit("block_event", "program_status_changed")
+	let inspections = 0
+	onProcess = () => {
+		inspections++
+	}
+
+	await tick(1000)
+	expect(inspections).toBe(1)
+
+	for (let i = 0; i < 10; i++) await tick(1000)
+	expect(inspections).toBe(1)
+	expect(widgets.at(-1)?.join()).toContain(":starting")
+	expect(staged).toHaveLength(0)
+	emit("block_event", "child_exited")
+	await tick(0)
+	expect(widgets.at(-1)).toBeUndefined()
+	expect(inspections).toBe(1)
+	expect(staged).toHaveLength(0)
+	await parent.emit("session_shutdown", ctx, "reload")
+	expect(watcherStopped).toBe(true)
+})
+
+test("an active wait reuses liveness observations but notices a Rex exit", async () => {
+	const run = await spawn()
+	await parent.emit("session_start", ctx)
+
+	const emit = (name: string) =>
+		eventLine?.(
+			JSON.stringify({
+				type: "session_event",
+				payload: {
+					session_id: "session:parent",
+					event: {
+						type: "block_event",
+						payload: { block_id: run.blockId, name },
+					},
+				},
+			}),
+		)
+
+	emit("program_status_changed")
+	let inspections = 0
+	onProcess = () => {
+		inspections++
+	}
+
+	const waiting = call("agent_wait", { handle: run.handle })
+
+	for (let i = 0; i < 6; i++) await tick(500)
+	expect(inspections).toBe(1)
+	emit("child_exited")
+	await tick(500)
+	expect(await waiting).toMatchObject({ status: "error", error: `${run.handle} exited before finishing` })
+	expect(inspections).toBe(1)
+	await parent.emit("session_shutdown", ctx, "reload")
+})
+
 test.each(["quit", "reload"] as const)("parent releases its widget timer on %s", async (reason) => {
 	const widgets: (string[] | undefined)[] = []
 	ctx.hasUI = true
@@ -1782,6 +1948,7 @@ test.each(["quit", "reload"] as const)("parent releases its widget timer on %s",
 	await parent.emit("session_start", ctx)
 	expect(vi.getTimerCount()).toBeGreaterThan(baseline)
 	await parent.emit("session_shutdown", ctx, reason)
+	expect(watcherStopped).toBe(true)
 	expect(vi.getTimerCount()).toBe(baseline)
 	const writes = widgets.length
 	let inspections = 0

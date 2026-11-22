@@ -38,14 +38,17 @@ import type { ParentContext, ParentHost, SubagentTool } from "./contracts"
 import { CompletionCoordinator, completionAnswer, readCompletion, type CompletionInvocation } from "./completion"
 import { isManagedChildLaunch, parentExtensionFlags } from "./parent-flags"
 import { ProgramStatusReporter } from "./program-status"
+import { RexLiveness, type WatchRexEvents } from "./liveness"
 import {
 	type Exec,
+	type ProcessReader,
 	type RunState,
 	closeBlock,
 	effectiveRunState,
 	newBlock,
 	readProcess,
 	runStates,
+	setBlockName,
 	showBlock,
 } from "./rex"
 import {
@@ -330,6 +333,7 @@ async function settle(
 	signal?: AbortSignal,
 	timeoutSec = 1800,
 	invocation?: CompletionInvocation,
+	inspect: ProcessReader = (blockId, signal) => readProcess(exec, blockId, signal),
 ): Promise<RunResult> {
 	if (!Number.isInteger(timeoutSec) || timeoutSec <= 0) throw new Error("timeoutSec must be a positive integer")
 	let run = initialRun
@@ -425,7 +429,7 @@ async function settle(
 		let alive: boolean
 
 		try {
-			alive = (await readProcess(exec, run.blockId, signal)).alive
+			alive = (await inspect(run.blockId, signal)).alive
 		} catch (error) {
 			if (!signal?.aborted) throw error
 
@@ -509,7 +513,14 @@ async function spawn(
 	if (name !== undefined) draft.name = name
 
 	try {
-		const blockId = await newBlock(exec, cwd, prepared.handle, launchCommand(draft, [params.prompt]), signal)
+		const blockId = await newBlock(
+			exec,
+			cwd,
+			draft.name ?? prepared.handle,
+			launchCommand(draft, [params.prompt]),
+			signal,
+		)
+
 		const run: RunMetadata = { ...draft, blockId }
 		writeMetadata(run)
 
@@ -532,10 +543,15 @@ function settledResult(settled: RunResult): AgentToolResult<RunResult> {
 type DisplayStatus = { state: RunState; error?: string }
 
 // Presentation must isolate failed Rex queries without mistaking them for child exits/errors.
-async function displayStatus(exec: Exec, run: RunMetadata, signal?: AbortSignal): Promise<DisplayStatus> {
+async function displayStatus(
+	exec: Exec,
+	run: RunMetadata,
+	signal?: AbortSignal,
+	inspect?: ProcessReader,
+): Promise<DisplayStatus> {
 	try {
 		signal?.throwIfAborted()
-		const state = await effectiveRunState(exec, run, signal)
+		const state = await effectiveRunState(exec, run, signal, inspect)
 		const status: DisplayStatus = { state }
 
 		if (run.error) status.error = run.error
@@ -593,8 +609,10 @@ export function installParent(
 	pi: ParentHost,
 	programStatus = new ProgramStatusReporter(),
 	delivery?: FamilyDelivery,
+	watchEvents?: WatchRexEvents,
 ): void {
 	const exec: Exec = (command, args, signal) => pi.exec(command, args, signal ? { signal } : {})
+	const liveness = new RexLiveness(exec, watchEvents)
 	let widgetTimer: ReturnType<typeof setInterval> | undefined
 	let widgetContext: ParentContext | undefined
 	let refreshingWidget = false
@@ -615,7 +633,7 @@ export function installParent(
 			const statuses = await Promise.all(
 				listRuns(sessionIdSchema.parse(ctx.sessionManager.getSessionId())).map(async (run) => ({
 					run,
-					...(await displayStatus(exec, run)),
+					...(await displayStatus(exec, run, undefined, liveness.read)),
 				})),
 			)
 
@@ -671,6 +689,7 @@ export function installParent(
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
+		liveness.start(() => void refreshWidget())
 		completions.start(ctx)
 		lastCompletionError = undefined
 
@@ -712,16 +731,24 @@ export function installParent(
 		accountingTimer.unref()
 
 		for (const run of listRuns(sessionIdSchema.parse(ctx.sessionManager.getSessionId()))) {
-			if (!run.suspended) continue
+			if (!run.suspended && !run.name) continue
 
 			try {
 				const seen = await readProcess(exec, run.blockId)
 
 				if (seen.alive) {
-					clearStopSignals(run)
-					updateMetadata(runDirectory(run.handle, run.parentSessionId), { suspended: false })
+					// Repair labels created by older versions, including surviving children on /reload.
+					if (run.name) await setBlockName(exec, run.blockId, run.name)
+
+					if (run.suspended) {
+						clearStopSignals(run)
+						updateMetadata(runDirectory(run.handle, run.parentSessionId), { suspended: false })
+					}
+
 					continue
 				}
+
+				if (!run.suspended) continue
 
 				if (seen.exists) await closeBlock(exec, run.blockId)
 
@@ -743,13 +770,19 @@ export function installParent(
 				)
 
 				if (!starting) throw new Error(`Cannot resume: metadata missing for ${run.handle}`)
-				const blockId = await newBlock(exec, run.cwd, run.handle, launchCommand(starting))
+				const blockId = await newBlock(exec, run.cwd, run.name ?? run.handle, launchCommand(starting))
 				updateMetadata(runDirectory(run.handle, run.parentSessionId), { blockId, suspended: false })
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error)
-				updateMetadata(runDirectory(run.handle, run.parentSessionId), { state: "error", error: message })
 
-				if (ctx.hasUI) ctx.ui.notify(`Could not resume subagent ${runDisplayName(run)}: ${message}`, "error")
+				if (run.suspended) {
+					updateMetadata(runDirectory(run.handle, run.parentSessionId), { state: "error", error: message })
+				}
+
+				const failure = `Could not ${run.suspended ? "resume" : "relabel"} subagent ${runDisplayName(run)}: ${message}`
+
+				if (ctx.hasUI) ctx.ui.notify(failure, "error")
+				else pi.appendEntry("subagent-error", failure)
 			}
 		}
 
@@ -769,6 +802,7 @@ export function installParent(
 	})
 
 	pi.on("session_shutdown", async (event, ctx) => {
+		liveness.stop()
 		completions.stop()
 
 		if (completionTimer) clearInterval(completionTimer)
@@ -817,7 +851,7 @@ export function installParent(
 	})
 
 	registerCommand(pi, exec)
-	registerTools(pi, exec, accounting, completions, delivery)
+	registerTools(pi, exec, accounting, completions, delivery, liveness.read)
 }
 
 function registerCommand(pi: ParentHost, exec: Exec): void {
@@ -868,6 +902,7 @@ function registerTools(
 	accounting: UsageAccounting,
 	completions: CompletionCoordinator,
 	delivery?: FamilyDelivery,
+	inspect?: ProcessReader,
 ): void {
 	const registerTool = <Params extends TSchema, Result extends JsonValue>(tool: InternalTool<Params, Result>) =>
 		pi.registerTool({
@@ -905,13 +940,18 @@ function registerTools(
 		exposure: "codemode",
 		parameters: Type.Object({ handle: Type.String({ minLength: 1 }), name: nameParameter }),
 		outputSchema: Type.Object({ handle: Type.String(), name: Type.String() }),
-		async execute(_id, params, _signal, _update, ctx) {
+		async execute(_id, params, signal, _update, ctx) {
 			const run = ownedRun({
 				handle: runHandleSchema.parse(params.handle),
 				parentSessionId: sessionIdSchema.parse(ctx.sessionManager.getSessionId()),
 			})
 
 			const name = normalizeRunName(params.name)
+
+			if (!run.stoppedAt && (await readProcess(exec, run.blockId, signal)).exists) {
+				await setBlockName(exec, run.blockId, name, signal)
+			}
+
 			const updated = updateMetadata(runDirectory(run.handle, run.parentSessionId), { name })
 
 			if (!updated) throw new Error(`Could not rename subagent: ${run.handle}`)
@@ -971,7 +1011,7 @@ function registerTools(
 		name: "agent_spawn",
 		label: "Spawn agent",
 		description:
-			"Launch a persistent private child in Pi's Rex window. Waits for a result by default. Background completion wakes an idle parent. Busy parents receive it at the next steering opportunity.",
+			"Launch a persistent private child in Pi's Rex window. Prefer background: true: results arrive automatically and wake an idle parent. After background spawning, do independent work; if none remains, end your turn and let completion wake you. Do not routinely follow a background spawn with agent_wait. Omit background or set false only for an intentional synchronous join.",
 		promptGuidelines: [
 			"Spawning for one-off work is fine. Read the result, then stop the child when no follow-up work is needed.",
 			"Children persist after completion in either mode. A successful result does not stop the child.",
@@ -1001,7 +1041,7 @@ function registerTools(
 			}
 
 			try {
-				return settledResult(await settle(exec, run, signal, 1800, invocation))
+				return settledResult(await settle(exec, run, signal, 1800, invocation, inspect))
 			} finally {
 				if (signal?.aborted) await stopRun(exec, run.handle, { parentSessionId: run.parentSessionId })
 			}
@@ -1066,7 +1106,8 @@ function registerTools(
 	registerTool({
 		name: "agent_wait",
 		label: "Wait for agent",
-		description: "Wait for a child's current work to finish and return its result. Defaults to a 1800-second timeout.",
+		description:
+			"Explicit synchronous join: wait for a child's current work and return its result. Normally unnecessary: background results arrive automatically. Do not call merely because you have no other work; end your turn and let completion wake you. An active wait defers automatic completion delivery and delays your response to child questions. Use only when an intentional blocking join is needed. Defaults to a 1800-second timeout.",
 		promptGuidelines: [
 			"A completed wait does not stop the child. Read its result, then send concrete follow-up work or stop it when no longer needed.",
 			"Cancelling or timing out agent_wait stops only the wait, not the child, and does not consume a completion. Stop the child explicitly to terminate it.",
@@ -1088,7 +1129,7 @@ function registerTools(
 
 			invocation.reserve(run.handle)
 
-			return settledResult(await settle(exec, run, signal, params.timeoutSec, invocation))
+			return settledResult(await settle(exec, run, signal, params.timeoutSec, invocation, inspect))
 		},
 	})
 
