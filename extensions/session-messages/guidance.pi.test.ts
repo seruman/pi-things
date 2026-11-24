@@ -47,10 +47,11 @@ test("child reply guidance explains idle waking and busy delivery modes", async 
 	expect(guidance).toContain("yield")
 })
 
-test("parent spawn guidance explains idle and busy completion delivery", async () => {
+test("parent spawn guidance prefers background spawning that wakes an idle parent", async () => {
 	const h = await sdk({ pool: false, extension: (pi) => installParent(pi) })
 	const tool = h.session.extensionRunner.getToolDefinition("agent_spawn")
 	const guidance = [tool?.description, ...(tool?.promptGuidelines ?? [])].join(" ")
 	expect(guidance).toMatch(/wake.*idle/i)
-	expect(guidance).toContain("Busy parents receive it at the next steering opportunity.")
+	expect(guidance).toContain("Prefer background: true: results arrive automatically and wake an idle parent.")
+	expect(guidance).toContain("After background spawning, do independent work;")
 })
