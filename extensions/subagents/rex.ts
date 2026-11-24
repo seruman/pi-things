@@ -1,13 +1,8 @@
 import { z } from "zod"
+import { type RexExec, resolveRexSession } from "../lib/rex"
 import type { RunMetadata } from "./runs"
 
-interface ExecResult {
-	stdout: string
-	stderr: string
-	code: number
-}
-
-export type Exec = (command: string, args: string[], signal?: AbortSignal) => Promise<ExecResult>
+export type Exec = RexExec
 
 // Wire contracts from `rex api describe` (including the terminal creator's process method).
 const revisionSchema = z.number().int().nonnegative()
@@ -125,9 +120,10 @@ async function api<Result>(
 	responseSchema: z.ZodType<Result>,
 	signal?: AbortSignal,
 ): Promise<Result> {
-	const session = process.env.REX_SESSION
+	const block = process.env.REX_BLOCK?.trim()
 
-	if (!session) throw new Error("REX_SESSION is required")
+	if (!block) throw new Error("REX_BLOCK is required")
+	const session = await resolveRexSession(exec, block, signal)
 
 	const result = await exec(
 		"rex",

@@ -680,7 +680,7 @@ export function installParent(
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
-		liveness.start(() => void refreshWidget())
+		await liveness.start(() => void refreshWidget())
 		completions.start(ctx)
 		lastCompletionError = undefined
 

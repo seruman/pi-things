@@ -2,7 +2,7 @@
 
 Persistent Pi children in minimized Rex panes. `/subagent` opens a child pane.
 
-Needs `rex` on `PATH` and `REX_SESSION` / `REX_BLOCK` pointing to a pane in a Rex window.
+Needs `rex` on `PATH` and `REX_BLOCK` pointing to a pane in a Rex window. The session ID is resolved from that pane; `REX_SESSION` is not required or trusted.
 
 ## Tools
 

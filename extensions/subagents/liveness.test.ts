@@ -1,8 +1,17 @@
 import { afterEach, beforeEach, expect, test, vi } from "bun:test"
+import { setImmediate } from "node:timers/promises"
 import { RexLiveness, type WatchRexEvents } from "./liveness"
 import type { Exec } from "./rex"
 
 let savedSession: string | undefined
+
+let savedBlock: string | undefined
+
+let resolvedSession: string
+
+let lookupFailure: boolean
+
+let waitForLookup: Promise<void> | undefined
 
 let monitor: RexLiveness
 
@@ -18,7 +27,20 @@ let changed: number
 
 let duringQuery: (() => void) | undefined
 
-const exec: Exec = async () => {
+const exec: Exec = async (_command, args) => {
+	if (args[0] === "block" && args[1] === "inspect") {
+		await waitForLookup
+
+		if (lookupFailure) throw new Error("lookup failed")
+		expect(args).toEqual(["block", "inspect", "block:parent", "--json"])
+
+		return {
+			code: 0,
+			stderr: "",
+			stdout: JSON.stringify({ session_id: resolvedSession, block: { block_id: "block:parent" } }),
+		}
+	}
+
 	queries++
 
 	if (failure) throw new Error("Rex unavailable")
@@ -29,7 +51,7 @@ const exec: Exec = async () => {
 }
 
 const watch: WatchRexEvents = (session, line, disconnect) => {
-	expect(session).toBe("session:test")
+	expect(session).toBe(resolvedSession)
 	const stream = { line, disconnect, stopped: false }
 	streams.push(stream)
 
@@ -52,10 +74,15 @@ function connected() {
 	streams.at(-1)!.line(event("block_event", "program_status_changed", "block:other"))
 }
 
-beforeEach(() => {
+beforeEach(async () => {
 	vi.useFakeTimers()
 	savedSession = process.env.REX_SESSION
-	process.env.REX_SESSION = "session:test"
+	savedBlock = process.env.REX_BLOCK
+	Reflect.deleteProperty(process.env, "REX_SESSION")
+	process.env.REX_BLOCK = "block:parent"
+	resolvedSession = "session:test"
+	lookupFailure = false
+	waitForLookup = undefined
 	queries = 0
 	alive = true
 	failure = false
@@ -63,7 +90,7 @@ beforeEach(() => {
 	duringQuery = undefined
 	streams = []
 	monitor = new RexLiveness(exec, watch)
-	monitor.start(() => changed++)
+	await monitor.start(() => changed++)
 })
 
 afterEach(() => {
@@ -72,6 +99,9 @@ afterEach(() => {
 
 	if (savedSession === undefined) Reflect.deleteProperty(process.env, "REX_SESSION")
 	else process.env.REX_SESSION = savedSession
+
+	if (savedBlock === undefined) Reflect.deleteProperty(process.env, "REX_BLOCK")
+	else process.env.REX_BLOCK = savedBlock
 })
 
 test("healthy event delivery replaces repeated process queries, with bounded reconciliation", async () => {
@@ -147,6 +177,7 @@ test("a disconnect clears cached liveness, falls back to queries, and reconnects
 	alive = false
 	expect(await monitor.read("block:child")).toEqual({ exists: true, alive: false })
 	vi.advanceTimersByTime(1000)
+	await setImmediate()
 	expect(streams).toHaveLength(2)
 	connected()
 	alive = true
@@ -178,7 +209,7 @@ test("stopping cancels reconnects and restarting discards the previous session's
 	monitor.stop()
 	vi.advanceTimersByTime(60_000)
 	expect(streams).toHaveLength(1)
-	monitor.start(() => changed++)
+	await monitor.start(() => changed++)
 	connected()
 	alive = false
 	expect(await monitor.read("block:child")).toEqual({ exists: true, alive: false })
@@ -187,6 +218,63 @@ test("stopping cancels reconnects and restarting discards the previous session's
 	const count = changed
 	streams[1]!.line(event("block_closed"))
 	expect(changed).toBe(count)
+})
+
+test("ignores stale REX_SESSION and filters events by the resolved session", async () => {
+	process.env.REX_SESSION = "session:stale"
+	resolvedSession = "session:moved"
+	await monitor.start(() => changed++)
+	await monitor.read("block:child")
+	streams.at(-1)!.line(event("block_closed", undefined, "block:child", "session:stale"))
+	expect(changed).toBe(0)
+	streams.at(-1)!.line(event("block_closed", undefined, "block:child", "session:moved"))
+	expect(await monitor.read("block:child")).toEqual({ exists: false, alive: false })
+	expect(changed).toBe(1)
+})
+
+test("reconnect resolves the pane's session again", async () => {
+	streams[0]!.disconnect()
+	resolvedSession = "session:moved"
+	vi.advanceTimersByTime(1000)
+	await setImmediate()
+	expect(streams).toHaveLength(2)
+	await monitor.read("block:child")
+	streams[1]!.line(event("block_closed", undefined, "block:child", "session:test"))
+	expect(await monitor.read("block:child")).toEqual({ exists: true, alive: true })
+	streams[1]!.line(event("block_closed", undefined, "block:child", "session:moved"))
+	expect(await monitor.read("block:child")).toEqual({ exists: false, alive: false })
+})
+
+test("failed session resolution retries without subscribing to a default session", async () => {
+	lookupFailure = true
+	await monitor.start(() => changed++)
+	expect(streams).toHaveLength(1)
+	expect(await monitor.read("block:child")).toEqual({ exists: true, alive: true })
+	lookupFailure = false
+	vi.advanceTimersByTime(1000)
+	await setImmediate()
+	expect(streams).toHaveLength(2)
+})
+
+test("stopping during resolution cannot open a late subscription", async () => {
+	let release!: () => void
+	waitForLookup = new Promise<void>((resolve) => {
+		release = resolve
+	})
+	const starting = monitor.start(() => changed++)
+	monitor.stop()
+	release()
+	await starting
+	expect(streams).toHaveLength(1)
+	expect(streams[0]!.stopped).toBe(true)
+})
+
+test("missing REX_BLOCK never subscribes via an inherited session", async () => {
+	Reflect.deleteProperty(process.env, "REX_BLOCK")
+	process.env.REX_SESSION = "session:stale"
+	await monitor.start(() => changed++)
+	expect(streams).toHaveLength(1)
+	expect(streams[0]!.stopped).toBe(true)
 })
 
 test("a cached observation still honors cancellation", async () => {

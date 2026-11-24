@@ -6,6 +6,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import type { ExtensionAPI, ExtensionCommandContext, SessionEntry } from "@earendil-works/pi-coding-agent"
+import { resolveRexSession } from "./lib/rex"
 
 type Executor = Pick<ExtensionAPI, "exec">
 
@@ -27,11 +28,11 @@ export type Review = {
  * centred column, so a full-width layer only adds empty sides. */
 const BOUNDS = [0.2, 0.06, 0.6, 0.88]
 
-export function rexFromEnv(env: NodeJS.ProcessEnv): Rex | undefined {
-	const session = env.REX_SESSION?.trim()
+export async function rexFromEnv(env: NodeJS.ProcessEnv, pi: Executor): Promise<Rex | undefined> {
 	const block = env.REX_BLOCK?.trim()
 
-	if (env.TERM_PROGRAM !== "rex" || !session || !block) return undefined
+	if (env.TERM_PROGRAM !== "rex" || !block) return undefined
+	const session = await resolveRexSession((command, args) => pi.exec(command, args), block)
 
 	return { session, block }
 }
@@ -204,7 +205,15 @@ export default function (pi: ExtensionAPI): void {
 		ctx: ExtensionCommandContext,
 		make: () => Promise<Review | { refused: string }>,
 	): Promise<void> => {
-		const rex = rexFromEnv(process.env)
+		let rex: Rex | undefined
+
+		try {
+			rex = await rexFromEnv(process.env, pi)
+		} catch (error) {
+			ctx.ui.notify(`mdreview: ${error instanceof Error ? error.message : String(error)}`, "error")
+
+			return
+		}
 
 		if (!rex) {
 			ctx.ui.notify("mdreview opens in a Rex floating layer, so it needs pi running in Rex", "error")

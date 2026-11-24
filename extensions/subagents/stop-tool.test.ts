@@ -20,9 +20,11 @@ import { readCompletion } from "./completion"
 test("agent_stop rejects unsubmitted private input while awaiting Rex close", async () => {
 	const previous = process.env.PI_CODING_AGENT_DIR
 	const previousSession = process.env.REX_SESSION
+	const previousBlock = process.env.REX_BLOCK
 	const root = testDirectory()
 	process.env.PI_CODING_AGENT_DIR = root
-	process.env.REX_SESSION = "test-session"
+	delete process.env.REX_SESSION
+	process.env.REX_BLOCK = "block:parent"
 	const closeEntered = gate()
 	const closeAllowed = gate()
 	const calls: string[] = []
@@ -39,6 +41,16 @@ test("agent_stop rejects unsubmitted private input while awaiting Rex close", as
 					...pi,
 					async exec(command, args) {
 						if (command !== "rex") throw new Error(`Unexpected command ${command}`)
+
+						if (args[0] === "block" && args[1] === "inspect") {
+							return {
+								code: 0,
+								stderr: "",
+								killed: false,
+								truncated: false,
+								stdout: JSON.stringify({ session_id: "session:parent", block: { block_id: "block:parent" } }),
+							}
+						}
 
 						if (args[0] === "block") {
 							calls.push("process")
@@ -176,16 +188,21 @@ test("agent_stop rejects unsubmitted private input while awaiting Rex close", as
 
 		if (previousSession === undefined) delete process.env.REX_SESSION
 		else process.env.REX_SESSION = previousSession
+
+		if (previousBlock === undefined) delete process.env.REX_BLOCK
+		else process.env.REX_BLOCK = previousBlock
 	}
 })
 
 async function lifecycleFixture(options: { compact?: boolean; blocked?: Promise<void> } = {}) {
 	const previous = process.env.PI_CODING_AGENT_DIR
 	const previousSession = process.env.REX_SESSION
+	const previousBlock = process.env.REX_BLOCK
 	const root = testDirectory()
 	const mailboxRoot = join(root, "session-messages")
 	process.env.PI_CODING_AGENT_DIR = root
-	process.env.REX_SESSION = "test-session"
+	delete process.env.REX_SESSION
+	process.env.REX_BLOCK = "block:parent"
 	const closeEntered = gate()
 	const closeAllowed = gate()
 	const compactEntered = gate()
@@ -203,6 +220,16 @@ async function lifecycleFixture(options: { compact?: boolean; blocked?: Promise<
 					...pi,
 					async exec(command, args) {
 						if (command !== "rex") throw new Error(`Unexpected command ${command}`)
+
+						if (args[0] === "block" && args[1] === "inspect") {
+							return {
+								code: 0,
+								stderr: "",
+								killed: false,
+								truncated: false,
+								stdout: JSON.stringify({ session_id: "session:parent", block: { block_id: "block:parent" } }),
+							}
+						}
 
 						if (args[0] === "block") {
 							return {
@@ -317,6 +344,9 @@ async function lifecycleFixture(options: { compact?: boolean; blocked?: Promise<
 
 		if (previousSession === undefined) delete process.env.REX_SESSION
 		else process.env.REX_SESSION = previousSession
+
+		if (previousBlock === undefined) delete process.env.REX_BLOCK
+		else process.env.REX_BLOCK = previousBlock
 	}
 
 	return {

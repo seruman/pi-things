@@ -39,12 +39,22 @@ test.each([false, true])(
 		const savedBlock = process.env.REX_BLOCK
 		process.env.REX_BLOCK = "block:parent"
 		process.env.PI_CODING_AGENT_DIR = root
-		process.env.REX_SESSION = "test-session"
+		Reflect.deleteProperty(process.env, "REX_SESSION")
 		const blocks = new Map<string, RunHandle>()
 		let blockCounter = 0
 
 		const exec: ParentHost["exec"] = async (command, args) => {
 			expect(command).toBe("rex")
+
+			if (args[0] === "block" && args[1] === "inspect") {
+				return {
+					code: 0,
+					stderr: "",
+					killed: false,
+					truncated: false,
+					stdout: JSON.stringify({ session_id: "session:parent", block: { block_id: "block:parent" } }),
+				}
+			}
 
 			if (args[4] === "session.view") {
 				return {

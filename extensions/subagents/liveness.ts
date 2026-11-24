@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process"
 import { createInterface } from "node:readline"
 import { z } from "zod"
+import { resolveRexSession } from "../lib/rex"
 import { type Exec, readProcess } from "./rex"
 
 type ProcessStatus = Awaited<ReturnType<typeof readProcess>>
@@ -57,7 +58,7 @@ export class RexLiveness {
 	private disconnect?: () => void
 	private retry?: ReturnType<typeof setTimeout>
 	private retryDelay = 1000
-	private session?: string
+	private block?: string
 	private onChange: () => void = () => {}
 
 	constructor(
@@ -65,18 +66,18 @@ export class RexLiveness {
 		private readonly watch: WatchRexEvents = watchRexEvents,
 	) {}
 
-	start(onChange: () => void): void {
+	async start(onChange: () => void): Promise<void> {
 		this.stop()
-		this.session = process.env.REX_SESSION
+		this.block = process.env.REX_BLOCK?.trim()
 
-		if (!this.session) return
+		if (!this.block) return
 		this.active = true
 		this.onChange = onChange
-		this.connect()
+		await this.connect()
 	}
 
-	private connect(): void {
-		if (!this.active || !this.session) return
+	private async connect(): Promise<void> {
+		if (!this.active || !this.block) return
 		const generation = ++this.generation
 
 		const disconnected = () => {
@@ -87,14 +88,17 @@ export class RexLiveness {
 			this.healthy = false
 			this.observations.clear()
 			this.onChange()
-			this.retry = setTimeout(() => this.connect(), this.retryDelay)
+			this.retry = setTimeout(() => void this.connect(), this.retryDelay)
 			this.retry.unref()
 			this.retryDelay = Math.min(this.retryDelay * 2, 30_000)
 		}
 
 		try {
+			const session = await resolveRexSession(this.exec, this.block)
+
+			if (!this.active || generation !== this.generation) return
 			this.disconnect = this.watch(
-				this.session,
+				session,
 				(line) => {
 					if (!this.active || generation !== this.generation) return
 					let parsed: ReturnType<typeof eventSchema.safeParse>
@@ -105,7 +109,7 @@ export class RexLiveness {
 						return
 					}
 
-					if (!parsed.success || parsed.data.payload.session_id !== this.session) return
+					if (!parsed.success || parsed.data.payload.session_id !== session) return
 					this.healthy = true
 					this.retryDelay = 1000
 					const event = parsed.data.payload.event

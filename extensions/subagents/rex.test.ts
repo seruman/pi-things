@@ -41,6 +41,17 @@ let windows: {
 }[]
 
 const exec: Exec = async (_command, argv, signal) => {
+	if (argv[0] === "block" && argv[1] === "inspect") {
+		expect(argv).toEqual(["block", "inspect", "block:parent", "--json"])
+
+		return {
+			code: 0,
+			stderr: "",
+			stdout: JSON.stringify({ session_id: "session:parent", block: { block_id: "block:parent" } }),
+		}
+	}
+
+	expect(argv[3]).toBe("session:parent")
 	const method = argv[4]!
 	const args = requestSchema.parse(JSON.parse(argv[5]!))
 	calls.push({ method, args, signal })
@@ -75,7 +86,7 @@ const exec: Exec = async (_command, argv, signal) => {
 beforeEach(() => {
 	savedSession = process.env.REX_SESSION
 	savedBlock = process.env.REX_BLOCK
-	process.env.REX_SESSION = "session:parent"
+	Reflect.deleteProperty(process.env, "REX_SESSION")
 	process.env.REX_BLOCK = "block:parent"
 	calls = []
 	failMinimize = false
@@ -100,28 +111,32 @@ afterEach(() => {
 	else process.env.REX_BLOCK = savedBlock
 })
 
-test("creates directly in Pi's window without focus, then immediately minimizes", async () => {
-	expect(await newBlock(exec, "/project", "abc123", ["pi", "prompt"])).toBe("block:child")
-	expect(calls.map(({ method }) => method)).toEqual(["session.view", "session.new_layer", "session.set_layer_state"])
-	expect(calls[1]?.args).toEqual({
-		session_id: "session:parent",
-		window_id: "window:parent",
-		bounds: [0.1, 0.1, 0.8, 0.8],
-		focus: false,
-		layout: {
-			block: {
-				flavor: "com.superlogical.terminal.shell",
-				label: "subagent abc123",
-				options: { cwd: "/project", command: ["pi", "prompt"] },
+test.each([undefined, "session:stale"])(
+	"creates in the resolved session without focus, then minimizes (REX_SESSION: %s)",
+	async (legacySession) => {
+		if (legacySession) process.env.REX_SESSION = legacySession
+		expect(await newBlock(exec, "/project", "abc123", ["pi", "prompt"])).toBe("block:child")
+		expect(calls.map(({ method }) => method)).toEqual(["session.view", "session.new_layer", "session.set_layer_state"])
+		expect(calls[1]?.args).toEqual({
+			session_id: "session:parent",
+			window_id: "window:parent",
+			bounds: [0.1, 0.1, 0.8, 0.8],
+			focus: false,
+			layout: {
+				block: {
+					flavor: "com.superlogical.terminal.shell",
+					label: "subagent abc123",
+					options: { cwd: "/project", command: ["pi", "prompt"] },
+				},
 			},
-		},
-	})
-	expect(calls[2]?.args).toEqual({
-		session_id: "session:parent",
-		layer_id: "layer:child",
-		state: "minimized",
-	})
-})
+		})
+		expect(calls[2]?.args).toEqual({
+			session_id: "session:parent",
+			layer_id: "layer:child",
+			state: "minimized",
+		})
+	},
+)
 
 test.each(["missing env", "unplaced block"])("does not fall back to the active window: %s", async (reason) => {
 	if (reason === "missing env") Reflect.deleteProperty(process.env, "REX_BLOCK")

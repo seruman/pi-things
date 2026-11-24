@@ -150,6 +150,16 @@ const exec: Exec = async (command, args, signal) => {
 	signal?.throwIfAborted()
 	expect(command).toBe("rex")
 
+	if (args[0] === "block" && args[1] === "inspect") {
+		expect(args).toEqual(["block", "inspect", "block:parent", "--json"])
+
+		return {
+			code: 0,
+			stderr: "",
+			stdout: JSON.stringify({ session_id: "session:parent", block: { block_id: "block:parent" } }),
+		}
+	}
+
 	if (args[0] === "block" && args[4] === "process") {
 		onProcess?.()
 		const block = blocks.get(args[3] ?? "")
@@ -239,7 +249,7 @@ beforeEach(() => {
 	savedEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]))
 	root = mkdtempSync(join(tmpdir(), "subagents-test-"))
 	process.env.PI_CODING_AGENT_DIR = root
-	process.env.REX_SESSION = "session:parent"
+	Reflect.deleteProperty(process.env, "REX_SESSION")
 	process.env.REX_BLOCK = "block:parent"
 	Reflect.deleteProperty(process.env, "PI_SUBAGENT_RUN_DIR")
 	vi.useFakeTimers()

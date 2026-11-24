@@ -34,13 +34,21 @@ function user(text: string): SessionEntry {
 }
 
 describe("Rex", () => {
-	test("needs a Rex terminal with a session and block", () => {
-		expect(rexFromEnv({ TERM_PROGRAM: "rex", REX_SESSION: "session:a", REX_BLOCK: "block:b" })).toEqual({
+	test.each([undefined, "session:stale", " "])("resolves the pane's session (REX_SESSION: %s)", async (legacy) => {
+		const { exec, calls } = fakeRex(async () => {})
+		expect(await rexFromEnv({ TERM_PROGRAM: "rex", REX_SESSION: legacy, REX_BLOCK: "block:b" }, { exec })).toEqual({
 			session: "session:a",
 			block: "block:b",
 		})
-		expect(rexFromEnv({ TERM_PROGRAM: "ghostty", REX_SESSION: "session:a", REX_BLOCK: "block:b" })).toBeUndefined()
-		expect(rexFromEnv({ TERM_PROGRAM: "rex", REX_SESSION: " ", REX_BLOCK: "block:b" })).toBeUndefined()
+		expect(calls).toEqual([["rex", "block", "inspect", "block:b", "--json"]])
+	})
+
+	test("needs a Rex terminal and a block, without querying the focused session", async () => {
+		const { exec } = fakeRex(async () => {})
+		expect(await rexFromEnv({ TERM_PROGRAM: "ghostty", REX_BLOCK: "block:b" }, { exec })).toBeUndefined()
+		expect(await rexFromEnv({ TERM_PROGRAM: "rex", REX_BLOCK: " " }, { exec })).toBeUndefined()
+		expect(await rexFromEnv({ TERM_PROGRAM: "rex", REX_SESSION: "session:a" }, { exec })).toBeUndefined()
+		expect(exec).not.toHaveBeenCalled()
 	})
 
 	test("asks for a floating terminal layer in the caller's window", () => {
@@ -107,6 +115,10 @@ function fakeRex(onWait: () => Promise<void>, waited = 0) {
 	const exec = mock(async (command: string, args: string[]) => {
 		calls.push([command, ...args])
 
+		if (args[0] === "block" && args[1] === "inspect") {
+			return ok(JSON.stringify({ session_id: "session:a", block: { block_id: "block:b" } }))
+		}
+
 		if (args[0] === "session") return ok(JSON.stringify(windows))
 
 		if (args[0] === "wait") {
@@ -152,7 +164,9 @@ describe("a review", () => {
 		const pi: Host = { exec, sendUserMessage: (message, options) => void sent.push([String(message), options]) }
 		const { ctx } = session(false)
 
-		const { done } = await open(pi, ctx, { session: "session:a", block: "block:b" }, review)
+		const rex = await rexFromEnv({ TERM_PROGRAM: "rex", REX_BLOCK: "block:b" }, pi)
+		expect(rex).toBeDefined()
+		const { done } = await open(pi, ctx, rex!, review)
 		await done
 
 		expect(sent).toEqual([
@@ -160,6 +174,11 @@ describe("a review", () => {
 		])
 		const methods = calls.filter((c) => c[1] === "api").map((c) => c[5])
 		expect(methods).toEqual(["session.new_layer", "session.close_layer", "session.focus_block"])
+
+		for (const call of calls.filter((c) => c[1] === "api")) {
+			expect(call[4]).toBe("session:a")
+			expect(JSON.parse(call[6]).session_id).toBe("session:a")
+		}
 
 		expect(calls.find((c) => c[1] === "wait")).toEqual(["rex", "wait", "-s", "session:a", "block:m"])
 
