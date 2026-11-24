@@ -14,5 +14,6 @@
     "extensions/model-router/index.ts",
     "extensions/*/fixtures/*.ts"
   ],
-  "ignore": ["extensions/poteto/vendor/**", "tools/oxlint/**"]
+  "ignore": ["extensions/poteto/vendor/**", "tools/oxlint/**"],
+  "ignoreBinaries": ["rex"]
 }
